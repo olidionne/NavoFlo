@@ -1,14 +1,44 @@
 # NavoFlo
 
-Official static landing page for **NavoFlo** — *CAD to Production, Simplified.*
+Official bilingual static landing page for **NavoFlo**.
+
+**Du CAD à la production, simplifié.**  
+**CAD to Production, Simplified.**
+
+## Languages
+
+- French (default): https://navoflo.com/
+- English: https://navoflo.com/en/
+
+## Structure
+
+```text
+NavoFlo/
+├── public/
+│   ├── index.html
+│   ├── en/
+│   │   └── index.html
+│   ├── css/
+│   │   └── styles.css
+│   ├── js/
+│   │   └── main.js
+│   ├── favicon.svg
+│   ├── robots.txt
+│   └── sitemap.xml
+├── README.md
+└── wrangler.jsonc
+```
 
 ## Deployment
 
-Cloudflare Workers Static Assets serves `./public` using the existing `wrangler.jsonc` configuration.
+This repository is designed to deploy through Cloudflare Workers Static Assets.
+
+Wrangler serves the `./public` directory:
 
 ```bash
 npx wrangler deploy
 ```
 
-Production: https://navoflo.com  
-Contact: contact@navoflo.com
+## Contact
+
+contact@navoflo.com
