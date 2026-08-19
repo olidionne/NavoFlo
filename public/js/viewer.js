@@ -78,9 +78,23 @@ let baseMaterials = new Set();
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const clipPlane = new THREE.Plane(new THREE.Vector3(1,0,0), 0);
-const blackEdgeMaterial = new THREE.LineBasicMaterial({color:0x090b0d, transparent:true, opacity:0.96});
-const selectedEdgeMaterial = new THREE.LineBasicMaterial({color:0x35d39a, depthTest:false});
-const hoverEdgeMaterial = new THREE.LineBasicMaterial({color:0x84eac8, depthTest:false, transparent:true, opacity:0.95});
+const blackEdgeMaterial = new THREE.LineBasicMaterial({
+  color:0x090b0d,
+  transparent:false,
+  depthTest:true,
+  depthWrite:false
+});
+const selectedEdgeMaterial = new THREE.LineBasicMaterial({
+  color:0x35d39a,
+  depthTest:true,
+  depthWrite:false
+});
+const hoverEdgeMaterial = new THREE.LineBasicMaterial({
+  color:0x84eac8,
+  depthTest:true,
+  depthWrite:false,
+  transparent:false
+});
 const hoverFaceMaterial = new THREE.MeshBasicMaterial({
   color:0x7ce4c1, transparent:true, opacity:0.18, side:THREE.DoubleSide,
   depthTest:true, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
@@ -591,14 +605,32 @@ function buildExactStepScene(result) {
 function makeCadDefinition(source) {
   const geometry=new THREE.BufferGeometry();
   geometry.setAttribute('position',new THREE.BufferAttribute(source.positions,3));
-  if (source.normals?.length) geometry.setAttribute('normal',new THREE.BufferAttribute(source.normals,3));
-  else geometry.computeVertexNormals();
+
+  const normalsAreUsable =
+    source.normals?.length === source.positions?.length &&
+    source.normals.length >= 3 &&
+    Array.from(source.normals).every(Number.isFinite);
+
+  if (normalsAreUsable) {
+    geometry.setAttribute('normal',new THREE.BufferAttribute(source.normals,3));
+    geometry.normalizeNormals();
+  } else {
+    geometry.computeVertexNormals();
+    geometry.normalizeNormals();
+  }
+
   if (source.indices?.length) geometry.setIndex(new THREE.BufferAttribute(source.indices,1));
   geometry.computeBoundingBox();
 
   const color=source.color ? new THREE.Color(source.color.r,source.color.g,source.color.b) : new THREE.Color(0xc5c9ca);
   const material=new THREE.MeshStandardMaterial({
-    color, metalness:0.08, roughness:0.56, side:THREE.DoubleSide,
+    color,
+    metalness:0.06,
+    roughness:0.6,
+    side:THREE.DoubleSide,
+    polygonOffset:true,
+    polygonOffsetFactor:1,
+    polygonOffsetUnits:1,
     clippingPlanes:clipEnabled?[clipPlane]:null
   });
   baseMaterials.add(material);
@@ -789,6 +821,23 @@ function screenDistance(point,clientX,clientY,rect) {
   return Math.hypot(sx-clientX,sy-clientY);
 }
 
+function getFrontSurfaceDistance() {
+  const hit=raycaster.intersectObjects(surfaceMeshes,false)[0];
+  return hit ? hit.distance : Infinity;
+}
+
+function isPickVisible(hitDistance,frontSurfaceDistance,kind='edge') {
+  if (!Number.isFinite(frontSurfaceDistance)) return true;
+
+  // Topology edges/vertices live on the surface itself, but their ray hit
+  // can be a fraction behind the triangle because the Line/Points picker
+  // uses a tolerance radius. Give only a small model-relative allowance.
+  const baseTolerance=Math.max(modelSize*0.0015,1e-7);
+  const tolerance=kind==='vertex' ? baseTolerance*1.25 : baseTolerance;
+
+  return hitDistance <= frontSurfaceDistance + tolerance;
+}
+
 function pickSelectionCandidate(clientX,clientY) {
   const rect=setRayFromClient(clientX,clientY);
 
@@ -803,18 +852,27 @@ function pickSelectionCandidate(clientX,clientY) {
 
   let vertexCandidate=null,edgeCandidate=null,faceCandidate=null;
 
+  // This is the opaque surface physically closest to the camera on the
+  // current mouse ray. Edges/vertices farther behind it are not clickable.
+  const frontSurfaceHit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
+  const frontSurfaceDistance=frontSurfaceHit?.distance ?? Infinity;
+
   if (wantVertex) {
-    const hit=raycaster.intersectObjects(vertexObjects,false)[0];
-    if (hit) {
+    const hits=raycaster.intersectObjects(vertexObjects,false).slice(0,8);
+    for (const hit of hits) {
+      if (!isPickVisible(hit.distance,frontSurfaceDistance,'vertex')) continue;
       const selection=selectionFromVertex(hit);
       const px=screenDistance(selection.point,clientX,clientY,rect);
-      vertexCandidate={selection,px,depth:hit.distance};
+      if (!vertexCandidate || px<vertexCandidate.px) {
+        vertexCandidate={selection,px,depth:hit.distance};
+      }
     }
   }
 
   if (wantEdge) {
-    const hits=raycaster.intersectObjects(edgeObjects,false).slice(0,8);
+    const hits=raycaster.intersectObjects(edgeObjects,false).slice(0,12);
     for (const hit of hits) {
+      if (!isPickVisible(hit.distance,frontSurfaceDistance,'edge')) continue;
       const selection=selectionFromEdge(hit);
       const px=screenDistance(selection.point,clientX,clientY,rect);
       if (!edgeCandidate || px<edgeCandidate.px || (Math.abs(px-edgeCandidate.px)<0.5&&hit.distance<edgeCandidate.depth)) {
@@ -823,12 +881,9 @@ function pickSelectionCandidate(clientX,clientY) {
     }
   }
 
-  if (wantFace) {
-    const hit=raycaster.intersectObjects(surfaceMeshes,false)[0];
-    if (hit) {
-      const selection=selectionFromFace(hit);
-      if (selection) faceCandidate={selection,px:0,depth:hit.distance};
-    }
+  if (wantFace && frontSurfaceHit) {
+    const selection=selectionFromFace(frontSurfaceHit);
+    if (selection) faceCandidate={selection,px:0,depth:frontSurfaceHit.distance};
   }
 
   if (selectionMode==='vertex') return vertexCandidate?.selection||null;
@@ -878,7 +933,13 @@ function highlightPreselection(s) {
     const radius=Math.max(modelSize*0.0018,0.0001);
     const sphere=new THREE.Mesh(
       new THREE.SphereGeometry(radius,14,10),
-      new THREE.MeshBasicMaterial({color:0x84eac8,depthTest:false,transparent:true,opacity:0.9})
+      new THREE.MeshBasicMaterial({
+        color:0x84eac8,
+        depthTest:true,
+        depthWrite:false,
+        transparent:true,
+        opacity:0.9
+      })
     );
     sphere.position.copy(s.point);
     sphere.renderOrder=28;
@@ -910,6 +971,9 @@ function collectSelectionCandidates(clientX,clientY) {
   const candidates=[];
   const seen=new Set();
 
+  const frontSurfaceHit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
+  const frontSurfaceDistance=frontSurfaceHit?.distance ?? Infinity;
+
   const push=(selection,score,depth)=>{
     if(!selection)return;
     const key=selectionKey(selection);
@@ -925,19 +989,23 @@ function collectSelectionCandidates(clientX,clientY) {
     return candidates.sort((a,b)=>a.depth-b.depth).map(x=>x.selection);
   }
 
-  for(const hit of raycaster.intersectObjects(vertexObjects,false).slice(0,6)) {
+  for(const hit of raycaster.intersectObjects(vertexObjects,false).slice(0,8)) {
+    if(!isPickVisible(hit.distance,frontSurfaceDistance,'vertex'))continue;
     const selection=selectionFromVertex(hit);
     push(selection,screenDistance(selection.point,clientX,clientY,rect)-4,hit.distance);
   }
 
-  for(const hit of raycaster.intersectObjects(edgeObjects,false).slice(0,12)) {
+  for(const hit of raycaster.intersectObjects(edgeObjects,false).slice(0,16)) {
+    if(!isPickVisible(hit.distance,frontSurfaceDistance,'edge'))continue;
     const selection=selectionFromEdge(hit);
     push(selection,screenDistance(selection.point,clientX,clientY,rect)-2,hit.distance);
   }
 
-  for(const hit of raycaster.intersectObjects(surfaceMeshes,false).slice(0,8)) {
-    const selection=selectionFromFace(hit);
-    push(selection,6,hit.distance);
+  // Keep only the physically front-most face in Select Other by default.
+  // Hidden/back faces should not leak through an opaque solid.
+  if(frontSurfaceHit) {
+    const selection=selectionFromFace(frontSurfaceHit);
+    push(selection,6,frontSurfaceHit.distance);
   }
 
   return candidates
@@ -1119,11 +1187,17 @@ function rebuildSelectionHighlights() {
 function highlightSelection(s,index) {
   const color=index===0?0x35d39a:0x9cefd4;
   if (s.kind==='edge') {
-    const line=new THREE.Line(s.object.geometry.clone(),new THREE.LineBasicMaterial({color,depthTest:false}));
+    const line=new THREE.Line(
+      s.object.geometry.clone(),
+      new THREE.LineBasicMaterial({color,depthTest:true,depthWrite:false})
+    );
     line.matrix.copy(s.object.matrixWorld);line.matrixAutoUpdate=false;line.renderOrder=30;selectionRoot.add(line);
   } else if (s.kind==='vertex'||s.kind==='point') {
     const radius=Math.max(modelSize*0.0024,0.0001);
-    const sphere=new THREE.Mesh(new THREE.SphereGeometry(radius,16,12),new THREE.MeshBasicMaterial({color,depthTest:false}));
+    const sphere=new THREE.Mesh(
+      new THREE.SphereGeometry(radius,16,12),
+      new THREE.MeshBasicMaterial({color,depthTest:true,depthWrite:false})
+    );
     sphere.position.copy(s.point);sphere.renderOrder=31;selectionRoot.add(sphere);
   } else if (s.kind==='face') {
     const face=s.def.facesById.get(Number(s.elementId));
