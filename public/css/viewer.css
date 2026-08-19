@@ -654,3 +654,76 @@
 .cad-workspace.is-fullscreen .custom-properties-list dd{
   font-size:11px;
 }
+
+
+/* V2.7 — visual polish */
+.measure-card-head{
+  padding-right:34px!important;
+}
+
+.measure-card-v2>button{
+  top:9px!important;
+  right:9px!important;
+  width:25px!important;
+  height:25px!important;
+  display:grid;
+  place-items:center;
+  border:1px solid rgba(255,255,255,.07)!important;
+  background:#0a1117!important;
+  color:#758791!important;
+  font-size:14px;
+  line-height:1;
+}
+
+.measure-card-v2>button:hover{
+  border-color:rgba(53,211,154,.3)!important;
+  color:#35d39a!important;
+  background:rgba(53,211,154,.06)!important;
+}
+
+/* Keep the EXACT STEP badge clear of the reset control. */
+.measure-card-head span:last-child{
+  margin-left:auto;
+}
+
+/* Consistent dark scrollbars instead of the bright browser default. */
+.properties-drawer,
+.step-tree,
+.cad-toolbar{
+  scrollbar-color:#33434d transparent;
+  scrollbar-width:thin;
+  overscroll-behavior:contain;
+}
+
+.properties-drawer{
+  overflow-x:hidden!important;
+}
+
+.properties-drawer::-webkit-scrollbar,
+.step-tree::-webkit-scrollbar,
+.cad-toolbar::-webkit-scrollbar{
+  width:8px;
+  height:8px;
+}
+
+.properties-drawer::-webkit-scrollbar-track,
+.step-tree::-webkit-scrollbar-track,
+.cad-toolbar::-webkit-scrollbar-track{
+  background:transparent;
+}
+
+.properties-drawer::-webkit-scrollbar-thumb,
+.step-tree::-webkit-scrollbar-thumb,
+.cad-toolbar::-webkit-scrollbar-thumb{
+  border:2px solid transparent;
+  border-radius:999px;
+  background:#33434d;
+  background-clip:padding-box;
+}
+
+.properties-drawer::-webkit-scrollbar-thumb:hover,
+.step-tree::-webkit-scrollbar-thumb:hover,
+.cad-toolbar::-webkit-scrollbar-thumb:hover{
+  background:#465a66;
+  background-clip:padding-box;
+}
