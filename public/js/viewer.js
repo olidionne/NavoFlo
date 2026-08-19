@@ -213,10 +213,20 @@ function bindUI() {
   // SolidWorks-like navigation: wheel = zoom, MMB drag = rotate, Ctrl+MMB = pan.
   E.canvas.addEventListener('pointerdown', event => {
     if (event.button === 0 || event.button === 1) closeSelectOther();
+
     if (event.button === 1) {
       middleMouseDown = true;
       clearPreselection();
-      controls.mouseButtons.MIDDLE = event.ctrlKey ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+
+      if (event.ctrlKey) {
+        // Ctrl + MMB = pan. Do not change the current target while panning.
+        controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
+      } else {
+        // SolidWorks-like behavior:
+        // every rotation starts around the model's absolute geometric center.
+        lockRotationPivotToModelCenter();
+        controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+      }
     }
   }, true);
   addEventListener('pointerup', event => {
@@ -335,6 +345,28 @@ function syncFullscreenState() {
     resize();
     requestAnimationFrame(resize);
   });
+}
+
+
+function getModelRotationCenter() {
+  // NavoFlo recenters the loaded model, but calculate from the current
+  // world bounding box so the pivot remains correct even after future changes.
+  if (!currentModel) return new THREE.Vector3(0,0,0);
+
+  const box = new THREE.Box3().setFromObject(modelRoot);
+  if (box.isEmpty()) return new THREE.Vector3(0,0,0);
+
+  return box.getCenter(new THREE.Vector3());
+}
+
+function lockRotationPivotToModelCenter() {
+  if (!currentModel || !controls) return;
+
+  const center = getModelRotationCenter();
+
+  // Keep camera where it is; only change the orbit pivot.
+  controls.target.copy(center);
+  controls.update();
 }
 
 function resize() {
@@ -1183,7 +1215,7 @@ function fitCamera(view='iso') {
   camera.position.copy(dir.multiplyScalar(distance));
   camera.up.set(0,view==='top'?0:1,view==='top'?-1:0);
   camera.near=Math.max(distance/1000,.001);camera.far=Math.max(distance*100,1000);camera.updateProjectionMatrix();
-  controls.target.set(0,0,0);controls.update();
+  controls.target.copy(getModelRotationCenter());controls.update();
 }
 
 function fillProperties() {
