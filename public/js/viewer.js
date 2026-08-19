@@ -67,7 +67,7 @@ let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoo
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
 let currentStats = null, currentStepHeader = null, currentStepResult = null, currentStepProperties = [];
 let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
-let selectionMode = 'auto', measureEnabled = false, selected = [], currentMeasureResult = null;
+let selectionMode = 'auto', measureEnabled = false, selected = [], currentMeasureResult = null, selectionHighlightMap = new Map();
 let edgesVisible = true, clipEnabled = false;
 let modelBounds = null, modelSize = 1;
 let pointerDown = null, hoverRAF = 0, preselected = null, middleMouseDown = false, selectOtherMenu = null, rightPointerDown = null, rightDragged = false, suppressRightContext = false;
@@ -111,8 +111,8 @@ const hoverFaceMaterial = new THREE.MeshBasicMaterial({
 const selectionFaceMaterial = new THREE.MeshBasicMaterial({
   color:0x2f80ed,
   transparent:true,
-  opacity:0.38,
-  side:THREE.FrontSide,
+  opacity:0.42,
+  side:THREE.DoubleSide,
   depthTest:true,
   polygonOffset:true,
   polygonOffsetFactor:-2,
@@ -478,6 +478,7 @@ function resize() {
 
 function render() {
   controls?.update();
+  updatePersistentSelectionVisibility();
   renderer?.render(scene,camera);
   updateDimensionLabelPosition();
 }
@@ -1221,9 +1222,25 @@ function selectionFromFace(hit) {
     id=face?.id;
   }
   if (id == null) return null;
+  let viewNormal=null;
+
+  if(hit.face?.normal){
+    viewNormal=hit.face.normal.clone().transformDirection(o.matrixWorld).normalize();
+    const towardCamera=camera.position.clone().sub(hit.point).normalize();
+    if(viewNormal.dot(towardCamera)<0)viewNormal.negate();
+  }else{
+    viewNormal=camera.position.clone().sub(hit.point).normalize();
+  }
+
   return {
-    kind:'face',geometryId:o.userData.geometryId,elementId:Number(id),
-    point:hit.point.clone(),object:o,def,transform:o.matrixWorld.toArray()
+    kind:'face',
+    geometryId:o.userData.geometryId,
+    elementId:Number(id),
+    point:hit.point.clone(),
+    viewNormal,
+    object:o,
+    def,
+    transform:o.matrixWorld.toArray()
   };
 }
 
@@ -1327,6 +1344,92 @@ function getAngleSelectionVector(selection) {
   return null;
 }
 
+function getFaceTriangleNormals(selection) {
+  if(selection?.kind!=='face'||!selection.def?.facesById)return [];
+
+  const face=selection.def.facesById.get(Number(selection.elementId));
+  const geometry=selection.def.geometry;
+  if(!face||!geometry?.index)return [];
+
+  const positions=geometry.getAttribute('position');
+  const indices=geometry.index.array;
+  const matrix=selection.object.matrixWorld;
+  const normals=[];
+
+  for(let offset=face.firstIndex;offset<face.firstIndex+face.indexCount;offset+=3){
+    const ia=indices[offset];
+    const ib=indices[offset+1];
+    const ic=indices[offset+2];
+    if(ia==null||ib==null||ic==null)continue;
+
+    const a=new THREE.Vector3().fromBufferAttribute(positions,ia).applyMatrix4(matrix);
+    const b=new THREE.Vector3().fromBufferAttribute(positions,ib).applyMatrix4(matrix);
+    const c=new THREE.Vector3().fromBufferAttribute(positions,ic).applyMatrix4(matrix);
+
+    const normal=b.clone().sub(a).cross(c.clone().sub(a));
+    if(normal.lengthSq()<=1e-20)continue;
+    normals.push(normal.normalize());
+  }
+
+  return normals;
+}
+
+function isSelectedFacePlanar(selection) {
+  const normals=getFaceTriangleNormals(selection);
+  if(!normals.length)return false;
+
+  const reference=normals[0];
+  return normals.every(normal=>Math.abs(reference.dot(normal))>=0.9985);
+}
+
+function isSelectedEdgeLinear(selection) {
+  if(selection?.kind!=='edge'||!selection.object?.geometry)return false;
+
+  const attr=selection.object.geometry.getAttribute('position');
+  if(!attr||attr.count<2)return false;
+
+  let reference=null;
+
+  for(let i=0;i<attr.count-1;i++){
+    const a=new THREE.Vector3().fromBufferAttribute(attr,i);
+    const b=new THREE.Vector3().fromBufferAttribute(attr,i+1);
+    const direction=b.sub(a);
+
+    if(direction.lengthSq()<=1e-20)continue;
+    direction.normalize();
+
+    if(!reference){
+      reference=direction;
+      continue;
+    }
+
+    if(Math.abs(reference.dot(direction))<0.9985)return false;
+  }
+
+  return Boolean(reference);
+}
+
+function isSmartAngleEntity(selection) {
+  if(selection?.kind==='face')return isSelectedFacePlanar(selection);
+  if(selection?.kind==='edge')return isSelectedEdgeLinear(selection);
+  return false;
+}
+
+function getSmartAngleResult(a,b) {
+  if(!isSmartAngleEntity(a)||!isSmartAngleEntity(b))return null;
+
+  const result=measureAngleFallback(a,b);
+  if(!result?.ok||!Number.isFinite(result.value))return null;
+
+  const minAngle=THREE.MathUtils.degToRad(0.25);
+
+  // Parallel / same-axis entities stay in the normal Smart distance/center
+  // workflow. Anything genuinely nonparallel becomes an angular dimension.
+  if(result.value<=minAngle)return null;
+
+  return result;
+}
+
 function measureAngleFallback(a,b) {
   const va=getAngleSelectionVector(a);
   const vb=getAngleSelectionVector(b);
@@ -1412,19 +1515,37 @@ async function acceptSelection(selection, event={}) {
       E.selectionSummary.textContent=T.selectSecond;
     } else if (selected.length===2) {
       const mode=E.measureType.value;
+      let result;
 
-      let result=await workerRequest('measure',{
-        a:serialSelection(selected[0]),
-        b:serialSelection(selected[1]),
-        mode
-      });
+      if(mode==='smart'){
+        const smartAngle=getSmartAngleResult(selected[0],selected[1]);
 
-      // OCCT's exact angle contract is intentionally strict. For common CAD
-      // cases it rejects parallel edges, face↔edge pairs and some non-
-      // intersecting line pairs. NavoFlo falls back to the visible geometric
-      // directions/normals so the Angle tool remains useful like eDrawings.
-      if(mode==='angle'&&!result?.ok){
-        result=measureAngleFallback(selected[0],selected[1])||result;
+        if(smartAngle){
+          const exactAngle=await workerRequest('measure',{
+            a:serialSelection(selected[0]),
+            b:serialSelection(selected[1]),
+            mode:'angle'
+          });
+
+          result=exactAngle?.ok ? exactAngle : smartAngle;
+        }else{
+          result=await workerRequest('measure',{
+            a:serialSelection(selected[0]),
+            b:serialSelection(selected[1]),
+            mode:'smart'
+          });
+        }
+
+      }else{
+        result=await workerRequest('measure',{
+          a:serialSelection(selected[0]),
+          b:serialSelection(selected[1]),
+          mode
+        });
+
+        if(mode==='angle'&&!result?.ok){
+          result=measureAngleFallback(selected[0],selected[1])||result;
+        }
       }
 
       showPairExact(result);
@@ -1441,14 +1562,58 @@ function serialSelection(s) {
 }
 function selectionKey(s){return `${s.kind}:${s.geometryId||''}:${s.elementId??''}:${s.object?.uuid||''}`}
 
-function rebuildSelectionHighlights() {
-  clearGroup(selectionRoot);
-  selected.forEach((s,index)=>highlightSelection(s,index));
+function removeSelectionHighlight(key) {
+  const group=selectionHighlightMap.get(key);
+  if(!group)return;
+
+  selectionHighlightMap.delete(key);
+  selectionRoot.remove(group);
+  clearGroup(group);
 }
-function highlightSelection(s,index) {
-  // Every committed measurement selection is the same persistent CAD blue.
-  // Hover/preselection remains a different color so the user always knows
-  // what is already locked vs. what is merely under the mouse.
+
+function rebuildSelectionHighlights() {
+  const activeKeys=new Set(selected.map(selectionKey));
+
+  for(const key of [...selectionHighlightMap.keys()]){
+    if(!activeKeys.has(key))removeSelectionHighlight(key);
+  }
+
+  // Keep already-committed highlights untouched. Selecting entity #2 no
+  // longer destroys/recreates entity #1, so its blue state is persistent.
+  selected.forEach((selection,index)=>{
+    const key=selectionKey(selection);
+    if(selectionHighlightMap.has(key))return;
+
+    const group=new THREE.Group();
+    group.userData.selectionKey=key;
+    group.userData.selectionKind=selection.kind;
+
+    highlightSelection(selection,index,group);
+
+    selectionHighlightMap.set(key,group);
+    selectionRoot.add(group);
+  });
+}
+
+function updatePersistentSelectionVisibility() {
+  for(const selection of selected){
+    if(selection.kind!=='face')continue;
+
+    const group=selectionHighlightMap.get(selectionKey(selection));
+    if(!group)continue;
+
+    const normal=selection.viewNormal;
+    if(!normal?.isVector3){
+      group.visible=true;
+      continue;
+    }
+
+    const toCamera=camera.position.clone().sub(selection.point);
+    group.visible=toCamera.dot(normal)>=0;
+  }
+}
+
+function highlightSelection(s,index,parent=selectionRoot) {
   const color=0x2f80ed;
   const faceColor=0x2f80ed;
 
@@ -1457,27 +1622,43 @@ function highlightSelection(s,index) {
       s.object.geometry.clone(),
       new THREE.LineBasicMaterial({color,depthTest:true,depthWrite:false})
     );
-    line.matrix.copy(s.object.matrixWorld);line.matrixAutoUpdate=false;line.renderOrder=30;selectionRoot.add(line);
+    line.matrix.copy(s.object.matrixWorld);
+    line.matrixAutoUpdate=false;
+    line.renderOrder=30;
+    parent.add(line);
+
   } else if (s.kind==='vertex'||s.kind==='point') {
     const radius=Math.max(modelSize*0.0024,0.0001);
     const sphere=new THREE.Mesh(
       new THREE.SphereGeometry(radius,16,12),
       new THREE.MeshBasicMaterial({color,depthTest:true,depthWrite:false})
     );
-    sphere.position.copy(s.point);sphere.renderOrder=31;selectionRoot.add(sphere);
+    sphere.position.copy(s.point);
+    sphere.renderOrder=31;
+    parent.add(sphere);
+
   } else if (s.kind==='face') {
     const face=s.def.facesById.get(Number(s.elementId));
     if (!face) return;
+
     const source=s.def.geometry;
     const g=new THREE.BufferGeometry();
     g.setAttribute('position',source.getAttribute('position'));
-    if (source.getAttribute('normal')) g.setAttribute('normal',source.getAttribute('normal'));
+
+    if (source.getAttribute('normal')){
+      g.setAttribute('normal',source.getAttribute('normal'));
+    }
+
     const srcIndex=source.index.array;
     const slice=srcIndex.slice(face.firstIndex,face.firstIndex+face.indexCount);
     g.setIndex(new THREE.BufferAttribute(new Uint32Array(slice),1));
+
     const mesh=new THREE.Mesh(g,selectionFaceMaterial.clone());
     mesh.material.color.setHex(faceColor);
-    mesh.matrix.copy(s.object.matrixWorld);mesh.matrixAutoUpdate=false;mesh.renderOrder=29;selectionRoot.add(mesh);
+    mesh.matrix.copy(s.object.matrixWorld);
+    mesh.matrixAutoUpdate=false;
+    mesh.renderOrder=29;
+    parent.add(mesh);
   }
 }
 
@@ -1500,6 +1681,7 @@ function toggleMeasure() {
 function clearSelections() {
   selected=[];
   currentMeasureResult=null;
+  selectionHighlightMap.clear();
   clearGroup(selectionRoot);
   clearGroup(measureOverlayRoot);
   clearDimensionLabel();
