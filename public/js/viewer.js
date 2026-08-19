@@ -103,7 +103,7 @@ const hoverFaceMaterial = new THREE.MeshBasicMaterial({
   depthTest:true, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
 });
 const selectionFaceMaterial = new THREE.MeshBasicMaterial({
-  color:0x35d39a, transparent:true, opacity:0.32, side:THREE.DoubleSide,
+  color:0x2f80ed, transparent:true, opacity:0.38, side:THREE.DoubleSide,
   depthTest:true, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
 });
 
@@ -269,9 +269,9 @@ function bindUI() {
         // Ctrl + MMB = pan. Do not change the current target while panning.
         controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
       } else {
-        // SolidWorks-like hybrid pivot:
-        // global view = model center; close-up = current zoom focus.
-        setSmartRotationPivot();
+        // Rotate around the feature currently under the mouse cursor.
+        // This lets the user zoom into a hole/corner and stay focused there.
+        setRotationPivotFromPointer(event.clientX,event.clientY);
         controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
       }
     }
@@ -428,43 +428,32 @@ function getModelRotationCenter() {
   return box.getCenter(new THREE.Vector3());
 }
 
-function setSmartRotationPivot() {
+function setRotationPivotFromPointer(clientX,clientY) {
   if (!currentModel || !controls || !camera) return;
 
-  const box = new THREE.Box3().setFromObject(modelRoot);
-  if (box.isEmpty()) return;
+  // SolidWorks-like behavior:
+  // the feature under the cursor becomes the rotation pivot.
+  setRayFromClient(clientX,clientY);
+  const hit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
 
-  const sphere = box.getBoundingSphere(new THREE.Sphere());
-  const center = sphere.center.clone();
-  const radius = Math.max(sphere.radius, 0.0001);
-
-  // Estimate the distance used by Fit. This lets us distinguish:
-  // - global/model view -> rotate about the absolute model center
-  // - close-up view      -> keep the focus created by zoom-to-cursor
-  const fov = THREE.MathUtils.degToRad(camera.fov);
-  const fittedDistance = (radius / Math.sin(fov / 2)) * 1.12;
-  const currentViewDistance = camera.position.distanceTo(center);
-  const zoomRatio = currentViewDistance / Math.max(fittedDistance, 0.0001);
-
-  // NavoFlo CAD zoom moves camera and target together, so camera-to-target
-  // distance deliberately stays stable. Camera-to-model distance is the
-  // reliable signal that the user is working in a close-up.
-  const closeUp = zoomRatio < 0.74;
-
-  // Prevent a pan or numerical drift from leaving the pivot somewhere far
-  // outside the model. A generous margin still allows corners/surfaces.
-  const targetZone = box.clone().expandByScalar(Math.max(modelSize * 0.18, radius * 0.18));
-  const localTargetIsValid = targetZone.containsPoint(controls.target);
-
-  if (closeUp && localTargetIsValid) {
-    // Do nothing: retain the current zoom/focus pivot.
-    // This is what allows rotating around a corner, hole or local feature.
+  if(hit){
+    controls.target.copy(hit.point);
+    controls.update();
     return;
   }
 
-  // Global view: recover the stable absolute center so the model does not
-  // wander out of the viewport during rotation.
-  controls.target.copy(center);
+  // If MMB starts in empty space, keep the current local pivot whenever it
+  // still makes sense. Only recover the model center if the target has drifted
+  // far outside the model after extensive panning.
+  const box=new THREE.Box3().setFromObject(modelRoot);
+  if(box.isEmpty())return;
+
+  const sphere=box.getBoundingSphere(new THREE.Sphere());
+  const safeZone=box.clone().expandByScalar(Math.max(modelSize*0.35,sphere.radius*0.35));
+
+  if(safeZone.containsPoint(controls.target))return;
+
+  controls.target.copy(sphere.center);
   controls.update();
 }
 
@@ -1288,6 +1277,8 @@ function rebuildSelectionHighlights() {
 }
 function highlightSelection(s,index) {
   const color=index===0?0x35d39a:0x9cefd4;
+  const faceColor=index===0?0x2f80ed:0x5aa2ff;
+
   if (s.kind==='edge') {
     const line=new THREE.Line(
       s.object.geometry.clone(),
@@ -1312,7 +1303,7 @@ function highlightSelection(s,index) {
     const slice=srcIndex.slice(face.firstIndex,face.firstIndex+face.indexCount);
     g.setIndex(new THREE.BufferAttribute(new Uint32Array(slice),1));
     const mesh=new THREE.Mesh(g,selectionFaceMaterial.clone());
-    mesh.material.color.setHex(color);
+    mesh.material.color.setHex(faceColor);
     mesh.matrix.copy(s.object.matrixWorld);mesh.matrixAutoUpdate=false;mesh.renderOrder=29;selectionRoot.add(mesh);
   }
 }
