@@ -70,7 +70,21 @@ let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
 let selectionMode = 'auto', measureEnabled = false, selected = [], currentMeasureResult = null, selectionHighlightMap = new Map();
 let edgesVisible = true, clipEnabled = false;
 let modelBounds = null, modelSize = 1;
-let pointerDown = null, hoverRAF = 0, preselected = null, middleMouseDown = false, selectOtherMenu = null, rightPointerDown = null, rightDragged = false, suppressRightContext = false;
+let hoverRAF = 0, preselected = null, selectOtherMenu = null;
+let selectionEpoch = 0;
+const cadNav = {
+  active:false,
+  pointerId:null,
+  button:-1,
+  mode:null,
+  startX:0,
+  startY:0,
+  lastX:0,
+  lastY:0,
+  moved:false,
+  pivot:new THREE.Vector3(),
+  wheelFocus:new THREE.Vector3()
+};
 let dimensionLabel = null, dimensionLabelPoint = null;
 let worker = null, workerSeq = 0, workerPending = new Map();
 let meshObjectUrls = [];
@@ -108,16 +122,18 @@ const hoverFaceMaterial = new THREE.MeshBasicMaterial({
   polygonOffsetFactor:-2,
   polygonOffsetUnits:-2
 });
+const SELECTION_BLUE = 0x006dff;
 const selectionFaceMaterial = new THREE.MeshBasicMaterial({
-  color:0x2f80ed,
-  transparent:true,
-  opacity:0.46,
-  side:THREE.FrontSide,
+  color:SELECTION_BLUE,
+  transparent:false,
+  opacity:1,
+  side:THREE.DoubleSide,
   depthTest:true,
   depthWrite:false,
+  depthFunc:THREE.LessEqualDepth,
   polygonOffset:true,
-  polygonOffsetFactor:-2,
-  polygonOffsetUnits:-2
+  polygonOffsetFactor:-1,
+  polygonOffsetUnits:-1
 });
 
 init();
@@ -140,20 +156,18 @@ function init() {
   camera.position.set(5,4,6);
 
   controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
-  controls.screenSpacePanning = true;
 
-  // Wheel zoom is implemented by NavoFlo below. OrbitControls' native
-  // multiplicative dolly slows toward zero as camera->target shrinks and
-  // creates the "many tiny zoom-ins to undo" problem.
+  // NavoFlo owns all mouse gestures. OrbitControls remains only as a
+  // compatibility holder for `target`; its DOM navigation is disabled.
+  controls.enabled = false;
+  controls.enableDamping = false;
+  controls.enableRotate = false;
+  controls.enablePan = false;
   controls.enableZoom = false;
   controls.zoomToCursor = false;
+  controls.screenSpacePanning = true;
   controls.minDistance = 0;
   controls.maxDistance = Infinity;
-  controls.mouseButtons.LEFT = null;
-  controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
-  controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
 
   scene.add(new THREE.HemisphereLight(0xdde8f0, 0x202a30, 2.15));
   const key = new THREE.DirectionalLight(0xffffff, 2.05); key.position.set(6,9,7); scene.add(key);
@@ -247,89 +261,85 @@ function bindUI() {
   document.addEventListener('fullscreenchange', syncFullscreenState);
   document.addEventListener('webkitfullscreenchange', syncFullscreenState);
 
-  E.canvas.addEventListener('contextmenu', event => {
-    event.preventDefault();
+  // CAD mouse navigation. One state machine = no fighting mouse handlers.
+  // LMB select | MMB rotate | Ctrl+MMB pan | Shift+MMB zoom
+  // wheel zoom-to-pointer | RMB drag pan | RMB click Select Other.
+  E.canvas.addEventListener('contextmenu', event => event.preventDefault());
 
-    // A right-button drag is reserved for PAN. Do not open Select Other.
-    if (suppressRightContext || rightDragged) {
-      suppressRightContext = false;
-      rightDragged = false;
+  E.canvas.addEventListener('pointerdown', event => {
+    if (!currentModel) return;
+
+    if (event.button===0) {
+      cadNav.active=true;
+      cadNav.pointerId=event.pointerId;
+      cadNav.button=0;
+      cadNav.mode='select';
+      cadNav.startX=cadNav.lastX=event.clientX;
+      cadNav.startY=cadNav.lastY=event.clientY;
+      cadNav.moved=false;
+      closeSelectOther();
+      try { E.canvas.setPointerCapture(event.pointerId); } catch {}
+      return;
+    }
+
+    if (event.button!==1 && event.button!==2) return;
+
+    event.preventDefault();
+    closeSelectOther();
+    clearPreselection();
+
+    cadNav.active=true;
+    cadNav.pointerId=event.pointerId;
+    cadNav.button=event.button;
+    cadNav.startX=cadNav.lastX=event.clientX;
+    cadNav.startY=cadNav.lastY=event.clientY;
+    cadNav.moved=false;
+
+    if (event.button===2) {
+      cadNav.mode='pan';
+      cadNav.pivot.copy(getCadPivotUnderPointer(event.clientX,event.clientY));
+    } else if (event.ctrlKey || event.metaKey) {
+      cadNav.mode='pan';
+      cadNav.pivot.copy(getCadPivotUnderPointer(event.clientX,event.clientY));
+    } else if (event.shiftKey) {
+      cadNav.mode='zoom';
+      cadNav.pivot.copy(getCadPivotUnderPointer(event.clientX,event.clientY));
+    } else {
+      cadNav.mode='rotate';
+      cadNav.pivot.copy(getCadPivotUnderPointer(event.clientX,event.clientY));
+    }
+
+    try { E.canvas.setPointerCapture(event.pointerId); } catch {}
+    updateCadCursor();
+  }, true);
+
+  E.canvas.addEventListener('pointermove', event => {
+    if (cadNav.active && event.pointerId===cadNav.pointerId) {
+      const dx=event.clientX-cadNav.lastX;
+      const dy=event.clientY-cadNav.lastY;
+      const total=Math.hypot(event.clientX-cadNav.startX,event.clientY-cadNav.startY);
+      if (total>3) cadNav.moved=true;
+
+      if (cadNav.mode==='rotate' && (event.buttons&4)) {
+        event.preventDefault();
+        clearPreselection();
+        cadRotate(dx,dy,cadNav.pivot);
+      } else if (cadNav.mode==='pan' && ((cadNav.button===1 && (event.buttons&4)) || (cadNav.button===2 && (event.buttons&2)))) {
+        event.preventDefault();
+        clearPreselection();
+        cadPan(dx,dy);
+      } else if (cadNav.mode==='zoom' && (event.buttons&4)) {
+        event.preventDefault();
+        clearPreselection();
+        cadDragZoom(dy,event.clientX,event.clientY);
+      }
+
+      cadNav.lastX=event.clientX;
+      cadNav.lastY=event.clientY;
       return;
     }
 
     if (!currentModel) return;
-    openSelectOther(event.clientX,event.clientY);
-  });
-
-  // SolidWorks-like navigation: wheel = zoom, MMB drag = rotate, Ctrl+MMB = pan.
-  E.canvas.addEventListener('pointerdown', event => {
-    if (event.button === 0 || event.button === 1 || event.button === 2) closeSelectOther();
-
-    if (event.button === 2) {
-      // Right-button drag = pan. A short click is still used for Select Other.
-      rightPointerDown = {x:event.clientX,y:event.clientY};
-      rightDragged = false;
-      suppressRightContext = false;
-      clearPreselection();
-      controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
-    }
-
-    if (event.button === 1) {
-      middleMouseDown = true;
-      clearPreselection();
-
-      if (event.ctrlKey) {
-        // Ctrl + MMB = pan. Do not change the current target while panning.
-        controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
-      } else {
-        // Rotate around the feature currently under the mouse cursor.
-        // This lets the user zoom into a hole/corner and stay focused there.
-        setRotationPivotFromPointer(event.clientX,event.clientY);
-        controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
-      }
-    }
-  }, true);
-  addEventListener('pointerup', event => {
-    if (event.button === 1) middleMouseDown = false;
-
-    if (event.button === 2) {
-      if (rightPointerDown) {
-        const moved = Math.hypot(event.clientX-rightPointerDown.x,event.clientY-rightPointerDown.y);
-        if (moved > 4 || rightDragged) {
-          suppressRightContext = true;
-          rightDragged = true;
-        }
-      }
-      rightPointerDown = null;
-    }
-
-    if (controls) {
-      controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
-      controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
-    }
-  }, true);
-
-  E.canvas.addEventListener('wheel', handleCadWheelZoom, {passive:false});
-
-  E.canvas.addEventListener('pointerdown', event => {
-    if (event.button === 0) pointerDown = {x:event.clientX,y:event.clientY};
-  });
-  E.canvas.addEventListener('pointerup', event => {
-    if (event.button !== 0 || !pointerDown) return;
-    const distance = Math.hypot(event.clientX-pointerDown.x, event.clientY-pointerDown.y);
-    pointerDown = null;
-    if (distance < 5 && currentModel) selectAt(event);
-  });
-
-  E.canvas.addEventListener('pointermove', event => {
-    if (rightPointerDown && (event.buttons & 2)) {
-      const moved=Math.hypot(event.clientX-rightPointerDown.x,event.clientY-rightPointerDown.y);
-      if (moved > 4) rightDragged=true;
-      clearPreselection();
-      return;
-    }
-
-    if (!currentModel || middleMouseDown) return;
     if (hoverRAF) cancelAnimationFrame(hoverRAF);
     const x=event.clientX,y=event.clientY;
     hoverRAF=requestAnimationFrame(()=>{
@@ -337,7 +347,45 @@ function bindUI() {
       updatePreselection(x,y);
     });
   });
-  E.canvas.addEventListener('pointerleave', clearPreselection);
+
+  const finishPointerInteraction = event => {
+    if (!cadNav.active || event.pointerId!==cadNav.pointerId) return;
+
+    const mode=cadNav.mode;
+    const button=cadNav.button;
+    const moved=cadNav.moved;
+
+    try {
+      if (E.canvas.hasPointerCapture?.(event.pointerId)) {
+        E.canvas.releasePointerCapture(event.pointerId);
+      }
+    } catch {}
+
+    cadNav.active=false;
+    cadNav.pointerId=null;
+    cadNav.button=-1;
+    cadNav.mode=null;
+    updateCadCursor();
+
+    if (event.type==='pointercancel') return;
+
+    if (button===0 && mode==='select' && !moved) {
+      selectAt(event);
+      return;
+    }
+
+    if (button===2 && !moved) {
+      openSelectOther(event.clientX,event.clientY);
+    }
+  };
+
+  E.canvas.addEventListener('pointerup', finishPointerInteraction, true);
+  E.canvas.addEventListener('pointercancel', finishPointerInteraction, true);
+  E.canvas.addEventListener('wheel', handleCadWheelZoom, {passive:false});
+
+  E.canvas.addEventListener('pointerleave', () => {
+    if (!cadNav.active) clearPreselection();
+  });
 
   addEventListener('keydown', event => {
     if (event.target && ['INPUT','SELECT','TEXTAREA'].includes(event.target.tagName)) return;
@@ -431,43 +479,106 @@ function syncFullscreenState() {
 
 
 function getModelRotationCenter() {
-  // NavoFlo recenters the loaded model, but calculate from the current
-  // world bounding box so the pivot remains correct even after future changes.
   if (!currentModel) return new THREE.Vector3(0,0,0);
-
-  const box = new THREE.Box3().setFromObject(modelRoot);
+  const box=new THREE.Box3().setFromObject(modelRoot);
   if (box.isEmpty()) return new THREE.Vector3(0,0,0);
-
   return box.getCenter(new THREE.Vector3());
 }
 
-function setRotationPivotFromPointer(clientX,clientY) {
-  if (!currentModel || !controls || !camera) return;
+function getCadPivotUnderPointer(clientX,clientY) {
+  if (!currentModel) return getModelRotationCenter();
 
-  // SolidWorks-like behavior:
-  // the feature under the cursor becomes the rotation pivot.
   setRayFromClient(clientX,clientY);
   const hit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
 
-  if(hit){
-    controls.target.copy(hit.point);
-    controls.update();
-    return;
+  if (hit) {
+    cadNav.wheelFocus.copy(hit.point);
+    return hit.point.clone();
   }
 
-  // If MMB starts in empty space, keep the current local pivot whenever it
-  // still makes sense. Only recover the model center if the target has drifted
-  // far outside the model after extensive panning.
-  const box=new THREE.Box3().setFromObject(modelRoot);
-  if(box.isEmpty())return;
+  // MMB in empty space never snaps the model back to center.
+  if (cadNav.wheelFocus.lengthSq()>1e-20) return cadNav.wheelFocus.clone();
+  return getModelRotationCenter();
+}
 
-  const sphere=box.getBoundingSphere(new THREE.Sphere());
-  const safeZone=box.clone().expandByScalar(Math.max(modelSize*0.35,sphere.radius*0.35));
+function updateCadCursor() {
+  if (!E.canvas) return;
+  E.canvas.style.cursor=(cadNav.active && ['rotate','pan','zoom'].includes(cadNav.mode))
+    ? 'grabbing'
+    : '';
+}
 
-  if(safeZone.containsPoint(controls.target))return;
+function rotateCameraRigidlyAroundPivot(axis,angle,pivot) {
+  if (!Number.isFinite(angle) || Math.abs(angle)<1e-9) return;
 
-  controls.target.copy(sphere.center);
-  controls.update();
+  const q=new THREE.Quaternion().setFromAxisAngle(axis,angle);
+  const relative=camera.position.clone().sub(pivot).applyQuaternion(q);
+  camera.position.copy(pivot).add(relative);
+
+  // Position and orientation get the same rigid transform. The point under
+  // MMB stays under the same screen pixel instead of snapping to screen center.
+  camera.quaternion.premultiply(q).normalize();
+}
+
+function cadRotate(dx,dy,pivot) {
+  if (!camera || (!dx&&!dy)) return;
+
+  const rect=E.canvas.getBoundingClientRect();
+  const sensitivity=(Math.PI*1.15)/Math.max(320,Math.min(rect.width,rect.height));
+
+  if (dx) {
+    const screenUp=new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion).normalize();
+    rotateCameraRigidlyAroundPivot(screenUp,-dx*sensitivity,pivot);
+  }
+
+  if (dy) {
+    const screenRight=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion).normalize();
+    rotateCameraRigidlyAroundPivot(screenRight,-dy*sensitivity,pivot);
+  }
+
+  controls.target.copy(pivot);
+  updateZoomClipping();
+  updateDimensionLabelPosition();
+}
+
+function getCadPanWorldPerPixel() {
+  const rect=E.canvas.getBoundingClientRect();
+  const pivot=cadNav.pivot.lengthSq()>1e-20 ? cadNav.pivot : getModelRotationCenter();
+  const distance=Math.max(camera.position.distanceTo(pivot),modelSize*0.02,1e-6);
+  const worldHeight=2*distance*Math.tan(THREE.MathUtils.degToRad(camera.fov)*0.5);
+  return worldHeight/Math.max(rect.height,1);
+}
+
+function cadPan(dx,dy) {
+  if (!camera || (!dx&&!dy)) return;
+
+  const units=getCadPanWorldPerPixel();
+  const right=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion).normalize();
+  const up=new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion).normalize();
+  const translation=right.multiplyScalar(-dx*units).add(up.multiplyScalar(dy*units));
+
+  camera.position.add(translation);
+  controls.target.add(translation);
+  cadNav.pivot.add(translation);
+  if (cadNav.wheelFocus.lengthSq()>1e-20) cadNav.wheelFocus.add(translation);
+
+  updateZoomClipping();
+  updateDimensionLabelPosition();
+}
+
+function cadDragZoom(dy,clientX,clientY) {
+  if (!dy) return;
+
+  setRayFromClient(clientX,clientY);
+  const direction=raycaster.ray.direction.clone().normalize();
+  const reference=getCadZoomReferenceDistance(clientX,clientY);
+  const fraction=1-Math.exp(-Math.abs(dy)*0.012);
+  const minimum=getCadZoomMinimumStep();
+  const travel=Math.max(reference*fraction,minimum*Math.min(Math.abs(dy),8));
+
+  camera.position.addScaledVector(direction,dy<0?travel:-travel);
+  updateZoomClipping();
+  updateDimensionLabelPosition();
 }
 
 function resize() {
@@ -478,7 +589,6 @@ function resize() {
 }
 
 function render() {
-  controls?.update();
   renderer?.render(scene,camera);
   updateDimensionLabelPosition();
 }
@@ -748,9 +858,9 @@ function finalizeLoadedModel() {
   raycaster.params.Line.threshold=modelSize*0.004;
   raycaster.params.Points.threshold=modelSize*0.006;
 
-  // Rotation/pan remain OrbitControls-driven; wheel dolly is NavoFlo CAD zoom.
-  controls.minDistance=0;
-  controls.maxDistance=Infinity;
+  cadNav.pivot.copy(box.getCenter(new THREE.Vector3()));
+  cadNav.wheelFocus.copy(cadNav.pivot);
+  controls.target.copy(cadNav.pivot);
   updateZoomClipping();
 
   createGrid(niceGrid(modelSize*1.6));
@@ -774,38 +884,41 @@ function toggleGrid() {
 
 function normalizeWheelDelta(event) {
   let delta=event.deltaY;
-
-  if(event.deltaMode===WheelEvent.DOM_DELTA_LINE){
-    delta*=16;
-  }else if(event.deltaMode===WheelEvent.DOM_DELTA_PAGE){
-    delta*=Math.max(E.workspace.clientHeight,600);
-  }
-
+  if(event.deltaMode===1) delta*=16;
+  else if(event.deltaMode===2) delta*=Math.max(E.workspace.clientHeight,600);
   return delta;
 }
 
 function getCadZoomMinimumStep() {
-  if(!modelBounds)return Math.max(modelSize*0.0006,1e-6);
+  if(!modelBounds)return Math.max(modelSize*0.00005,1e-7);
 
   const size=modelBounds.getSize(new THREE.Vector3());
   const dimensions=[size.x,size.y,size.z]
-    .filter(value=>Number.isFinite(value)&&value>modelSize*1e-7)
+    .filter(value=>Number.isFinite(value)&&value>modelSize*1e-8)
     .sort((a,b)=>a-b);
-
   const smallest=dimensions[0]||modelSize;
 
-  // On a long thin sheet-metal part, using modelSize alone would make the
-  // minimum zoom step far too coarse. Blend the smallest real dimension
-  // with a very small fraction of the model's largest dimension.
-  return Math.max(
-    smallest*0.03,
-    modelSize*0.0006,
-    1e-6
-  );
+  return Math.max(smallest*0.004,modelSize*0.00005,1e-7);
+}
+
+function getCadZoomReferenceDistance(clientX,clientY) {
+  setRayFromClient(clientX,clientY);
+  const hit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
+
+  if(hit){
+    cadNav.wheelFocus.copy(hit.point);
+    return Math.max(hit.distance,1e-7);
+  }
+
+  const focus=cadNav.wheelFocus.lengthSq()>1e-20
+    ? cadNav.wheelFocus
+    : getModelRotationCenter();
+
+  return Math.max(camera.position.distanceTo(focus),modelSize*0.05,1e-7);
 }
 
 function handleCadWheelZoom(event) {
-  if(!currentModel||!camera||!controls)return;
+  if(!currentModel||!camera)return;
 
   event.preventDefault();
   event.stopPropagation();
@@ -816,44 +929,18 @@ function handleCadWheelZoom(event) {
   if(!Number.isFinite(delta)||Math.abs(delta)<0.001)return;
 
   setRayFromClient(event.clientX,event.clientY);
-
   const direction=raycaster.ray.direction.clone().normalize();
-  const zoomIn=delta<0;
+  const reference=getCadZoomReferenceDistance(event.clientX,event.clientY);
 
-  // Use actual visible geometry under the pointer when possible.
-  const frontHit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
+  // One wheel notch feels decisive; precision-trackpad deltas stay smooth.
+  // No accumulated zoom state means reversing direction reacts immediately.
+  const wheelUnits=THREE.MathUtils.clamp(Math.abs(delta)/100,0.01,5);
+  const fraction=1-Math.exp(-0.18*wheelUnits);
+  const minimum=getCadZoomMinimumStep()*Math.max(0.35,wheelUnits);
+  const travel=Math.max(reference*fraction,minimum);
 
-  let referenceDistance;
-  if(frontHit){
-    referenceDistance=Math.max(frontHit.distance,1e-7);
-  }else{
-    const box=modelBounds||new THREE.Box3().setFromObject(modelRoot);
-    const center=box.getCenter(new THREE.Vector3());
-    referenceDistance=Math.max(camera.position.distanceTo(center),modelSize*0.5,1e-7);
-  }
-
-  // Mouse wheel ≈ 100 px/notch. Trackpads send much smaller deltas.
-  const wheelAmount=THREE.MathUtils.clamp(Math.abs(delta)/100,0.04,4);
-
-  // CAD behavior:
-  // - proportional movement when far from geometry
-  // - guaranteed physical movement when very close
-  // This is the important difference from OrbitControls' shrinking dolly.
-  const proportionalStep=referenceDistance*0.16;
-  const minimumStep=getCadZoomMinimumStep();
-  const travel=Math.max(proportionalStep,minimumStep)*wheelAmount;
-
-  const translation=direction.multiplyScalar(zoomIn?travel:-travel);
-
-  // Translate camera AND orbit target together. This preserves the current
-  // viewing direction and prevents camera->target distance from collapsing.
-  // Every wheel event therefore produces real movement in either direction;
-  // there is no hidden backlog to "undo" when the user starts zooming out.
-  camera.position.add(translation);
-  controls.target.add(translation);
-
+  camera.position.addScaledVector(direction,delta<0?travel:-travel);
   updateZoomClipping();
-  controls.update();
   updateDimensionLabelPosition();
 }
 
@@ -1223,24 +1310,11 @@ function selectionFromFace(hit) {
   }
   if (id == null) return null;
 
-  // Lock the selected side at click time. STEP face winding is not guaranteed
-  // to match the side the user is looking at, especially inside holes. Pick
-  // FrontSide or BackSide from the actual triangle hit and keep that material
-  // side for the lifetime of this selection. This avoids frame-by-frame
-  // visibility toggles that could make committed blue faces disappear.
-  let selectedFaceSide=THREE.FrontSide;
-  if(hit.face?.normal){
-    const worldNormal=hit.face.normal.clone().transformDirection(o.matrixWorld).normalize();
-    const towardCamera=camera.position.clone().sub(hit.point).normalize();
-    selectedFaceSide=worldNormal.dot(towardCamera)>=0 ? THREE.FrontSide : THREE.BackSide;
-  }
-
   return {
     kind:'face',
     geometryId:o.userData.geometryId,
     elementId:Number(id),
     point:hit.point.clone(),
-    selectedFaceSide,
     object:o,
     def,
     transform:o.matrixWorld.toArray()
@@ -1500,6 +1574,9 @@ async function acceptSelection(selection, event={}) {
   }
   rebuildSelectionHighlights();
 
+  const epoch=++selectionEpoch;
+  const selectedKeysAtRequest=selected.map(selectionKey).join('|');
+
   if (!measureEnabled) return;
 
   E.measureCard.hidden=false;
@@ -1518,6 +1595,7 @@ async function acceptSelection(selection, event={}) {
   try {
     if (selected.length===1) {
       const details=await workerRequest('inspect',{selection:serialSelection(selected[0])});
+      if(epoch!==selectionEpoch || selected.map(selectionKey).join('|')!==selectedKeysAtRequest)return;
       showSingleExact(details);
       E.selectionSummary.textContent=T.selectSecond;
     } else if (selected.length===2) {
@@ -1533,6 +1611,7 @@ async function acceptSelection(selection, event={}) {
             b:serialSelection(selected[1]),
             mode:'angle'
           });
+          if(epoch!==selectionEpoch || selected.map(selectionKey).join('|')!==selectedKeysAtRequest)return;
 
           result=exactAngle?.ok ? exactAngle : smartAngle;
         }else{
@@ -1541,6 +1620,7 @@ async function acceptSelection(selection, event={}) {
             b:serialSelection(selected[1]),
             mode:'smart'
           });
+          if(epoch!==selectionEpoch || selected.map(selectionKey).join('|')!==selectedKeysAtRequest)return;
         }
 
       }else{
@@ -1549,6 +1629,7 @@ async function acceptSelection(selection, event={}) {
           b:serialSelection(selected[1]),
           mode
         });
+        if(epoch!==selectionEpoch || selected.map(selectionKey).join('|')!==selectedKeysAtRequest)return;
 
         if(mode==='angle'&&!result?.ok){
           result=measureAngleFallback(selected[0],selected[1])||result;
@@ -1572,6 +1653,9 @@ function selectionKey(s){return `${s.kind}:${s.geometryId||''}:${s.elementId??''
 function removeSelectionHighlight(key) {
   const group=selectionHighlightMap.get(key);
   if(!group)return;
+
+  const sourceObject=group.userData?.sourceObject;
+  if(sourceObject?.userData?.cadEdge) sourceObject.visible=edgesVisible;
 
   selectionHighlightMap.delete(key);
   selectionRoot.remove(group);
@@ -1603,17 +1687,27 @@ function rebuildSelectionHighlights() {
 }
 
 function highlightSelection(s,index,parent=selectionRoot) {
-  const color=0x2f80ed;
-  const faceColor=0x2f80ed;
+  const color=SELECTION_BLUE;
+  const faceColor=SELECTION_BLUE;
 
   if (s.kind==='edge') {
+    if(s.object?.userData?.cadEdge){
+      s.object.visible=false;
+      parent.userData.sourceObject=s.object;
+    }
+
     const line=new THREE.Line(
       s.object.geometry.clone(),
-      new THREE.LineBasicMaterial({color,depthTest:true,depthWrite:false})
+      new THREE.LineBasicMaterial({
+        color,
+        depthTest:true,
+        depthWrite:false,
+        depthFunc:THREE.LessEqualDepth
+      })
     );
     line.matrix.copy(s.object.matrixWorld);
     line.matrixAutoUpdate=false;
-    line.renderOrder=30;
+    line.renderOrder=40;
     parent.add(line);
 
   } else if (s.kind==='vertex'||s.kind==='point') {
@@ -1644,8 +1738,9 @@ function highlightSelection(s,index,parent=selectionRoot) {
 
     const mesh=new THREE.Mesh(g,selectionFaceMaterial.clone());
     mesh.material.color.setHex(faceColor);
-    mesh.material.side=s.selectedFaceSide ?? THREE.FrontSide;
+    mesh.material.side=THREE.DoubleSide;
     mesh.material.depthWrite=false;
+    mesh.material.depthFunc=THREE.LessEqualDepth;
     mesh.material.needsUpdate=true;
     mesh.matrix.copy(s.object.matrixWorld);
     mesh.matrixAutoUpdate=false;
@@ -1671,6 +1766,13 @@ function toggleMeasure() {
 }
 
 function clearSelections() {
+  selectionEpoch++;
+
+  for(const group of selectionHighlightMap.values()){
+    const sourceObject=group.userData?.sourceObject;
+    if(sourceObject?.userData?.cadEdge) sourceObject.visible=edgesVisible;
+  }
+
   selected=[];
   currentMeasureResult=null;
   selectionHighlightMap.clear();
@@ -1977,15 +2079,17 @@ function labelKind(k){return k==='face'?T.face:k==='edge'?T.edge:k==='vertex'?T.
 function labelSelection(s){return s.meshOnly?T.point:`${labelKind(s.kind)} #${s.elementId}`}
 
 function applyEdgesVisibility() {
-  // Shared material switch makes this authoritative even if a topology
-  // line somehow wasn't registered in visualEdges.
   blackEdgeMaterial.visible=edgesVisible;
 
+  const selectedSourceEdges=new Set(
+    [...selectionHighlightMap.values()]
+      .map(group=>group.userData?.sourceObject)
+      .filter(Boolean)
+  );
+
   visualEdges.forEach(object=>{
-    object.visible=edgesVisible;
-    if(object.material===blackEdgeMaterial){
-      object.material.visible=edgesVisible;
-    }
+    object.visible=edgesVisible && !selectedSourceEdges.has(object);
+    if(object.material===blackEdgeMaterial) object.material.visible=edgesVisible;
   });
 }
 
@@ -2011,19 +2115,38 @@ function updateClipping() {
   }
   baseMaterials.forEach(m=>{m.clippingPlanes=clipEnabled?[clipPlane]:null;m.needsUpdate=true});
   blackEdgeMaterial.clippingPlanes=clipEnabled?[clipPlane]:null;blackEdgeMaterial.needsUpdate=true;
+
+  selectionRoot?.traverse?.(object=>{
+    if(!object.material)return;
+    const materials=Array.isArray(object.material)?object.material:[object.material];
+    materials.forEach(material=>{
+      material.clippingPlanes=clipEnabled?[clipPlane]:null;
+      material.needsUpdate=true;
+    });
+  });
 }
 
 function fitCamera(view='iso') {
   if (!modelBounds) return;
+
   const sphere=modelBounds.getBoundingSphere(new THREE.Sphere());
-  const radius=Math.max(sphere.radius,0.001),fov=THREE.MathUtils.degToRad(camera.fov);
+  const center=sphere.center.clone();
+  const radius=Math.max(sphere.radius,0.001);
+  const fov=THREE.MathUtils.degToRad(camera.fov);
   const distance=radius/Math.sin(fov/2)*1.12;
   const dirs={iso:[1,.75,1],front:[0,0,1],right:[1,0,0],top:[0,1,0]};
   const dir=new THREE.Vector3(...(dirs[view]||dirs.iso)).normalize();
-  camera.position.copy(dir.multiplyScalar(distance));
+
+  camera.position.copy(center).addScaledVector(dir,distance);
   camera.up.set(0,view==='top'?0:1,view==='top'?-1:0);
+  camera.lookAt(center);
+
+  controls.target.copy(center);
+  cadNav.pivot.copy(center);
+  cadNav.wheelFocus.copy(center);
+
   updateZoomClipping();
-  controls.target.copy(getModelRotationCenter());controls.update();
+  updateDimensionLabelPosition();
 }
 
 function fillProperties() {
@@ -2235,6 +2358,8 @@ async function clearModel(showMessage=true) {
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=true;blackEdgeMaterial.visible=true;measureEnabled=false;
+  cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;
+  cadNav.pivot.set(0,0,0);cadNav.wheelFocus.set(0,0,0);updateCadCursor();
   E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.add('active');E.gridToggle.classList.add('active');E.measure.classList.remove('active');
   E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.empty.classList.remove('hidden');
   E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';E.unitSelect.value='u';
