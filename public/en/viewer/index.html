@@ -92,6 +92,18 @@
         <span class="tool-icon">▱</span><span>Edges</span>
       </button>
 
+      <button id="grid-toggle" class="tool-button active" type="button" disabled>
+        <span class="tool-icon">#</span><span>Grid</span>
+      </button>
+
+      <select id="unit-select" class="tool-select unit-select" disabled aria-label="Measurement units" title="Measurement units">
+        <option value="u">Model units</option>
+        <option value="mm">mm</option>
+        <option value="cm">cm</option>
+        <option value="m">m</option>
+        <option value="in">in</option>
+      </select>
+
       <div class="tool-divider"></div>
 
       <div class="view-menu">
@@ -163,6 +175,12 @@
         </dl>
         <div class="drawer-section-title tree-title">STRUCTURE / PARTS</div>
         <div id="step-tree" class="step-tree">—</div>
+
+        <div id="step-custom-section" class="step-custom-section" hidden>
+          <div class="drawer-section-title tree-title">CUSTOM / CONFIGURATION PROPERTIES</div>
+          <dl id="step-custom-properties" class="custom-properties-list"></dl>
+          <p id="step-custom-note" class="metadata-note"></p>
+        </div>
       </div>
 
       <div class="drawer-section">
