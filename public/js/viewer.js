@@ -71,6 +71,7 @@ let selectionMode = 'auto', measureEnabled = false, selected = [], currentMeasur
 let edgesVisible = true, clipEnabled = false;
 let modelBounds = null, modelSize = 1;
 let pointerDown = null, hoverRAF = 0, preselected = null, middleMouseDown = false, selectOtherMenu = null, rightPointerDown = null, rightDragged = false, suppressRightContext = false;
+let dimensionLabel = null, dimensionLabelPoint = null;
 let worker = null, workerSeq = 0, workerPending = new Map();
 let meshObjectUrls = [];
 let baseMaterials = new Set();
