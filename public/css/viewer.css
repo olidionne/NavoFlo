@@ -604,3 +604,53 @@
     max-width:none !important;
   }
 }
+
+
+/* V2.6 — units, grid and STEP metadata */
+.unit-select{
+  min-width:92px;
+}
+
+.custom-properties-list{
+  margin:0;
+  padding:0;
+}
+
+.custom-properties-list>div{
+  min-height:34px;
+  display:grid;
+  grid-template-columns:minmax(105px,.9fr) minmax(0,1.1fr);
+  gap:10px;
+  align-items:center;
+  border-bottom:1px solid rgba(255,255,255,.045);
+}
+
+.custom-properties-list dt{
+  color:#8798a2;
+  font-size:10.5px;
+  word-break:break-word;
+}
+
+.custom-properties-list dd{
+  margin:0;
+  color:#d0d9dd;
+  font:650 10.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+  text-align:right;
+  word-break:break-word;
+}
+
+.metadata-note{
+  margin:10px 0 0;
+  color:#71818e;
+  font-size:9.5px;
+  line-height:1.55;
+}
+
+.step-custom-section{
+  margin-top:4px;
+}
+
+.cad-workspace.is-fullscreen .custom-properties-list dt,
+.cad-workspace.is-fullscreen .custom-properties-list dd{
+  font-size:11px;
+}
