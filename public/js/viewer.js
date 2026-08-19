@@ -13,7 +13,8 @@ large:'Un fichier dépasse la limite de 250 Mo.',total:'La sélection dépasse 5
 error:'Impossible de charger ce modèle.',stepError:'Impossible de convertir ce fichier STEP.',
 webgl:"WebGL n'est pas disponible.",complex:'Trop complexe',shot:'navoflo-3d-inspector.png',
 pcOk:'Compatible STEP',pcLimited:'Compatible, mais limité pour les gros STEP',pcUnknown:'Compatibilité partielle à vérifier',
-wasm:'WebAssembly',webgl2:'WebGL2',threads:'threads',ram:'RAM'
+wasm:'WebAssembly',webgl2:'WebGL2',threads:'threads',ram:'RAM',
+measureReady:'Cliquez le premier point sur le modèle.',measureSecond:'Premier point choisi. Cliquez le deuxième point.',measureDone:'Mesure terminée.',measureLoad:'Chargez un modèle pour mesurer.',measureNone:'Aucune mesure.'
 }:{no:'No model loaded',loading:'Loading...',analysing:'Analyzing geometry...',
 stepInit:'Initializing local STEP engine…',stepParse:'Converting STEP on your PC…',
 loaded:'loaded',unsupported:'Use a STEP, STP, STL, OBJ, GLB or GLTF file.',
@@ -21,7 +22,8 @@ large:'A file exceeds the 250 MB limit.',total:'The selected files exceed 500 MB
 error:'Unable to load this model.',stepError:'Unable to convert this STEP file.',
 webgl:'WebGL is not available.',complex:'Too complex',shot:'navoflo-3d-inspector.png',
 pcOk:'STEP compatible',pcLimited:'Compatible, but limited for large STEP files',pcUnknown:'Partial compatibility check',
-wasm:'WebAssembly',webgl2:'WebGL2',threads:'threads',ram:'RAM'};
+wasm:'WebAssembly',webgl2:'WebGL2',threads:'threads',ram:'RAM',
+measureReady:'Click the first point on the model.',measureSecond:'First point selected. Click the second point.',measureDone:'Measurement complete.',measureLoad:'Load a model to measure.',measureNone:'No measurement.'};
 
 const MAX_FILE=250*1024*1024,MAX_TOTAL=500*1024*1024,MAX_TRI=1500000;
 const $=id=>document.getElementById(id);
@@ -32,12 +34,19 @@ clear:$('clear-model'),fit:$('fit-view'),shot:$('screenshot'),wire:$('wireframe-
 grid:$('grid-toggle'),units:$('unit-select'),clip:$('clip-toggle'),axis:$('clip-axis'),slider:$('clip-slider'),
 format:$('stat-format'),size:$('stat-filesize'),meshes:$('stat-meshes'),vertices:$('stat-vertices'),
 triangles:$('stat-triangles'),x:$('dim-x'),y:$('dim-y'),z:$('dim-z'),surface:$('stat-surface'),volume:$('stat-volume'),
-pc:$('pc-check')
+pc:$('pc-check'),
+measureToggle:$('measure-toggle'),measureClear:$('measure-clear'),measureStatus:$('measure-status'),
+measureDistance:$('measure-distance'),measureDx:$('measure-dx'),measureDy:$('measure-dy'),measureDz:$('measure-dz'),
+stepCard:$('step-properties-card'),stepName:$('step-name'),stepSchema:$('step-schema'),stepDate:$('step-date'),
+stepAuthor:$('step-author'),stepOrg:$('step-org'),stepOrigin:$('step-origin'),
+stepPreprocessor:$('step-preprocessor'),stepDescription:$('step-description'),stepTree:$('step-tree')
 };
 
 let renderer,scene,camera,controls,rootGroup,grid,model=null,bounds=null,stats=null,format='',fileSize=0;
 let blobUrls=[],resourceMap=new Map(),original=new WeakMap(),baseUnit='u';
-let stepWorker=null,stepRequest=0,stepResolvers=new Map();
+let stepWorker=null,stepRequest=0,stepResolvers=new Map(),currentStepData=null;
+let measureGroup=null,measureActive=false,measurePoints=[],measureResult=null,measurePointerDown=null;
+const raycaster=new THREE.Raycaster(),pointer=new THREE.Vector2();
 const clipPlane=new THREE.Plane(new THREE.Vector3(1,0,0),0);
 
 init();
@@ -52,7 +61,7 @@ function init(){
   scene.add(new THREE.HemisphereLight(0xdcecff,0x1c2730,2.2));
   const a=new THREE.DirectionalLight(0xffffff,2.2);a.position.set(4,7,6);scene.add(a);
   const b=new THREE.DirectionalLight(0x7adfbd,1.1);b.position.set(-5,2,-4);scene.add(b);
-  rootGroup=new THREE.Group();scene.add(rootGroup);makeGrid(10);
+  rootGroup=new THREE.Group();scene.add(rootGroup);measureGroup=new THREE.Group();scene.add(measureGroup);makeGrid(10);
   bind();resize();updatePCCheck(true);renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera)});
 }
 
@@ -69,7 +78,18 @@ function bind(){
   E.grid.addEventListener('change',()=>grid.visible=E.grid.checked);
   E.wire.addEventListener('change',materials);
   [E.clip,E.axis,E.slider].forEach(el=>el.addEventListener(el===E.slider?'input':'change',clipping));
-  E.units.addEventListener('change',showStats);
+  E.units.addEventListener('change',()=>{showStats();showMeasurement()});
+  E.measureToggle?.addEventListener('click',toggleMeasure);
+  E.measureClear?.addEventListener('click',clearMeasurement);
+  E.canvas.addEventListener('pointerdown',e=>{
+    if(e.button===0)measurePointerDown={x:e.clientX,y:e.clientY};
+  });
+  E.canvas.addEventListener('pointerup',e=>{
+    if(e.button!==0||!measurePointerDown)return;
+    const dx=e.clientX-measurePointerDown.x,dy=e.clientY-measurePointerDown.y;
+    measurePointerDown=null;
+    if(measureActive&&Math.hypot(dx,dy)<5)pickMeasurePoint(e);
+  });
   E.shot.addEventListener('click',screenshot);
   addEventListener('beforeunload',()=>{revoke();stepWorker?.terminate()});
 }
@@ -93,7 +113,7 @@ async function load(files){
     const object=await parse(main);if(!object)throw Error('Empty model');
     model=object;rootGroup.add(model);centerModel();remember(model);materials();enable(true);
     E.empty.classList.add('hidden');E.status.className='file-status loaded';E.status.textContent=`${main.name} · ${T.loaded}`;
-    busy(true,T.analysing);await frame();stats=analyse(model);showStats();fit('iso');
+    busy(true,T.analysing);await frame();stats=analyse(model);showStats();showStepProperties();fit('iso');
   }catch(err){
     console.error('[NavoFlo 3D Inspector]',err);
     const wasStep=format==='STEP'||format==='STP';
@@ -114,10 +134,12 @@ async function parse(file){
   const e=ext(file.name);
   if(e==='step'||e==='stp'){
     busy(true,T.stepInit);await frame();
-    const result=await readStepLocally(file);
+    const packet=await readStepLocally(file);
+    currentStepData={header:packet.header,root:packet.result.root||null};
     busy(true,T.stepParse);await frame();
-    return buildOcctObject(result);
+    return buildOcctObject(packet.result);
   }
+  currentStepData=null;
   if(e==='stl'){
     const g=new STLLoader().parse(await file.arrayBuffer());g.computeVertexNormals();
     return new THREE.Mesh(g,defaultMaterial());
@@ -139,12 +161,14 @@ async function parse(file){
 async function readStepLocally(file){
   const worker=getStepWorker();
   const buffer=await file.arrayBuffer();
+  const header=parseStepHeader(buffer);
   const id=++stepRequest;
 
-  return await new Promise((resolve,reject)=>{
+  const result=await new Promise((resolve,reject)=>{
     stepResolvers.set(id,{resolve,reject});
     worker.postMessage({id,buffer},[buffer]);
   });
+  return {result,header};
 }
 
 function getStepWorker(){
@@ -298,14 +322,210 @@ function fit(view='iso'){
 }
 
 function enable(on){
-  [E.clear,E.fit,E.shot,E.wire,E.clip].forEach(x=>x.disabled=!on);document.querySelectorAll('[data-view]').forEach(x=>x.disabled=!on);
+  [E.clear,E.fit,E.shot,E.wire,E.clip,E.measureToggle].filter(Boolean).forEach(x=>x.disabled=!on);
+  document.querySelectorAll('[data-view]').forEach(x=>x.disabled=!on);
+  if(E.measureClear)E.measureClear.disabled=true;
   if(!on){E.clip.checked=false;E.axis.disabled=true;E.slider.disabled=true}
 }
 
 function clear(message=true){
+  clearMeasurement();
   if(model){rootGroup.remove(model);dispose(model)}model=null;rootGroup?.position.set(0,0,0);bounds=null;stats=null;format='';fileSize=0;baseUnit='u';original=new WeakMap();revoke();resetStats();enable(false);
+  currentStepData=null;hideStepProperties();
   E.wire.checked=false;E.clip.checked=false;E.slider.value=0;E.units.value='u';E.empty.classList.remove('hidden');if(grid)grid.position.y=0;
+  if(E.measureStatus){E.measureStatus.className='measure-status';E.measureStatus.textContent=T.measureLoad}
   if(message){E.status.className='file-status';E.status.textContent=T.no}
+}
+
+
+function parseStepHeader(buffer){
+  try{
+    const limit=Math.min(buffer.byteLength,2*1024*1024);
+    const text=new TextDecoder('utf-8',{fatal:false}).decode(new Uint8Array(buffer,0,limit));
+    const header=text.match(/HEADER\s*;([\s\S]*?)ENDSEC\s*;/i)?.[1]||'';
+
+    const stmt=name=>header.match(new RegExp(name+'\\s*\\(([\\s\\S]*?)\\)\\s*;','i'))?.[0]||'';
+    const values=s=>[...s.matchAll(/'((?:''|[^'])*)'/g)].map(m=>m[1].replace(/''/g,"'").trim());
+
+    const descriptionVals=values(stmt('FILE_DESCRIPTION'));
+    const schemaVals=values(stmt('FILE_SCHEMA'));
+    const fileNameStmt=stmt('FILE_NAME');
+    const allNameVals=values(fileNameStmt);
+
+    const structured=fileNameStmt.match(/FILE_NAME\s*\(\s*'((?:''|[^'])*)'\s*,\s*'((?:''|[^'])*)'\s*,\s*\(([\s\S]*?)\)\s*,\s*\(([\s\S]*?)\)\s*,\s*'((?:''|[^'])*)'\s*,\s*'((?:''|[^'])*)'\s*,\s*'((?:''|[^'])*)'\s*\)\s*;/i);
+
+    let data={
+      name:allNameVals[0]||'—',
+      date:allNameVals[1]||'—',
+      author:'—',organization:'—',preprocessor:'—',origin:'—',
+      description:descriptionVals.length>1?descriptionVals.slice(0,-1).join(' · '):(descriptionVals[0]||'—'),
+      schema:schemaVals.join(', ')||'—'
+    };
+
+    if(structured){
+      const q=s=>values(s).join(', ')||'—';
+      data.name=structured[1].replace(/''/g,"'")||'—';
+      data.date=structured[2].replace(/''/g,"'")||'—';
+      data.author=q(structured[3]);
+      data.organization=q(structured[4]);
+      data.preprocessor=structured[5].replace(/''/g,"'")||'—';
+      data.origin=structured[6].replace(/''/g,"'")||'—';
+    }else if(allNameVals.length>=5){
+      data.preprocessor=allNameVals[allNameVals.length-3]||'—';
+      data.origin=allNameVals[allNameVals.length-2]||'—';
+    }
+    return data;
+  }catch(error){
+    console.warn('[NavoFlo STEP header]',error);
+    return {name:'—',date:'—',author:'—',organization:'—',preprocessor:'—',origin:'—',description:'—',schema:'—'};
+  }
+}
+
+function showStepProperties(){
+  if(!E.stepCard)return;
+  if(!currentStepData||(format!=='STEP'&&format!=='STP')){hideStepProperties();return}
+  const h=currentStepData.header||{};
+  E.stepCard.hidden=false;
+  E.stepName.textContent=h.name||'—';
+  E.stepSchema.textContent=h.schema||'—';
+  E.stepDate.textContent=h.date||'—';
+  E.stepAuthor.textContent=h.author||'—';
+  E.stepOrg.textContent=h.organization||'—';
+  E.stepOrigin.textContent=h.origin||'—';
+  E.stepPreprocessor.textContent=h.preprocessor||'—';
+  E.stepDescription.textContent=h.description||'—';
+  renderStepTree(currentStepData.root);
+}
+
+function hideStepProperties(){
+  if(E.stepCard)E.stepCard.hidden=true;
+  if(E.stepTree)E.stepTree.textContent='—';
+}
+
+function renderStepTree(root){
+  if(!E.stepTree)return;
+  E.stepTree.replaceChildren();
+  if(!root){E.stepTree.textContent='—';return}
+
+  let count=0;
+  const maxNodes=500;
+  const walk=(node,depth)=>{
+    if(!node||count>=maxNodes)return;
+    count++;
+    const row=document.createElement('div');
+    row.className='step-tree-node';
+    row.style.paddingLeft=`${Math.min(depth,12)*10}px`;
+    const meshCount=Array.isArray(node.meshes)?node.meshes.length:0;
+    row.textContent=`${depth?'↳ ':'• '}${node.name||'(unnamed)'}${meshCount?`  [${meshCount}]`:''}`;
+    row.title=node.name||'';
+    E.stepTree.appendChild(row);
+    for(const child of node.children||[])walk(child,depth+1);
+  };
+  walk(root,0);
+
+  if(count>=maxNodes){
+    const row=document.createElement('div');
+    row.className='step-tree-node';
+    row.textContent=FR?'… structure tronquée à 500 éléments':'… structure limited to 500 items';
+    E.stepTree.appendChild(row);
+  }
+}
+
+function toggleMeasure(){
+  if(!model)return;
+  if(measureActive){
+    measureActive=false;
+    E.measureToggle.classList.remove('active');
+    E.stage.classList.remove('measure-mode');
+    E.measureStatus.className='measure-status';
+    E.measureStatus.textContent=measurePoints.length?T.measureNone:T.measureNone;
+    return;
+  }
+  clearMeasurement();
+  measureActive=true;
+  E.measureToggle.classList.add('active');
+  E.stage.classList.add('measure-mode');
+  E.measureStatus.className='measure-status active';
+  E.measureStatus.textContent=T.measureReady;
+}
+
+function pickMeasurePoint(event){
+  if(!measureActive||!model)return;
+  const rect=E.canvas.getBoundingClientRect();
+  pointer.x=((event.clientX-rect.left)/rect.width)*2-1;
+  pointer.y=-((event.clientY-rect.top)/rect.height)*2+1;
+  raycaster.setFromCamera(pointer,camera);
+  const hits=raycaster.intersectObject(model,true).filter(hit=>hit.object?.isMesh);
+  if(!hits.length)return;
+
+  const point=hits[0].point.clone();
+  addMeasureMarker(point);
+  measurePoints.push(point);
+
+  if(measurePoints.length===1){
+    E.measureClear.disabled=false;
+    E.measureStatus.textContent=T.measureSecond;
+    return;
+  }
+
+  const a=measurePoints[0],b=measurePoints[1];
+  const delta=new THREE.Vector3().subVectors(b,a);
+  measureResult={distance:a.distanceTo(b),dx:Math.abs(delta.x),dy:Math.abs(delta.y),dz:Math.abs(delta.z)};
+  addMeasureLine(a,b);
+  measureActive=false;
+  E.measureToggle.classList.remove('active');
+  E.stage.classList.remove('measure-mode');
+  E.measureStatus.className='measure-status';
+  E.measureStatus.textContent=T.measureDone;
+  showMeasurement();
+}
+
+function addMeasureMarker(point){
+  if(!measureGroup||!bounds)return;
+  const size=bounds.getSize(new THREE.Vector3());
+  const radius=Math.max(Math.max(size.x,size.y,size.z)*0.006,0.0001);
+  const geometry=new THREE.SphereGeometry(radius,16,12);
+  const material=new THREE.MeshBasicMaterial({color:0x35d39a,depthTest:false});
+  const marker=new THREE.Mesh(geometry,material);
+  marker.position.copy(point);marker.renderOrder=20;
+  measureGroup.add(marker);
+}
+
+function addMeasureLine(a,b){
+  const geometry=new THREE.BufferGeometry().setFromPoints([a,b]);
+  const material=new THREE.LineBasicMaterial({color:0x35d39a,depthTest:false});
+  const line=new THREE.Line(geometry,material);line.renderOrder=19;
+  measureGroup.add(line);
+}
+
+function clearMeasurement(){
+  measureActive=false;measurePoints=[];measureResult=null;
+  E.measureToggle?.classList.remove('active');E.stage?.classList.remove('measure-mode');
+  if(measureGroup){
+    for(const child of [...measureGroup.children]){
+      measureGroup.remove(child);
+      child.geometry?.dispose();
+      disposeMat(child.material);
+    }
+  }
+  if(E.measureDistance){
+    E.measureDistance.textContent='—';E.measureDx.textContent='—';E.measureDy.textContent='—';E.measureDz.textContent='—';
+  }
+  if(E.measureClear)E.measureClear.disabled=true;
+  if(E.measureStatus){
+    E.measureStatus.className='measure-status';
+    E.measureStatus.textContent=model?T.measureNone:T.measureLoad;
+  }
+}
+
+function showMeasurement(){
+  if(!measureResult||!E.measureDistance)return;
+  const target=E.units.value;
+  const f=unitFactor(baseUnit,target);
+  E.measureDistance.textContent=`${num(measureResult.distance*f)} ${target}`;
+  E.measureDx.textContent=`${num(measureResult.dx*f)} ${target}`;
+  E.measureDy.textContent=`${num(measureResult.dy*f)} ${target}`;
+  E.measureDz.textContent=`${num(measureResult.dz*f)} ${target}`;
 }
 
 function updatePCCheck(webglAvailable=true){

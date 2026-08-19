@@ -38,6 +38,21 @@
 <button data-view="iso" disabled>ISO</button><button data-view="front" disabled>Avant</button><button data-view="right" disabled>Droite</button><button data-view="top" disabled>Dessus</button></div>
 <button id="fit-view" class="wide" disabled>Ajuster à l'écran</button></div>
 
+
+<div class="card measure-card">
+  <div class="card-head"><span>MESURE</span><em>LOCAL</em></div>
+  <button id="measure-toggle" class="measure-button" type="button" disabled>Mesurer point à point</button>
+  <button id="measure-clear" class="measure-clear" type="button" disabled>Effacer la mesure</button>
+  <div id="measure-status" class="measure-status">Chargez un modèle pour mesurer.</div>
+  <dl class="measure-values">
+    <div><dt>Distance</dt><dd id="measure-distance">—</dd></div>
+    <div><dt>ΔX</dt><dd id="measure-dx">—</dd></div>
+    <div><dt>ΔY</dt><dd id="measure-dy">—</dd></div>
+    <div><dt>ΔZ</dt><dd id="measure-dz">—</dd></div>
+  </dl>
+  <p class="note">Mesure point-à-point sur le maillage affiché. Pour STEP/STP, la précision dépend de la tessellation OpenCascade.</p>
+</div>
+
 <div class="card controls"><div class="card-head"><span>AFFICHAGE</span></div>
 <label><span>Wireframe</span><input id="wireframe-toggle" type="checkbox" disabled></label>
 <label><span>Grille</span><input id="grid-toggle" type="checkbox" checked></label>
@@ -61,6 +76,24 @@
 <div><dt>Format</dt><dd id="stat-format">—</dd></div><div><dt>Taille fichier</dt><dd id="stat-filesize">—</dd></div><div><dt>Meshes</dt><dd id="stat-meshes">—</dd></div><div><dt>Sommets</dt><dd id="stat-vertices">—</dd></div><div><dt>Triangles</dt><dd id="stat-triangles">—</dd></div></dl></div>
 <div class="card"><div class="card-head"><span>ENCOMBREMENT</span></div><dl class="stats dims"><div><dt>X</dt><dd id="dim-x">—</dd></div><div><dt>Y</dt><dd id="dim-y">—</dd></div><div><dt>Z</dt><dd id="dim-z">—</dd></div></dl><p class="note">STL et OBJ ne définissent pas toujours leurs unités. Choisissez l'unité correspondant au fichier.</p></div>
 <div class="card"><div class="card-head"><span>GÉOMÉTRIE</span><em>MESH</em></div><dl class="stats"><div><dt>Surface</dt><dd id="stat-surface">—</dd></div><div><dt>Volume</dt><dd id="stat-volume">—</dd></div></dl><p class="note">Le volume est pertinent seulement pour un maillage fermé et correctement orienté.</p></div>
+
+<div id="step-properties-card" class="card step-properties-card" hidden>
+  <div class="card-head"><span>PROPRIÉTÉS STEP</span><em>LOCAL</em></div>
+  <dl class="stats step-meta">
+    <div><dt>Nom STEP</dt><dd id="step-name">—</dd></div>
+    <div><dt>Schéma</dt><dd id="step-schema">—</dd></div>
+    <div><dt>Date</dt><dd id="step-date">—</dd></div>
+    <div><dt>Auteur</dt><dd id="step-author">—</dd></div>
+    <div><dt>Organisation</dt><dd id="step-org">—</dd></div>
+    <div><dt>Logiciel d'origine</dt><dd id="step-origin">—</dd></div>
+    <div><dt>Préprocesseur</dt><dd id="step-preprocessor">—</dd></div>
+    <div><dt>Description</dt><dd id="step-description">—</dd></div>
+  </dl>
+  <div class="step-tree-head">STRUCTURE / PIÈCES</div>
+  <div id="step-tree" class="step-tree">—</div>
+  <p class="note">Le contenu dépend de ce que le logiciel CAD a réellement écrit dans le STEP. Les propriétés personnalisées SolidWorks ne sont pas garanties dans un STEP standard.</p>
+</div>
+
 <div class="card privacy-card"><b>✓</b><div><strong>Traitement local</strong><p>L'analyse est exécutée par votre navigateur. NavoFlo ne reçoit pas votre modèle.</p></div></div>
 </aside>
 </div></section>
