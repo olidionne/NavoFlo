@@ -962,3 +962,11 @@
   line-height:1.5;
 }
 
+
+
+/* NavoFlo suite switcher */
+.suite-switch{display:flex;align-items:center;gap:3px;padding:3px;border:1px solid rgba(255,255,255,.08);border-radius:8px;background:rgba(255,255,255,.025)}
+.suite-switch a{padding:7px 9px;border-radius:6px;color:#81929d;text-decoration:none;font:800 9px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em}
+.suite-switch a:hover{color:#35d39a;background:rgba(53,211,154,.06)}
+.suite-switch a.active{color:#35d39a;background:rgba(53,211,154,.11)}
+@media(max-width:760px){.suite-switch{display:none}}
