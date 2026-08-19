@@ -111,9 +111,10 @@ const hoverFaceMaterial = new THREE.MeshBasicMaterial({
 const selectionFaceMaterial = new THREE.MeshBasicMaterial({
   color:0x2f80ed,
   transparent:true,
-  opacity:0.42,
-  side:THREE.DoubleSide,
+  opacity:0.46,
+  side:THREE.FrontSide,
   depthTest:true,
+  depthWrite:false,
   polygonOffset:true,
   polygonOffsetFactor:-2,
   polygonOffsetUnits:-2
@@ -478,7 +479,6 @@ function resize() {
 
 function render() {
   controls?.update();
-  updatePersistentSelectionVisibility();
   renderer?.render(scene,camera);
   updateDimensionLabelPosition();
 }
@@ -1222,14 +1222,17 @@ function selectionFromFace(hit) {
     id=face?.id;
   }
   if (id == null) return null;
-  let viewNormal=null;
 
+  // Lock the selected side at click time. STEP face winding is not guaranteed
+  // to match the side the user is looking at, especially inside holes. Pick
+  // FrontSide or BackSide from the actual triangle hit and keep that material
+  // side for the lifetime of this selection. This avoids frame-by-frame
+  // visibility toggles that could make committed blue faces disappear.
+  let selectedFaceSide=THREE.FrontSide;
   if(hit.face?.normal){
-    viewNormal=hit.face.normal.clone().transformDirection(o.matrixWorld).normalize();
+    const worldNormal=hit.face.normal.clone().transformDirection(o.matrixWorld).normalize();
     const towardCamera=camera.position.clone().sub(hit.point).normalize();
-    if(viewNormal.dot(towardCamera)<0)viewNormal.negate();
-  }else{
-    viewNormal=camera.position.clone().sub(hit.point).normalize();
+    selectedFaceSide=worldNormal.dot(towardCamera)>=0 ? THREE.FrontSide : THREE.BackSide;
   }
 
   return {
@@ -1237,7 +1240,7 @@ function selectionFromFace(hit) {
     geometryId:o.userData.geometryId,
     elementId:Number(id),
     point:hit.point.clone(),
-    viewNormal,
+    selectedFaceSide,
     object:o,
     def,
     transform:o.matrixWorld.toArray()
@@ -1469,6 +1472,10 @@ function measureAngleFallback(a,b) {
 }
 
 async function acceptSelection(selection, event={}) {
+  // Once clicked, the hover overlay must get out of the way immediately.
+  // The committed blue overlay is the only visual state until deselection.
+  clearPreselection();
+
   const key=selectionKey(selection);
   const existing=selected.findIndex(s=>selectionKey(s)===key);
 
@@ -1595,24 +1602,6 @@ function rebuildSelectionHighlights() {
   });
 }
 
-function updatePersistentSelectionVisibility() {
-  for(const selection of selected){
-    if(selection.kind!=='face')continue;
-
-    const group=selectionHighlightMap.get(selectionKey(selection));
-    if(!group)continue;
-
-    const normal=selection.viewNormal;
-    if(!normal?.isVector3){
-      group.visible=true;
-      continue;
-    }
-
-    const toCamera=camera.position.clone().sub(selection.point);
-    group.visible=toCamera.dot(normal)>=0;
-  }
-}
-
 function highlightSelection(s,index,parent=selectionRoot) {
   const color=0x2f80ed;
   const faceColor=0x2f80ed;
@@ -1655,6 +1644,9 @@ function highlightSelection(s,index,parent=selectionRoot) {
 
     const mesh=new THREE.Mesh(g,selectionFaceMaterial.clone());
     mesh.material.color.setHex(faceColor);
+    mesh.material.side=s.selectedFaceSide ?? THREE.FrontSide;
+    mesh.material.depthWrite=false;
+    mesh.material.needsUpdate=true;
     mesh.matrix.copy(s.object.matrixWorld);
     mesh.matrixAutoUpdate=false;
     mesh.renderOrder=29;
