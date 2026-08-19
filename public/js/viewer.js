@@ -475,6 +475,7 @@ function resize() {
 function render() {
   controls?.update();
   renderer?.render(scene,camera);
+  updateDimensionLabelPosition();
 }
 
 async function loadFiles(files) {
@@ -1245,7 +1246,11 @@ function toggleMeasure() {
 }
 
 function clearSelections() {
-  selected=[];currentMeasureResult=null;clearGroup(selectionRoot);clearGroup(measureOverlayRoot);
+  selected=[];
+  currentMeasureResult=null;
+  clearGroup(selectionRoot);
+  clearGroup(measureOverlayRoot);
+  clearDimensionLabel();
   clearMeasureDetails();
   if (measureEnabled) setMeasurePrompt(T.selectFirst);
 }
@@ -1257,6 +1262,7 @@ function clearMeasurement() {
 function showSingleExact(d) {
   const details=[];
   clearGroup(measureOverlayRoot);
+  clearDimensionLabel();
 
   E.measureMain.textContent=`${labelKind(d.kind)} #${d.elementId}`;
   const familyLabel=localizeGeometryFamily(d.family);
@@ -1291,13 +1297,13 @@ function showPairExact(r) {
   if (r.kind==='angle') {
     E.measureMain.textContent=formatAngle(r.value);
     renderDetails([[T.angle,formatAngle(r.value)]]);
-    drawMeasurePoints(r.pointA,r.pointB);
+    drawMeasurePoints(r.pointA,r.pointB,formatAngle(r.value));
   } else if (r.kind==='center-center') {
     E.measureMain.textContent=formatLength(r.value);
     renderDetails([
       [T.center,formatLength(r.value)],[T.dx,formatLength(r.dx)],[T.dy,formatLength(r.dy)],[T.dz,formatLength(r.dz)]
     ]);
-    drawMeasureLine(r.pointA,r.pointB);
+    drawMeasureLine(r.pointA,r.pointB,formatLength(r.value));
   } else {
     E.measureMain.textContent=formatLength(r.value);
     const a=r.pointA,b=r.pointB;
@@ -1305,7 +1311,7 @@ function showPairExact(r) {
     const rows=[[T.distance,formatLength(r.value)]];
     if (dx!=null) rows.push([T.dx,formatLength(dx)],[T.dy,formatLength(dy)],[T.dz,formatLength(dz)]);
     renderDetails(rows);
-    drawMeasureLine(a,b);
+    drawMeasureLine(a,b,formatLength(r.value));
   }
   E.selectionSummary.textContent=`${labelSelection(selected[0])}  →  ${labelSelection(selected[1])}`;
 }
@@ -1318,9 +1324,14 @@ function showMeshPointDistance(a,b) {
     [T.distance,formatLength(distance,'u')],[T.dx,formatLength(Math.abs(delta.x),'u')],
     [T.dy,formatLength(Math.abs(delta.y),'u')],[T.dz,formatLength(Math.abs(delta.z),'u')]
   ]);
-  drawMeasureLine(a.point.toArray(),b.point.toArray());
+  drawMeasureLine(
+    a.point.toArray(),
+    b.point.toArray(),
+    formatLength(distance,'u')
+  );
 }
 function showMeasureError(message) {
+  clearDimensionLabel();
   E.measureMain.textContent='—';
   renderDetails([]);
   E.selectionSummary.textContent=message;
@@ -1360,17 +1371,77 @@ function addExactCenterMarker(point) {
   measureOverlayRoot.add(cross);
 }
 
-function drawMeasureLine(a,b) {
-  if (!a||!b) return;
+function ensureDimensionLabel() {
+  if (dimensionLabel) return dimensionLabel;
+
+  const label=document.createElement('div');
+  label.className='cad-dimension-label';
+  label.hidden=true;
+  E.workspace.appendChild(label);
+  dimensionLabel=label;
+  return label;
+}
+
+function clearDimensionLabel() {
+  dimensionLabelPoint=null;
+  if(dimensionLabel){
+    dimensionLabel.hidden=true;
+    dimensionLabel.textContent='';
+  }
+}
+
+function setDimensionLabel(text,point) {
+  if(!text||!point)return clearDimensionLabel();
+
+  const label=ensureDimensionLabel();
+  dimensionLabelPoint=point.clone();
+  label.textContent=text;
+  label.hidden=false;
+  updateDimensionLabelPosition();
+}
+
+function updateDimensionLabelPosition() {
+  if(!dimensionLabel||dimensionLabel.hidden||!dimensionLabelPoint||!camera)return;
+
+  const projected=dimensionLabelPoint.clone().project(camera);
+
+  // Hide if the annotation is behind the camera or outside the depth range.
+  if(projected.z < -1 || projected.z > 1){
+    dimensionLabel.style.visibility='hidden';
+    return;
+  }
+
+  const rect=E.workspace.getBoundingClientRect();
+  const x=(projected.x*0.5+0.5)*rect.width;
+  const y=(-projected.y*0.5+0.5)*rect.height;
+
+  dimensionLabel.style.visibility='visible';
+  dimensionLabel.style.left=`${x}px`;
+  dimensionLabel.style.top=`${y}px`;
+}
+
+function drawMeasureLine(a,b,labelText='') {
+  if (!a||!b) {
+    clearDimensionLabel();
+    return;
+  }
+
   const pa=new THREE.Vector3(...a),pb=new THREE.Vector3(...b);
   const line=new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([pa,pb]),
     new THREE.LineBasicMaterial({color:0x35d39a,depthTest:false})
   );
-  line.renderOrder=40;measureOverlayRoot.add(line);
-  addMeasureMarker(pa);addMeasureMarker(pb);
+
+  line.renderOrder=40;
+  measureOverlayRoot.add(line);
+  addMeasureMarker(pa);
+  addMeasureMarker(pb);
+
+  const midpoint=pa.clone().add(pb).multiplyScalar(0.5);
+  setDimensionLabel(labelText,midpoint);
 }
-function drawMeasurePoints(a,b){drawMeasureLine(a,b)}
+
+function drawMeasurePoints(a,b,labelText=''){drawMeasureLine(a,b,labelText)}
 function addMeasureMarker(p) {
   const r=Math.max(modelSize*0.0018,0.0001);
   const m=new THREE.Mesh(new THREE.SphereGeometry(r,14,10),new THREE.MeshBasicMaterial({color:0x35d39a,depthTest:false}));

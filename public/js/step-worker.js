@@ -176,6 +176,22 @@ function inspectSelection(occt, selection) {
   return out;
 }
 
+function isRadialGeometry(info) {
+  const family=String(info?.family||'').toLowerCase();
+
+  // These geometries have a meaningful CAD center/axis for center-to-center.
+  return [
+    'circle',
+    'circular',
+    'cylinder',
+    'cylindrical',
+    'sphere',
+    'spherical',
+    'torus',
+    'toroidal'
+  ].includes(family);
+}
+
 function centerDistance(a, b) {
   if (!a.center || !b.center) {
     return { ok:false, code:'no-center', message:'Both selections must expose an exact center.' };
@@ -283,9 +299,18 @@ self.onmessage = async (event) => {
         result = centerDistance(aInfo, bInfo);
       } else if (payload.mode === 'angle') {
         result = exactAngle(occt, payload.a, payload.b, aInfo, bInfo);
-      } else if (payload.mode === 'smart' && aInfo.center && bInfo.center) {
+      } else if (
+        payload.mode === 'smart' &&
+        aInfo.center &&
+        bInfo.center &&
+        isRadialGeometry(aInfo) &&
+        isRadialGeometry(bInfo)
+      ) {
+        // Hole/circle/cylinder -> hole/circle/cylinder: center-to-center.
         result = centerDistance(aInfo, bInfo);
       } else {
+        // Face -> face, cylindrical face -> planar face, edge -> face, etc.
+        // Use OpenCascade's exact minimum B-Rep distance.
         result = exactDistance(occt, payload.a, payload.b, aInfo, bInfo);
       }
 
