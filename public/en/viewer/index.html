@@ -2,7 +2,7 @@
 <html lang="en-CA">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NavoFlo 3D Inspector — Free 3D Viewer</title><meta name="description" content="Inspect STL, OBJ, GLB and GLTF files directly in your browser. Your models stay on your device."><meta name="theme-color" content="#0b1117">
+<title>NavoFlo 3D Inspector — Free 3D Viewer</title><meta name="description" content="Inspect STEP, STP, STL, OBJ, GLB and GLTF files directly in your browser. Your models stay on your device."><meta name="theme-color" content="#0b1117">
 <link rel="canonical" href="https://navoflo.com/en/viewer/">
 <link rel="alternate" hreflang="fr-CA" href="https://navoflo.com/viewer/"><link rel="alternate" hreflang="en-CA" href="https://navoflo.com/en/viewer/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/css/styles.css"><link rel="stylesheet" href="/css/viewer.css">
@@ -15,15 +15,25 @@
 </div></header>
 
 <main>
-<section class="viewer-intro"><div class="container intro-row"><div><span class="viewer-kicker">FREE TOOL · V1</span><h1>NavoFlo <span>3D Inspector</span></h1><p>Drop a 3D model and inspect it instantly in your browser.</p></div>
+<section class="viewer-intro"><div class="container intro-row"><div><span class="viewer-kicker">FREE TOOL · V1</span><h1>NavoFlo <span>3D Inspector</span></h1><p>Drop a 3D model — including STEP/STP — and inspect it using your own PC's processing power.</p></div>
 <div class="privacy-pill"><i></i><div><strong>Your model stays on your device</strong><small>No 3D file is uploaded to NavoFlo.</small></div></div></div></section>
 
 <section class="viewer-area"><div class="container viewer-grid">
 <aside class="sidebar">
 <div class="card"><div class="card-head"><span>FILE</span><button id="clear-model" disabled>Clear</button></div>
-<label id="drop-zone" class="drop-zone" for="file-input" tabindex="0"><input id="file-input" type="file" multiple hidden accept=".stl,.obj,.glb,.gltf,.bin,.png,.jpg,.jpeg,.webp"><b>＋</b><strong>Drop your model here</strong><small>or click to choose files</small><em>STL · OBJ · GLB · GLTF</em></label>
+<label id="drop-zone" class="drop-zone" for="file-input" tabindex="0"><input id="file-input" type="file" multiple hidden accept=".step,.stp,.stl,.obj,.glb,.gltf,.bin,.png,.jpg,.jpeg,.webp"><b>＋</b><strong>Drop your model here</strong><small>or click to choose files</small><em>STEP · STP · STL · OBJ · GLB · GLTF</em></label>
 <div id="file-status" class="file-status" role="status">No model loaded</div><p class="note">For GLTF with external files, select the .gltf, .bin and textures together.</p></div>
 
+
+<div class="card pc-card">
+  <div class="card-head"><span>STEP / STP · PC POWER</span><em>LOCAL</em></div>
+  <p class="pc-lead">STEP conversion runs <strong>on your computer</strong>. Larger models need more CPU and memory.</p>
+  <div class="pc-tier"><b>Suggested minimum</b><span>4 CPU threads · 8 GB RAM · 64-bit browser · WebAssembly + WebGL2</span></div>
+  <div class="pc-tier"><b>Recommended</b><span>8+ CPU threads · 16 GB RAM</span></div>
+  <div class="pc-tier"><b>Large assemblies</b><span>32 GB RAM recommended</span></div>
+  <div id="pc-check" class="pc-check" aria-live="polite">Checking your PC…</div>
+  <p class="note">These are practical NavoFlo guidelines, not a guarantee: geometric complexity often matters more than file size.</p>
+</div>
 <div class="card"><div class="card-head"><span>VIEWS</span></div><div class="view-buttons">
 <button data-view="iso" disabled>ISO</button><button data-view="front" disabled>Front</button><button data-view="right" disabled>Right</button><button data-view="top" disabled>Top</button></div>
 <button id="fit-view" class="wide" disabled>Fit to screen</button></div>
@@ -40,7 +50,7 @@
 </aside>
 
 <div id="viewer-stage" class="stage"><canvas id="viewer-canvas"></canvas>
-<div id="stage-empty" class="empty"><div class="mini-mark">N</div><strong>Ready to inspect</strong><p>Drop an STL, OBJ, GLB or GLTF into the viewer.</p></div>
+<div id="stage-empty" class="empty"><div class="mini-mark">N</div><strong>Ready to inspect</strong><p>Drop a STEP, STP, STL, OBJ, GLB or GLTF into the viewer.</p></div>
 <div class="stage-help"><span>Rotate: left click</span><span>Pan: right click</span><span>Zoom: wheel</span></div>
 <button id="screenshot" class="png-btn" disabled>PNG</button>
 <div id="loading-overlay" class="loading" hidden><i></i><strong id="loading-label">Loading...</strong></div>
@@ -55,7 +65,7 @@
 </aside>
 </div></section>
 
-<section class="viewer-bottom"><div class="container bottom-grid"><div><span class="viewer-kicker">V1</span><h2>Fast, simple and private.</h2></div><div><p>This V1 supports common mesh formats. STEP/STP support and deeper CAD analysis are planned later.</p><a href="mailto:contact@navoflo.com">Have a suggestion? contact@navoflo.com →</a></div></div></section>
+<section class="viewer-bottom"><div class="container bottom-grid"><div><span class="viewer-kicker">V1</span><h2>Fast, simple and private.</h2></div><div><p>STEP/STP is converted locally into a mesh on your PC with WebAssembly. Deeper B-Rep CAD analysis can be added later.</p><a href="mailto:contact@navoflo.com">Have a suggestion? contact@navoflo.com →</a></div></div></section>
 </main>
 <script type="module" src="/js/viewer.js"></script>
 </body></html>

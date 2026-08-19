@@ -7,14 +7,21 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const FR=document.documentElement.lang.toLowerCase().startsWith('fr');
 const T=FR?{
 no:'Aucun modèle chargé',loading:'Chargement...',analysing:'Analyse de la géométrie...',
-loaded:'chargé',unsupported:'Utilisez un fichier STL, OBJ, GLB ou GLTF.',
+stepInit:'Initialisation du moteur STEP local…',stepParse:'Conversion STEP sur votre PC…',
+loaded:'chargé',unsupported:'Utilisez un fichier STEP, STP, STL, OBJ, GLB ou GLTF.',
 large:'Un fichier dépasse la limite de 250 Mo.',total:'La sélection dépasse 500 Mo.',
-error:'Impossible de charger ce modèle.',webgl:"WebGL n'est pas disponible.",complex:'Trop complexe',
-shot:'navoflo-3d-inspector.png'
-}:{no:'No model loaded',loading:'Loading...',analysing:'Analyzing geometry...',loaded:'loaded',
-unsupported:'Use an STL, OBJ, GLB or GLTF file.',large:'A file exceeds the 250 MB limit.',
-total:'The selected files exceed 500 MB.',error:'Unable to load this model.',webgl:'WebGL is not available.',
-complex:'Too complex',shot:'navoflo-3d-inspector.png'};
+error:'Impossible de charger ce modèle.',stepError:'Impossible de convertir ce fichier STEP.',
+webgl:"WebGL n'est pas disponible.",complex:'Trop complexe',shot:'navoflo-3d-inspector.png',
+pcOk:'Compatible STEP',pcLimited:'Compatible, mais limité pour les gros STEP',pcUnknown:'Compatibilité partielle à vérifier',
+wasm:'WebAssembly',webgl2:'WebGL2',threads:'threads',ram:'RAM'
+}:{no:'No model loaded',loading:'Loading...',analysing:'Analyzing geometry...',
+stepInit:'Initializing local STEP engine…',stepParse:'Converting STEP on your PC…',
+loaded:'loaded',unsupported:'Use a STEP, STP, STL, OBJ, GLB or GLTF file.',
+large:'A file exceeds the 250 MB limit.',total:'The selected files exceed 500 MB.',
+error:'Unable to load this model.',stepError:'Unable to convert this STEP file.',
+webgl:'WebGL is not available.',complex:'Too complex',shot:'navoflo-3d-inspector.png',
+pcOk:'STEP compatible',pcLimited:'Compatible, but limited for large STEP files',pcUnknown:'Partial compatibility check',
+wasm:'WebAssembly',webgl2:'WebGL2',threads:'threads',ram:'RAM'};
 
 const MAX_FILE=250*1024*1024,MAX_TOTAL=500*1024*1024,MAX_TRI=1500000;
 const $=id=>document.getElementById(id);
@@ -24,18 +31,20 @@ status:$('file-status'),empty:$('stage-empty'),overlay:$('loading-overlay'),load
 clear:$('clear-model'),fit:$('fit-view'),shot:$('screenshot'),wire:$('wireframe-toggle'),
 grid:$('grid-toggle'),units:$('unit-select'),clip:$('clip-toggle'),axis:$('clip-axis'),slider:$('clip-slider'),
 format:$('stat-format'),size:$('stat-filesize'),meshes:$('stat-meshes'),vertices:$('stat-vertices'),
-triangles:$('stat-triangles'),x:$('dim-x'),y:$('dim-y'),z:$('dim-z'),surface:$('stat-surface'),volume:$('stat-volume')
+triangles:$('stat-triangles'),x:$('dim-x'),y:$('dim-y'),z:$('dim-z'),surface:$('stat-surface'),volume:$('stat-volume'),
+pc:$('pc-check')
 };
 
 let renderer,scene,camera,controls,rootGroup,grid,model=null,bounds=null,stats=null,format='',fileSize=0;
-let blobUrls=[],resourceMap=new Map(),original=new WeakMap();
+let blobUrls=[],resourceMap=new Map(),original=new WeakMap(),baseUnit='u';
+let stepWorker=null,stepRequest=0,stepResolvers=new Map();
 const clipPlane=new THREE.Plane(new THREE.Vector3(1,0,0),0);
 
 init();
 
 function init(){
   try{renderer=new THREE.WebGLRenderer({canvas:E.canvas,antialias:true,preserveDrawingBuffer:true});}
-  catch(e){fail(T.webgl);return}
+  catch(e){fail(T.webgl);updatePCCheck(false);return}
   renderer.setPixelRatio(Math.min(devicePixelRatio||1,2));
   renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.localClippingEnabled=true;renderer.setClearColor(0x0a1016,1);
   scene=new THREE.Scene();camera=new THREE.PerspectiveCamera(42,1,.01,100000);camera.position.set(5,4,5);
@@ -44,7 +53,7 @@ function init(){
   const a=new THREE.DirectionalLight(0xffffff,2.2);a.position.set(4,7,6);scene.add(a);
   const b=new THREE.DirectionalLight(0x7adfbd,1.1);b.position.set(-5,2,-4);scene.add(b);
   rootGroup=new THREE.Group();scene.add(rootGroup);makeGrid(10);
-  bind();resize();renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera)});
+  bind();resize();updatePCCheck(true);renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera)});
 }
 
 function bind(){
@@ -62,7 +71,7 @@ function bind(){
   [E.clip,E.axis,E.slider].forEach(el=>el.addEventListener(el===E.slider?'input':'change',clipping));
   E.units.addEventListener('change',showStats);
   E.shot.addEventListener('click',screenshot);
-  addEventListener('beforeunload',revoke);
+  addEventListener('beforeunload',()=>{revoke();stepWorker?.terminate()});
 }
 
 function resize(){
@@ -73,17 +82,22 @@ function resize(){
 async function load(files){
   if(files.some(f=>f.size>MAX_FILE)){fail(T.large);return}
   if(files.reduce((s,f)=>s+f.size,0)>MAX_TOTAL){fail(T.total);return}
-  const main=files.find(f=>['stl','obj','glb','gltf'].includes(ext(f.name)));
+  const main=files.find(f=>['step','stp','stl','obj','glb','gltf'].includes(ext(f.name)));
   if(!main){fail(T.unsupported);return}
   clear(false);busy(true,T.loading);
   try{
     mapResources(files);format=ext(main.name).toUpperCase();fileSize=main.size;
+    baseUnit=(format==='STEP'||format==='STP')?'mm':'u';
+    E.units.value=baseUnit==='mm'?'mm':'u';
+
     const object=await parse(main);if(!object)throw Error('Empty model');
     model=object;rootGroup.add(model);centerModel();remember(model);materials();enable(true);
     E.empty.classList.add('hidden');E.status.className='file-status loaded';E.status.textContent=`${main.name} · ${T.loaded}`;
     busy(true,T.analysing);await frame();stats=analyse(model);showStats();fit('iso');
-  }catch(err){console.error('[NavoFlo 3D Inspector]',err);clear(false);fail(T.error)}
-  finally{busy(false)}
+  }catch(err){
+    console.error('[NavoFlo 3D Inspector]',err);
+    const wasStep=format==='STEP'||format==='STP';clear(false);fail(wasStep?T.stepError:T.error)
+  }finally{busy(false)}
 }
 
 function ext(n){return n.split('.').pop().toLowerCase()}
@@ -95,6 +109,12 @@ function mapResources(files){
 
 async function parse(file){
   const e=ext(file.name);
+  if(e==='step'||e==='stp'){
+    busy(true,T.stepInit);await frame();
+    const result=await readStepLocally(file);
+    busy(true,T.stepParse);await frame();
+    return buildOcctObject(result);
+  }
   if(e==='stl'){
     const g=new STLLoader().parse(await file.arrayBuffer());g.computeVertexNormals();
     return new THREE.Mesh(g,defaultMaterial());
@@ -113,6 +133,87 @@ async function parse(file){
   return await new Promise((ok,no)=>loader.parse(data,'',g=>ok(g.scene||g.scenes?.[0]),no));
 }
 
+async function readStepLocally(file){
+  const worker=getStepWorker();
+  const buffer=await file.arrayBuffer();
+  const id=++stepRequest;
+
+  return await new Promise((resolve,reject)=>{
+    stepResolvers.set(id,{resolve,reject});
+    worker.postMessage({id,buffer},[buffer]);
+  });
+}
+
+function getStepWorker(){
+  if(stepWorker)return stepWorker;
+  if(typeof Worker==='undefined')throw new Error('Web Workers are not supported.');
+
+  stepWorker=new Worker('/js/step-worker.js');
+  stepWorker.onmessage=(event)=>{
+    const {id,ok,result,error}=event.data||{};
+    const pending=stepResolvers.get(id);if(!pending)return;
+    stepResolvers.delete(id);
+    ok?pending.resolve(result):pending.reject(new Error(error||'STEP import failed.'));
+  };
+  stepWorker.onerror=(event)=>{
+    for(const {reject} of stepResolvers.values())reject(new Error(event.message||'STEP worker failed.'));
+    stepResolvers.clear();
+    stepWorker?.terminate();stepWorker=null;
+  };
+  return stepWorker;
+}
+
+function buildOcctObject(result){
+  const group=new THREE.Group();
+  for(const source of result.meshes||[]){
+    const geometry=new THREE.BufferGeometry();
+    const positions=source.attributes?.position?.array;
+    if(!positions?.length)continue;
+
+    geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
+    if(source.attributes?.normal?.array?.length){
+      geometry.setAttribute('normal',new THREE.Float32BufferAttribute(source.attributes.normal.array,3));
+    }else{
+      geometry.computeVertexNormals();
+    }
+
+    const index=Uint32Array.from(source.index?.array||[]);
+    if(index.length)geometry.setIndex(new THREE.BufferAttribute(index,1));
+    geometry.name=source.name||'STEP mesh';
+
+    const baseColor=source.color?new THREE.Color(source.color[0],source.color[1],source.color[2]):new THREE.Color(0x93b5aa);
+    const baseMaterial=cadMaterial(baseColor);
+    const materialsList=[baseMaterial];
+
+    const faces=source.brep_faces||[];
+    if(index.length&&faces.length){
+      for(const face of faces){
+        const color=face.color?new THREE.Color(face.color[0],face.color[1],face.color[2]):baseColor;
+        materialsList.push(cadMaterial(color));
+      }
+      const triangleCount=index.length/3;
+      let tri=0,faceIndex=0;
+      while(tri<triangleCount){
+        const start=tri;let end,materialIndex;
+        if(faceIndex>=faces.length){end=triangleCount;materialIndex=0}
+        else if(tri<faces[faceIndex].first){end=faces[faceIndex].first;materialIndex=0}
+        else{end=faces[faceIndex].last+1;materialIndex=faceIndex+1;faceIndex++}
+        if(end<=start){tri++;continue}
+        geometry.addGroup(start*3,(end-start)*3,materialIndex);tri=end;
+      }
+    }
+
+    const mesh=new THREE.Mesh(geometry,materialsList.length>1?materialsList:baseMaterial);
+    mesh.name=source.name||'STEP mesh';
+    group.add(mesh);
+  }
+  if(group.children.length===0)throw new Error('STEP import returned no meshes.');
+  return group;
+}
+
+function cadMaterial(color){
+  return new THREE.MeshStandardMaterial({color,metalness:.08,roughness:.58,side:THREE.DoubleSide});
+}
 function defaultMaterial(){return new THREE.MeshStandardMaterial({color:0x93b5aa,metalness:.18,roughness:.5,side:THREE.DoubleSide})}
 
 function centerModel(){
@@ -165,10 +266,18 @@ function surfaceVolume(o){
 }
 
 function showStats(){
-  if(!stats){resetStats();return}const u=E.units.value;
+  if(!stats){resetStats();return}
+  const target=E.units.value;
+  const f=unitFactor(baseUnit,target);
   E.format.textContent=format;E.size.textContent=bytes(fileSize);E.meshes.textContent=numInt(stats.meshCount);E.vertices.textContent=numInt(stats.verts);E.triangles.textContent=numInt(stats.tris);
-  E.x.textContent=`${num(stats.size.x)} ${u}`;E.y.textContent=`${num(stats.size.y)} ${u}`;E.z.textContent=`${num(stats.size.z)} ${u}`;
-  E.surface.textContent=stats.surface==null?T.complex:`${num(stats.surface)} ${u}²`;E.volume.textContent=stats.volume==null?T.complex:`${num(stats.volume)} ${u}³`;
+  E.x.textContent=`${num(stats.size.x*f)} ${target}`;E.y.textContent=`${num(stats.size.y*f)} ${target}`;E.z.textContent=`${num(stats.size.z*f)} ${target}`;
+  E.surface.textContent=stats.surface==null?T.complex:`${num(stats.surface*f*f)} ${target}²`;E.volume.textContent=stats.volume==null?T.complex:`${num(stats.volume*f*f*f)} ${target}³`;
+}
+
+function unitFactor(from,to){
+  if(from==='u'||to==='u')return 1;
+  const toMM={mm:1,cm:10,m:1000,in:25.4};
+  return toMM[from]/toMM[to];
 }
 
 function fit(view='iso'){
@@ -184,9 +293,33 @@ function enable(on){
 }
 
 function clear(message=true){
-  if(model){rootGroup.remove(model);dispose(model)}model=null;rootGroup?.position.set(0,0,0);bounds=null;stats=null;format='';fileSize=0;original=new WeakMap();revoke();resetStats();enable(false);
-  E.wire.checked=false;E.clip.checked=false;E.slider.value=0;E.empty.classList.remove('hidden');if(grid)grid.position.y=0;
+  if(model){rootGroup.remove(model);dispose(model)}model=null;rootGroup?.position.set(0,0,0);bounds=null;stats=null;format='';fileSize=0;baseUnit='u';original=new WeakMap();revoke();resetStats();enable(false);
+  E.wire.checked=false;E.clip.checked=false;E.slider.value=0;E.units.value='u';E.empty.classList.remove('hidden');if(grid)grid.position.y=0;
   if(message){E.status.className='file-status';E.status.textContent=T.no}
+}
+
+function updatePCCheck(webglAvailable=true){
+  if(!E.pc)return;
+  const wasm=typeof WebAssembly==='object';
+  let webgl2=false;
+  try{webgl2=webglAvailable&&!!document.createElement('canvas').getContext('webgl2')}catch{}
+  const threads=navigator.hardwareConcurrency||null;
+  const ram=navigator.deviceMemory||null;
+
+  const requiredOk=wasm&&webgl2;
+  const cpuOk=threads==null||threads>=4;
+  const ramOk=ram==null||ram>=8;
+  const good=requiredOk&&cpuOk&&ramOk;
+  const limited=requiredOk&&!good;
+
+  const parts=[
+    `${T.wasm}: ${wasm?'✓':'✕'}`,
+    `${T.webgl2}: ${webgl2?'✓':'✕'}`,
+    `${T.threads}: ${threads??'?'}`,
+    `${T.ram}: ${ram?`${ram} GB+`:'?'}`
+  ];
+  E.pc.className='pc-check '+(good?'ok':limited?'warn':'bad');
+  E.pc.textContent=`${good?T.pcOk:limited?T.pcLimited:T.pcUnknown} · ${parts.join(' · ')}`;
 }
 
 function dispose(o){o.traverse(c=>{if(c.isMesh){c.geometry?.dispose();for(const m of mats(c.material))disposeMat(m)}})}
