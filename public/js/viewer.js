@@ -20,7 +20,7 @@ const T = FR ? {
   exactFail:'Mesure exacte non disponible pour cette sélection.', browser:'Votre navigateur',
   compatible:'Compatible STEP', limited:'Compatible, mais limité pour les gros STEP',
   incompatible:'Compatibilité STEP limitée', threads:'threads', ram:'RAM', source:'Source',
-  through:'traversant', depth:'Profondeur', hole:'Trou', reset:'Mesure effacée', fullscreen:'Plein écran', exitFullscreen:'Quitter le plein écran'
+  through:'traversant', depth:'Profondeur', hole:'Trou', reset:'Mesure effacée', fullscreen:'Plein écran', exitFullscreen:'Quitter le plein écran', metadataNone:'Aucune propriété personnalisée STEP détectée.', metadataFound:'propriété(s) STEP détectée(s)', metadataScan:'Lecture locale du fichier STEP.'
 } : {
   noModel:'No model', loading:'Loading…', stepEngine:'Initializing local CAD kernel…',
   stepOpen:'Opening STEP and extracting B-Rep…', meshOpen:'Loading mesh…',
@@ -36,14 +36,14 @@ const T = FR ? {
   exactFail:'Exact measurement is unavailable for this selection.', browser:'Your browser',
   compatible:'STEP compatible', limited:'Compatible, but limited for large STEP files',
   incompatible:'Limited STEP compatibility', threads:'threads', ram:'RAM', source:'Source',
-  through:'through', depth:'Depth', hole:'Hole', reset:'Measurement cleared', fullscreen:'Fullscreen', exitFullscreen:'Exit fullscreen'
+  through:'through', depth:'Depth', hole:'Hole', reset:'Measurement cleared', fullscreen:'Fullscreen', exitFullscreen:'Exit fullscreen', metadataNone:'No custom STEP properties detected.', metadataFound:'STEP property/properties detected', metadataScan:'Local STEP file scan.'
 };
 
 const $ = id => document.getElementById(id);
 const E = {
   workspace:$('cad-workspace'), canvas:$('viewer-canvas'), input:$('file-input'),
   empty:$('empty-drop'), loading:$('loading-overlay'), loadingLabel:$('loading-label'), loadingSub:$('loading-sub'),
-  clear:$('clear-model'), fit:$('fit-view'), edges:$('edges-toggle'),
+  clear:$('clear-model'), fit:$('fit-view'), edges:$('edges-toggle'), gridToggle:$('grid-toggle'), unitSelect:$('unit-select'),
   measure:$('measure-toggle'), measureType:$('measure-type'), measureClear:$('measure-clear'),
   measureCard:$('measure-card'), measureMain:$('measure-main'), measureDetails:$('measure-details'),
   measureBadge:$('measure-badge'), selectionSummary:$('selection-summary'),
@@ -55,7 +55,7 @@ const E = {
   propParts:$('prop-parts'), propGeometries:$('prop-geometries'), propTriangles:$('prop-triangles'),
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
   stepDate:$('step-date'), stepAuthor:$('step-author'), stepOrg:$('step-org'),
-  stepOrigin:$('step-origin'), stepTree:$('step-tree'), pc:$('pc-check'),
+  stepOrigin:$('step-origin'), stepTree:$('step-tree'), stepCustomSection:$('step-custom-section'), stepCustomProperties:$('step-custom-properties'), stepCustomNote:$('step-custom-note'), pc:$('pc-check'),
   statusFile:$('status-file'), statusFormat:$('status-format'), statusUnits:$('status-units')
 };
 
@@ -64,8 +64,8 @@ const MAX_TOTAL = 500*1024*1024;
 const WORKER_URL = '/js/step-worker.js';
 
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, grid;
-let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u';
-let currentStats = null, currentStepHeader = null, currentStepResult = null;
+let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
+let currentStats = null, currentStepHeader = null, currentStepResult = null, currentStepProperties = [];
 let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
 let selectionMode = 'auto', measureEnabled = false, selected = [], currentMeasureResult = null;
 let edgesVisible = true, clipEnabled = false;
@@ -114,6 +114,9 @@ function init() {
   controls.dampingFactor = 0.08;
   controls.screenSpacePanning = true;
   controls.zoomToCursor = true;
+  controls.zoomSpeed = 1.45;
+  controls.minDistance = 0;
+  controls.maxDistance = Infinity;
   controls.mouseButtons.LEFT = null;
   controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
   controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
@@ -160,6 +163,12 @@ function bindUI() {
   E.clear.addEventListener('click', clearModel);
   E.fit.addEventListener('click', () => fitCamera('iso'));
   E.edges.addEventListener('click', toggleEdges);
+  E.gridToggle.addEventListener('click', toggleGrid);
+  E.unitSelect.addEventListener('change', async () => {
+    displayUnit=E.unitSelect.value;
+    updateDisplayedUnits();
+    await refreshMeasurementUnits();
+  });
   E.measure.addEventListener('click', toggleMeasure);
   E.measureClear.addEventListener('click', clearMeasurement);
   E.measureType.addEventListener('change', () => {
@@ -267,6 +276,9 @@ function bindUI() {
   }, true);
 
   E.canvas.addEventListener('wheel', closeSelectOther, {passive:true});
+  E.canvas.addEventListener('wheel', () => {
+    requestAnimationFrame(updateZoomClipping);
+  }, {passive:true});
 
   E.canvas.addEventListener('pointerdown', event => {
     if (event.button === 0) pointerDown = {x:event.clientX,y:event.clientY};
@@ -471,10 +483,21 @@ async function loadFiles(files) {
       const result=await workerRequest('load-step',{buffer},[buffer]);
       currentStepResult=result;
       currentUnit='mm';
+      displayUnit='mm';
+      E.unitSelect.value='mm';
+      currentStepProperties=[];
+      scanStepProperties(main).then(properties=>{
+        if(currentFile!==main)return;
+        currentStepProperties=properties;
+        renderStepCustomProperties();
+      }).catch(error=>console.warn('[NavoFlo STEP metadata]',error));
       buildExactStepScene(result);
     } else {
       currentStepResult=null;
       currentUnit='u';
+      displayUnit='u';
+      E.unitSelect.value='u';
+      currentStepProperties=[];
       await buildMeshScene(main,files);
     }
 
@@ -484,7 +507,7 @@ async function loadFiles(files) {
     enableTools(true);
     E.statusFile.textContent=main.name;
     E.statusFormat.textContent=currentFormat;
-    E.statusUnits.textContent=currentUnit;
+    E.statusUnits.textContent=displayUnit;
     fitCamera('iso');
   } catch (error) {
     console.error('[NavoFlo CAD Viewer]',error);
@@ -698,6 +721,11 @@ function finalizeLoadedModel() {
   raycaster.params.Line.threshold=modelSize*0.004;
   raycaster.params.Points.threshold=modelSize*0.006;
 
+  // Allow very deep inspection without OrbitControls feeling stuck.
+  controls.minDistance=Math.max(modelSize*0.000001,1e-9);
+  controls.maxDistance=Math.max(modelSize*10000,1);
+  updateZoomClipping();
+
   createGrid(niceGrid(modelSize*1.6));
   grid.position.y=box.min.y-modelSize*0.003;
   updatePickingVisibility();
@@ -709,6 +737,25 @@ function createGrid(size) {
   grid.material.opacity=.34;grid.material.transparent=true;scene.add(grid);
 }
 function niceGrid(v){const p=10**Math.floor(Math.log10(v)),s=v/p;return(s<=1?1:s<=2?2:s<=5?5:10)*p}
+
+function toggleGrid() {
+  if(!grid)return;
+  grid.visible=!grid.visible;
+  E.gridToggle.classList.toggle('active',grid.visible);
+}
+
+function updateZoomClipping() {
+  if(!camera||!controls||!currentModel)return;
+  const distance=Math.max(camera.position.distanceTo(controls.target),1e-9);
+
+  // Keep the near plane far enough to retain depth precision, but small
+  // enough to let users inspect tiny details at very close range.
+  camera.near=Math.max(Math.min(modelSize*0.00001,distance*0.002),1e-8);
+  camera.far=Math.max(modelSize*1000,distance*200,100);
+  camera.updateProjectionMatrix();
+}
+
+
 
 function selectAt(event) {
   const selection = pickSelectionCandidate(event.clientX,event.clientY);
@@ -1129,7 +1176,7 @@ function showSingleExact(d) {
     addExactCenterMarker(c);
     details.push([
       FR?'Centre':'Center',
-      `${formatNumber(d.center[0])}, ${formatNumber(d.center[1])}, ${formatNumber(d.center[2])} ${currentUnit}`
+      `${formatNumber(convertLength(d.center[0]))}, ${formatNumber(convertLength(d.center[1]))}, ${formatNumber(convertLength(d.center[2]))} ${displayUnit}`
     ]);
   }
 
@@ -1282,14 +1329,14 @@ function fitCamera(view='iso') {
   const dir=new THREE.Vector3(...(dirs[view]||dirs.iso)).normalize();
   camera.position.copy(dir.multiplyScalar(distance));
   camera.up.set(0,view==='top'?0:1,view==='top'?-1:0);
-  camera.near=Math.max(distance/1000,.001);camera.far=Math.max(distance*100,1000);camera.updateProjectionMatrix();
+  camera.near=Math.max(modelSize*0.00001,1e-8);camera.far=Math.max(distance*200,modelSize*1000,100);camera.updateProjectionMatrix();
   controls.target.copy(getModelRotationCenter());controls.update();
 }
 
 function fillProperties() {
   E.propFile.textContent=currentFile?.name||'—';
   E.propFormat.textContent=currentFormat||'—';
-  E.propUnits.textContent=currentUnit;
+  E.propUnits.textContent=displayUnit;
   E.propParts.textContent=String(currentStats?.partCount??1);
   E.propGeometries.textContent=String(currentStats?.geometryCount??surfaceMeshes.length);
   E.propTriangles.textContent=formatInteger(currentStats?.triangleCount??0);
@@ -1304,6 +1351,7 @@ function fillProperties() {
     E.stepOrg.textContent=h.organization||'—';
     E.stepOrigin.textContent=h.origin||'—';
     renderTree(currentStepResult.rootNodes||[]);
+    renderStepCustomProperties();
   } else {
     E.stepMeta.hidden=true;
   }
@@ -1322,6 +1370,143 @@ function renderTree(roots) {
     (node.children||[]).forEach(c=>walk(c,depth+1));
   };
   roots.forEach(r=>walk(r,0));
+}
+
+
+async function scanStepProperties(file) {
+  // Stream the STEP text instead of loading a potentially huge file into
+  // a second full in-memory string. Everything remains on the user's PC.
+  const reader=file.stream().getReader();
+  const decoder=new TextDecoder('utf-8');
+  let carry='';
+
+  const propertyDefinitions=new Map();
+  const descriptiveItems=new Map();
+  const representations=new Map();
+  const links=[];
+
+  const clean=s=>String(s||'').replace(/''/g,"'").trim();
+
+  function processStatement(statement) {
+    const s=statement.trim();
+    if(!s.startsWith('#'))return;
+
+    let m=s.match(/^#(\d+)\s*=\s*PROPERTY_DEFINITION\s*\(\s*'((?:''|[^'])*)'\s*,\s*(?:'((?:''|[^'])*)'|\$)\s*,\s*(#[0-9]+)/i);
+    if(m){
+      propertyDefinitions.set('#'+m[1],{name:clean(m[2]),description:clean(m[3]),target:m[4]});
+      return;
+    }
+
+    m=s.match(/^#(\d+)\s*=\s*DESCRIPTIVE_REPRESENTATION_ITEM\s*\(\s*'((?:''|[^'])*)'\s*,\s*'((?:''|[^'])*)'\s*\)/i);
+    if(m){
+      descriptiveItems.set('#'+m[1],{name:clean(m[2]),value:clean(m[3])});
+      return;
+    }
+
+    m=s.match(/^#(\d+)\s*=\s*REPRESENTATION\s*\(\s*'((?:''|[^'])*)'\s*,\s*\(([\s\S]*?)\)\s*,/i);
+    if(m){
+      const refs=[...m[3].matchAll(/#[0-9]+/g)].map(x=>x[0]);
+      representations.set('#'+m[1],{name:clean(m[2]),items:refs});
+      return;
+    }
+
+    m=s.match(/^#(\d+)\s*=\s*PROPERTY_DEFINITION_REPRESENTATION\s*\(\s*(#[0-9]+)\s*,\s*(#[0-9]+)\s*\)/i);
+    if(m){
+      links.push({property:m[2],representation:m[3]});
+      return;
+    }
+  }
+
+  while(true){
+    const {value,done}=await reader.read();
+    if(done)break;
+    carry+=decoder.decode(value,{stream:true});
+
+    let cut;
+    while((cut=carry.indexOf(';'))>=0){
+      const statement=carry.slice(0,cut);
+      carry=carry.slice(cut+1);
+
+      // Fast reject to keep large STEP scans inexpensive.
+      if(
+        statement.includes('PROPERTY_DEFINITION') ||
+        statement.includes('DESCRIPTIVE_REPRESENTATION_ITEM') ||
+        statement.includes('REPRESENTATION')
+      ){
+        processStatement(statement);
+      }
+    }
+
+    // Yield to the UI on large STEP files.
+    await new Promise(resolve=>setTimeout(resolve,0));
+  }
+
+  carry+=decoder.decode();
+  if(carry.trim())processStatement(carry);
+
+  const result=[];
+  const seen=new Set();
+
+  for(const link of links){
+    const pd=propertyDefinitions.get(link.property);
+    const rep=representations.get(link.representation);
+    if(!pd||!rep)continue;
+
+    for(const itemRef of rep.items){
+      const item=descriptiveItems.get(itemRef);
+      if(!item)continue;
+
+      const name=item.name||pd.name;
+      const value=item.value;
+      if(!name||!value)continue;
+
+      const key=`${name}\u0000${value}`;
+      if(seen.has(key))continue;
+      seen.add(key);
+
+      result.push({
+        name,
+        value,
+        description:pd.description||'',
+        target:pd.target||''
+      });
+    }
+  }
+
+  return result.slice(0,250);
+}
+
+function renderStepCustomProperties() {
+  if(!E.stepCustomSection||!E.stepCustomProperties)return;
+
+  E.stepCustomProperties.replaceChildren();
+
+  if(!currentStepResult){
+    E.stepCustomSection.hidden=true;
+    return;
+  }
+
+  E.stepCustomSection.hidden=false;
+
+  if(!currentStepProperties.length){
+    E.stepCustomNote.textContent=T.metadataNone;
+    return;
+  }
+
+  for(const property of currentStepProperties){
+    const row=document.createElement('div');
+    const dt=document.createElement('dt');
+    const dd=document.createElement('dd');
+
+    dt.textContent=property.name;
+    if(property.description)dt.title=property.description;
+    dd.textContent=property.value;
+
+    row.append(dt,dd);
+    E.stepCustomProperties.append(row);
+  }
+
+  E.stepCustomNote.textContent=`${currentStepProperties.length} ${T.metadataFound} · ${T.metadataScan}`;
 }
 
 async function parseStepHeader(file) {
@@ -1355,11 +1540,11 @@ async function clearModel(showMessage=true) {
   }
   modelRoot.position.set(0,0,0);
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();
-  currentModel=null;currentFile=null;currentFormat='';currentUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;
+  currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=true;measureEnabled=false;
-  E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.add('active');E.measure.classList.remove('active');
+  E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.add('active');E.gridToggle.classList.add('active');E.measure.classList.remove('active');
   E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.empty.classList.remove('hidden');
-  E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';
+  E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';E.unitSelect.value='u';
   enableTools(false);revokeObjectUrls();
 }
 
@@ -1382,7 +1567,7 @@ function clearGroup(group) {
 function revokeObjectUrls(){meshObjectUrls.forEach(u=>{try{URL.revokeObjectURL(u)}catch{}});meshObjectUrls=[]}
 
 function enableTools(on) {
-  [E.clear,E.fit,E.edges,E.measure,E.section,E.viewButton,E.props].forEach(el=>el.disabled=!on);
+  [E.clear,E.fit,E.edges,E.gridToggle,E.unitSelect,E.measure,E.section,E.viewButton,E.props].forEach(el=>el.disabled=!on);
   document.querySelectorAll('[data-select-mode]').forEach(el=>el.disabled=!on);
   E.measureType.disabled=!on||!measureEnabled;
 }
@@ -1405,13 +1590,62 @@ function updatePCCheck() {
   E.pc.textContent=`${T.browser}: ${good?T.compatible:limited?T.limited:T.incompatible} · WebAssembly ${wasm?'✓':'✕'} · WebGL2 ${webgl2?'✓':'✕'} · ${threads??'?'} ${T.threads} · ${ram?ram+' GB+':'?'} ${T.ram}`;
 }
 
-function formatLength(v,unit=currentUnit){return `${formatNumber(v)} ${unit}`}
-function formatArea(v,unit=currentUnit){return `${formatNumber(v)} ${unit}²`}
+
+function unitScale(from,to) {
+  if(from==='u'||to==='u'||from===to)return 1;
+  const mm={mm:1,cm:10,m:1000,in:25.4};
+  if(!(from in mm)||!(to in mm))return 1;
+  return mm[from]/mm[to];
+}
+
+function convertLength(value,from=currentUnit,to=displayUnit) {
+  return value*unitScale(from,to);
+}
+
+function updateDisplayedUnits() {
+  E.statusUnits.textContent=displayUnit;
+  E.propUnits.textContent=displayUnit;
+}
+
+async function refreshMeasurementUnits() {
+  if(!measureEnabled)return;
+
+  if(!currentStepResult){
+    if(selected.length===2)showMeshPointDistance(selected[0],selected[1]);
+    return;
+  }
+
+  try{
+    if(selected.length===1){
+      const details=await workerRequest('inspect',{selection:serialSelection(selected[0])});
+      showSingleExact(details);
+    }else if(selected.length===2&&currentMeasureResult){
+      showPairExact(currentMeasureResult);
+    }
+  }catch(error){
+    console.warn('[NavoFlo units refresh]',error);
+  }
+}
+
+function formatLength(v,unit=displayUnit){
+  const sourceUnit=unit==='u'?'u':currentUnit;
+  const targetUnit=unit==='u'?'u':displayUnit;
+  return `${formatNumber(convertLength(v,sourceUnit,targetUnit))} ${targetUnit}`;
+}
+function formatArea(v,unit=displayUnit){
+  const sourceUnit=unit==='u'?'u':currentUnit;
+  const targetUnit=unit==='u'?'u':displayUnit;
+  const f=unitScale(sourceUnit,targetUnit);
+  return `${formatNumber(v*f*f)} ${targetUnit}²`;
+}
 function formatAngle(v) {
   // OCCT geometric angles are expressed in radians.
   return `${formatNumber(THREE.MathUtils.radToDeg(v))}°`;
 }
-function formatPoint(p){return `${formatNumber(p.x)}, ${formatNumber(p.y)}, ${formatNumber(p.z)} ${currentUnit}`}
+function formatPoint(p){
+  const f=unitScale(currentUnit,displayUnit);
+  return `${formatNumber(p.x*f)}, ${formatNumber(p.y*f)}, ${formatNumber(p.z*f)} ${displayUnit}`;
+}
 function formatNumber(v) {
   if (!Number.isFinite(v)) return '—';
   const a=Math.abs(v),digits=a>=1000?2:a>=10?3:a>=1?4:5;
