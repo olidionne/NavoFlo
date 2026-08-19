@@ -1,104 +1,200 @@
 <!doctype html>
 <html lang="fr-CA">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NavoFlo 3D Inspector — Visualiseur 3D gratuit</title><meta name="description" content="Inspectez des fichiers STEP, STP, STL, OBJ, GLB et GLTF directement dans votre navigateur. Vos modèles restent sur votre appareil."><meta name="theme-color" content="#0b1117">
-<link rel="canonical" href="https://navoflo.com/viewer/">
-<link rel="alternate" hreflang="fr-CA" href="https://navoflo.com/viewer/"><link rel="alternate" hreflang="en-CA" href="https://navoflo.com/en/viewer/">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/css/styles.css"><link rel="stylesheet" href="/css/viewer.css">
-<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"}}</script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NavoFlo CAD Viewer — STEP, STL, OBJ, GLB</title>
+  <meta name="description" content="Visualiseur CAD local NavoFlo avec STEP/STP, sélection d'entités, mesures et arêtes.">
+  <meta name="theme-color" content="#080d12">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/viewer.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"
+    }
+  }
+  </script>
 </head>
-<body class="viewer-page">
-<header class="site-header viewer-header"><div class="container nav-wrap">
-<a class="brand" href="/"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>NavoFlo</span></a>
-<div class="viewer-nav"><a class="viewer-back" href="/">← Site principal</a><div class="lang-switcher"><a class="active" href="/viewer/">FR</a><a class="" href="/en/viewer/">EN</a></div></div>
-</div></header>
+<body class="viewer-v2">
+<header class="site-header viewer-site-header">
+  <div class="container viewer-wide nav-wrap">
+    <a class="brand" href="/">
+      <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span>NavoFlo</span>
+    </a>
+    <div class="viewer-top-nav">
+      <a class="viewer-back" href="/">← Site principal</a>
+      <div class="lang-switcher">
+        <a class="active" href="/viewer/">FR</a>
+        <a class="" href="/en/viewer/">EN</a>
+      </div>
+    </div>
+  </div>
+</header>
 
 <main>
-<section class="viewer-intro"><div class="container intro-row"><div><span class="viewer-kicker">OUTIL GRATUIT · V1</span><h1>NavoFlo <span>3D Inspector</span></h1><p>Déposez un modèle 3D — incluant STEP/STP — et inspectez-le directement avec la puissance de votre PC.</p></div>
-<div class="privacy-pill"><i></i><div><strong>Votre modèle reste sur votre appareil</strong><small>Aucun fichier 3D n'est téléversé vers NavoFlo.</small></div></div></div></section>
+<section class="viewer-v2-intro">
+  <div class="container viewer-wide intro-v2-row">
+    <div>
+      <span class="viewer-kicker">OUTIL CAD LOCAL · V2</span>
+      <h1>NavoFlo <span>CAD Viewer</span></h1>
+      <p>Inspectez, sélectionnez et mesurez vos modèles directement dans votre navigateur.</p>
+    </div>
+    <div class="privacy-pill">
+      <i></i><div><strong>Le modèle reste sur votre PC</strong><small>Le fichier CAD n'est pas envoyé à NavoFlo.</small></div>
+    </div>
+  </div>
+</section>
 
-<section class="viewer-area"><div class="container viewer-grid">
-<aside class="sidebar">
-<div class="card"><div class="card-head"><span>FICHIER</span><button id="clear-model" disabled>Effacer</button></div>
-<label id="drop-zone" class="drop-zone" for="file-input" tabindex="0"><input id="file-input" type="file" multiple hidden accept=".step,.stp,.stl,.obj,.glb,.gltf,.bin,.png,.jpg,.jpeg,.webp"><b>＋</b><strong>Déposez votre modèle ici</strong><small>ou cliquez pour choisir des fichiers</small><em>STEP · STP · STL · OBJ · GLB · GLTF</em></label>
-<div id="file-status" class="file-status" role="status">Aucun modèle chargé</div><p class="note">Pour un GLTF avec fichiers externes, sélectionnez le .gltf, le .bin et les textures ensemble.</p></div>
+<section class="cad-shell-section">
+<div class="container viewer-wide">
+  <div id="cad-workspace" class="cad-workspace">
+    <canvas id="viewer-canvas" aria-label="NavoFlo CAD Viewer"></canvas>
 
+    <div class="cad-toolbar" role="toolbar">
+      <label class="tool-button file-tool">
+        <input id="file-input" type="file" hidden accept=".step,.stp,.stl,.obj,.glb,.gltf,.bin,.png,.jpg,.jpeg,.webp" multiple>
+        <span class="tool-icon">＋</span><span>Ouvrir</span>
+      </label>
 
-<div class="card pc-card">
-  <div class="card-head"><span>STEP / STP · PUISSANCE PC</span><em>LOCAL</em></div>
-  <p class="pc-lead">Le fichier STEP est converti <strong>sur votre ordinateur</strong>. Plus le modèle est gros, plus le CPU et la RAM comptent.</p>
-  <div class="pc-tier"><b>Minimum conseillé</b><span>4 threads CPU · 8 Go RAM · navigateur 64 bits · WebAssembly + WebGL2</span></div>
-  <div class="pc-tier"><b>Recommandé</b><span>8+ threads CPU · 16 Go RAM</span></div>
-  <div class="pc-tier"><b>Gros assemblages</b><span>32 Go RAM recommandé</span></div>
-  <div id="pc-check" class="pc-check" aria-live="polite">Vérification de votre PC…</div>
-  <p class="note">Ces seuils sont des recommandations pratiques NavoFlo, pas une garantie : la complexité géométrique compte souvent plus que la taille du fichier.</p>
+      <div class="tool-divider"></div>
+
+      <div class="tool-group">
+        <span class="tool-group-label">Sélection</span>
+        <div class="segmented" id="select-modes">
+          <button type="button" class="active" data-select-mode="auto" disabled>Auto</button>
+          <button type="button" data-select-mode="face" disabled>Face</button>
+          <button type="button" data-select-mode="edge" disabled>Arête</button>
+          <button type="button" data-select-mode="vertex" disabled>Sommet</button>
+        </div>
+      </div>
+
+      <div class="tool-divider"></div>
+
+      <button id="measure-toggle" class="tool-button" type="button" disabled>
+        <span class="tool-icon">↔</span><span>Mesure</span>
+      </button>
+      <select id="measure-type" class="tool-select" disabled aria-label="Mesure">
+        <option value="smart">Intelligente</option>
+        <option value="center">Centre ↔ centre</option>
+        <option value="distance">Distance</option>
+        <option value="angle">Angle</option>
+      </select>
+
+      <button id="section-toggle" class="tool-button" type="button" disabled>
+        <span class="tool-icon">◫</span><span>Coupe</span>
+      </button>
+
+      <button id="edges-toggle" class="tool-button active" type="button" disabled>
+        <span class="tool-icon">▱</span><span>Arêtes</span>
+      </button>
+
+      <div class="tool-divider"></div>
+
+      <div class="view-menu">
+        <button id="view-menu-button" class="tool-button" type="button" disabled>
+          <span class="tool-icon">◇</span><span>Vues</span>
+        </button>
+        <div id="view-menu" class="toolbar-popover view-popover" hidden>
+          <button data-view="iso">ISO</button>
+          <button data-view="front">Avant</button>
+          <button data-view="right">Droite</button>
+          <button data-view="top">Dessus</button>
+        </div>
+      </div>
+
+      <button id="fit-view" class="tool-button compact" type="button" disabled title="Ajuster">⌖</button>
+
+      <div class="toolbar-spacer"></div>
+
+      <button id="properties-toggle" class="tool-button" type="button" disabled>
+        <span class="tool-icon">ⓘ</span><span>Propriétés</span>
+      </button>
+      <button id="clear-model" class="tool-button compact danger" type="button" disabled title="Fermer">×</button>
+    </div>
+
+    <div id="empty-drop" class="empty-drop">
+      <label for="file-input" class="empty-drop-inner">
+        <span class="drop-cube">N</span>
+        <strong>Déposez votre modèle CAD</strong>
+        <p>STEP · STP · STL · OBJ · GLB · GLTF</p>
+        <small>ou cliquez ici pour choisir un fichier</small>
+      </label>
+    </div>
+
+    <div id="loading-overlay" class="cad-loading" hidden>
+      <i></i><strong id="loading-label">Chargement…</strong>
+      <small id="loading-sub">Initialisation du noyau CAD local…</small>
+    </div>
+
+    <div id="section-panel" class="toolbar-popover section-panel" hidden>
+      <div class="popover-title">COUPE</div>
+      <label><span>Axe</span><select id="clip-axis"><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select></label>
+      <label><span>Position</span><input id="clip-slider" type="range" min="-100" max="100" value="0"></label>
+      <label class="check-row"><span>Inverser</span><input id="clip-invert" type="checkbox"></label>
+    </div>
+
+    <aside id="properties-drawer" class="properties-drawer" hidden>
+      <div class="drawer-head"><span>PROPRIÉTÉS</span><button id="properties-close" type="button">×</button></div>
+      <dl class="drawer-stats">
+        <div><dt>Fichier</dt><dd id="prop-file">—</dd></div>
+        <div><dt>Format</dt><dd id="prop-format">—</dd></div>
+        <div><dt>Unités</dt><dd id="prop-units">—</dd></div>
+        <div><dt>Pièces</dt><dd id="prop-parts">—</dd></div>
+        <div><dt>Géométries</dt><dd id="prop-geometries">—</dd></div>
+        <div><dt>Triangles</dt><dd id="prop-triangles">—</dd></div>
+      </dl>
+
+      <div id="step-meta-section" class="drawer-section" hidden>
+        <div class="drawer-section-title">Informations STEP</div>
+        <dl class="drawer-stats compact-stats">
+          <div><dt>Name</dt><dd id="step-name">—</dd></div>
+          <div><dt>Schema</dt><dd id="step-schema">—</dd></div>
+          <div><dt>Date</dt><dd id="step-date">—</dd></div>
+          <div><dt>Author</dt><dd id="step-author">—</dd></div>
+          <div><dt>Organization</dt><dd id="step-org">—</dd></div>
+          <div><dt>Origin</dt><dd id="step-origin">—</dd></div>
+        </dl>
+        <div class="drawer-section-title tree-title">STRUCTURE / PIÈCES</div>
+        <div id="step-tree" class="step-tree">—</div>
+      </div>
+
+      <div class="drawer-section">
+        <div class="drawer-section-title">CAPACITÉ PC</div>
+        <div class="pc-tier"><b>Minimum conseillé</b><span>4 threads CPU · 8 Go RAM · WebAssembly · WebGL2</span></div>
+        <div class="pc-tier"><b>Recommandé STEP</b><span>8+ threads CPU · 16 Go RAM</span></div>
+        <div class="pc-tier"><b>Gros assemblages</b><span>32 Go RAM recommandé</span></div>
+        <div id="pc-check" class="pc-check">Votre navigateur: …</div>
+      </div>
+    </aside>
+
+    <div id="measure-card" class="measure-card-v2" hidden>
+      <div class="measure-card-head"><span>MESURE</span><span id="measure-badge">EXACT STEP</span></div>
+      <div id="measure-main" class="measure-main">—</div>
+      <dl id="measure-details" class="measure-details"></dl>
+      <div id="selection-summary" class="selection-summary">Activez Mesure, puis sélectionnez une ou deux entités.</div>
+      <button id="measure-clear" type="button">↺</button>
+    </div>
+
+    <div class="cad-statusbar">
+      <div class="status-left">
+        <span id="status-file">Aucun modèle</span>
+        <span id="status-format">—</span>
+        <span id="status-units">—</span>
+      </div>
+      <div class="mouse-help">
+        <span>Molette maintenue : rotation</span><span>Ctrl + molette : déplacement</span><span>Roulette : zoom</span>
+      </div>
+      <span class="local-badge">LOCAL</span>
+    </div>
+  </div>
 </div>
-<div class="card"><div class="card-head"><span>VUES</span></div><div class="view-buttons">
-<button data-view="iso" disabled>ISO</button><button data-view="front" disabled>Avant</button><button data-view="right" disabled>Droite</button><button data-view="top" disabled>Dessus</button></div>
-<button id="fit-view" class="wide" disabled>Ajuster à l'écran</button></div>
-
-
-<div class="card measure-card">
-  <div class="card-head"><span>MESURE</span><em>LOCAL</em></div>
-  <button id="measure-toggle" class="measure-button" type="button" disabled>Mesurer point à point</button>
-  <button id="measure-clear" class="measure-clear" type="button" disabled>Effacer la mesure</button>
-  <div id="measure-status" class="measure-status">Chargez un modèle pour mesurer.</div>
-  <dl class="measure-values">
-    <div><dt>Distance</dt><dd id="measure-distance">—</dd></div>
-    <div><dt>ΔX</dt><dd id="measure-dx">—</dd></div>
-    <div><dt>ΔY</dt><dd id="measure-dy">—</dd></div>
-    <div><dt>ΔZ</dt><dd id="measure-dz">—</dd></div>
-  </dl>
-  <p class="note">Mesure point-à-point sur le maillage affiché. Pour STEP/STP, la précision dépend de la tessellation OpenCascade.</p>
-</div>
-
-<div class="card controls"><div class="card-head"><span>AFFICHAGE</span></div>
-<label><span>Wireframe</span><input id="wireframe-toggle" type="checkbox" disabled></label>
-<label><span>Grille</span><input id="grid-toggle" type="checkbox" checked></label>
-<label class="select"><span>Unités affichées</span><select id="unit-select"><option value="u">Unités modèle</option><option>mm</option><option>cm</option><option>m</option><option value="in">po</option></select></label></div>
-
-<div class="card controls"><div class="card-head"><span>COUPE</span></div>
-<label><span>Activer</span><input id="clip-toggle" type="checkbox" disabled></label>
-<label class="select"><span>Axe</span><select id="clip-axis" disabled><option>x</option><option>y</option><option>z</option></select></label>
-<label class="range"><span>Position</span><input id="clip-slider" type="range" min="-100" max="100" value="0" disabled></label></div>
-</aside>
-
-<div id="viewer-stage" class="stage"><canvas id="viewer-canvas"></canvas>
-<div id="stage-empty" class="empty"><div class="mini-mark">N</div><strong>Prêt à inspecter</strong><p>Glissez un STEP, STP, STL, OBJ, GLB ou GLTF dans le visualiseur.</p></div>
-<div class="stage-help"><span>Rotation : clic gauche</span><span>Pan : clic droit</span><span>Zoom : molette</span></div>
-<button id="screenshot" class="png-btn" disabled>PNG</button>
-<div id="loading-overlay" class="loading" hidden><i></i><strong id="loading-label">Chargement...</strong></div>
-</div>
-
-<aside class="sidebar right">
-<div class="card"><div class="card-head"><span>ANALYSE</span></div><dl class="stats">
-<div><dt>Format</dt><dd id="stat-format">—</dd></div><div><dt>Taille fichier</dt><dd id="stat-filesize">—</dd></div><div><dt>Meshes</dt><dd id="stat-meshes">—</dd></div><div><dt>Sommets</dt><dd id="stat-vertices">—</dd></div><div><dt>Triangles</dt><dd id="stat-triangles">—</dd></div></dl></div>
-<div class="card"><div class="card-head"><span>ENCOMBREMENT</span></div><dl class="stats dims"><div><dt>X</dt><dd id="dim-x">—</dd></div><div><dt>Y</dt><dd id="dim-y">—</dd></div><div><dt>Z</dt><dd id="dim-z">—</dd></div></dl><p class="note">STL et OBJ ne définissent pas toujours leurs unités. Choisissez l'unité correspondant au fichier.</p></div>
-<div class="card"><div class="card-head"><span>GÉOMÉTRIE</span><em>MESH</em></div><dl class="stats"><div><dt>Surface</dt><dd id="stat-surface">—</dd></div><div><dt>Volume</dt><dd id="stat-volume">—</dd></div></dl><p class="note">Le volume est pertinent seulement pour un maillage fermé et correctement orienté.</p></div>
-
-<div id="step-properties-card" class="card step-properties-card" hidden>
-  <div class="card-head"><span>PROPRIÉTÉS STEP</span><em>LOCAL</em></div>
-  <dl class="stats step-meta">
-    <div><dt>Nom STEP</dt><dd id="step-name">—</dd></div>
-    <div><dt>Schéma</dt><dd id="step-schema">—</dd></div>
-    <div><dt>Date</dt><dd id="step-date">—</dd></div>
-    <div><dt>Auteur</dt><dd id="step-author">—</dd></div>
-    <div><dt>Organisation</dt><dd id="step-org">—</dd></div>
-    <div><dt>Logiciel d'origine</dt><dd id="step-origin">—</dd></div>
-    <div><dt>Préprocesseur</dt><dd id="step-preprocessor">—</dd></div>
-    <div><dt>Description</dt><dd id="step-description">—</dd></div>
-  </dl>
-  <div class="step-tree-head">STRUCTURE / PIÈCES</div>
-  <div id="step-tree" class="step-tree">—</div>
-  <p class="note">Le contenu dépend de ce que le logiciel CAD a réellement écrit dans le STEP. Les propriétés personnalisées SolidWorks ne sont pas garanties dans un STEP standard.</p>
-</div>
-
-<div class="card privacy-card"><b>✓</b><div><strong>Traitement local</strong><p>L'analyse est exécutée par votre navigateur. NavoFlo ne reçoit pas votre modèle.</p></div></div>
-</aside>
-</div></section>
-
-<section class="viewer-bottom"><div class="container bottom-grid"><div><span class="viewer-kicker">V1</span><h2>Rapide, simple et privé.</h2></div><div><p>STEP/STP est converti localement en maillage sur votre PC avec WebAssembly. Les analyses CAD B-Rep avancées pourront être ajoutées plus tard.</p><a href="mailto:contact@navoflo.com">Une suggestion? contact@navoflo.com →</a></div></div></section>
+</section>
 </main>
+
 <script type="module" src="/js/viewer.js"></script>
-</body></html>
+</body>
+</html>
