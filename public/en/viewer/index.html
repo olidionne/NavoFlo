@@ -122,6 +122,10 @@
 
       <div class="toolbar-spacer"></div>
 
+      <button id="sheetmetal-toggle" class="tool-button" type="button" disabled title="Sheet metal unfold parameters">
+        <span class="tool-icon">⌁</span><span>Sheet</span>
+      </button>
+
       <button id="properties-toggle" class="tool-button" type="button" disabled>
         <span class="tool-icon">ⓘ</span><span>Properties</span>
       </button>
@@ -181,6 +185,79 @@
           <dl id="step-custom-properties" class="custom-properties-list"></dl>
           <p id="step-custom-note" class="metadata-note"></p>
         </div>
+      </div>
+
+
+      <div id="sheetmetal-section" class="drawer-section sheetmetal-section" hidden>
+        <div class="drawer-section-title">SHEET METAL · AIR BENDING</div>
+        <div class="sheetmetal-intro">
+          <strong>Automatic K-factor</strong>
+          <span>CD-401 rule based on inside-radius / thickness ratio.</span>
+        </div>
+
+        <label class="sheetmetal-field">
+          <span>Material family</span>
+          <select id="sm-material-class">
+            <option value="hard">Steel / hard materials</option>
+            <option value="medium">Aluminum · medium</option>
+            <option value="soft">Aluminum · soft</option>
+          </select>
+        </label>
+
+        <div class="sheetmetal-input-grid">
+          <label class="sheetmetal-field">
+            <span>Thickness T</span>
+            <div class="sheetmetal-number"><input id="sm-thickness" type="number" inputmode="decimal" min="0" step="any" placeholder="—"><em id="sm-thickness-unit">mm</em></div>
+          </label>
+          <label class="sheetmetal-field">
+            <span>Inside radius R</span>
+            <div class="sheetmetal-number"><input id="sm-radius" type="number" inputmode="decimal" min="0" step="any" placeholder="—"><em id="sm-radius-unit">mm</em></div>
+          </label>
+        </div>
+
+        <div class="sheetmetal-pick-actions">
+          <button id="sm-use-measure" type="button">↳ T from measure</button>
+          <button id="sm-use-radius" type="button">↳ R from selection</button>
+        </div>
+
+        <label class="sheetmetal-field">
+          <span>Bend angle</span>
+          <div class="sheetmetal-number"><input id="sm-angle" type="number" inputmode="decimal" min="0.01" max="179.99" step="0.1" value="90"><em>°</em></div>
+        </label>
+
+        <label class="sheetmetal-check">
+          <span>Override K-factor</span>
+          <input id="sm-manual-k-toggle" type="checkbox">
+        </label>
+        <label id="sm-manual-k-row" class="sheetmetal-field" hidden>
+          <span>Manual K-factor</span>
+          <div class="sheetmetal-number"><input id="sm-manual-k" type="number" inputmode="decimal" min="0" max="1" step="0.001" value="0.40"><em>K</em></div>
+        </label>
+
+        <dl class="drawer-stats compact-stats sheetmetal-results">
+          <div><dt>R / T</dt><dd id="sm-ratio">—</dd></div>
+          <div><dt>Range</dt><dd id="sm-band">—</dd></div>
+          <div><dt>K-factor</dt><dd id="sm-k">—</dd></div>
+          <div><dt>Neutral radius</dt><dd id="sm-neutral-radius">—</dd></div>
+          <div><dt>Bend allowance</dt><dd id="sm-bend-allowance">—</dd></div>
+          <div><dt>Bend deduction</dt><dd id="sm-bend-deduction">—</dd></div>
+        </dl>
+
+        <div id="sm-status" class="sheetmetal-status">Enter thickness and inside radius, or capture them from a STEP measurement.</div>
+
+        <details class="sheetmetal-k-table">
+          <summary>CD-401 Air Bending table</summary>
+          <table>
+            <thead><tr><th>R / T</th><th>Al soft</th><th>Al med.</th><th>Steel</th></tr></thead>
+            <tbody>
+              <tr><td>0 → 1</td><td>0.33</td><td>0.38</td><td>0.40</td></tr>
+              <tr><td>1 → 3</td><td>0.40</td><td>0.43</td><td>0.45</td></tr>
+              <tr><td>&gt; 3</td><td>0.50</td><td>0.50</td><td>0.50</td></tr>
+            </tbody>
+          </table>
+        </details>
+
+        <p class="sheetmetal-warning">Unfolding parameters. The final flat pattern must still be validated against the manufacturing procedure.</p>
       </div>
 
       <div class="drawer-section">
