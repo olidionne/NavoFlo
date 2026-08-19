@@ -569,3 +569,38 @@
     width:min(410px,calc(100% - 24px))!important;
   }
 }
+
+
+/* V2.4 — measurement panel fixed bottom-left + no overlap with properties */
+.measure-card-v2,
+.cad-workspace.properties-open .measure-card-v2,
+.cad-workspace.is-fullscreen .measure-card-v2,
+.cad-workspace.is-fullscreen.properties-open .measure-card-v2{
+  left:16px !important;
+  right:auto !important;
+  bottom:52px !important;
+  width:420px !important;
+  max-width:min(420px, calc(100vw - 32px)) !important;
+  z-index:40 !important;
+}
+
+.measure-main{
+  font-size:30px !important;
+  line-height:1.12 !important;
+}
+
+.measure-details dt{font-size:11.5px !important;}
+.measure-details dd{font-size:12px !important; line-height:1.35 !important;}
+.selection-summary{font-size:12px !important; line-height:1.6 !important;}
+
+@media(max-width:900px){
+  .measure-card-v2,
+  .cad-workspace.properties-open .measure-card-v2,
+  .cad-workspace.is-fullscreen .measure-card-v2,
+  .cad-workspace.is-fullscreen.properties-open .measure-card-v2{
+    left:12px !important;
+    right:12px !important;
+    width:auto !important;
+    max-width:none !important;
+  }
+}

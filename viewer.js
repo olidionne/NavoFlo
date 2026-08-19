@@ -720,7 +720,7 @@ function highlightPreselection(s) {
   }
 
   if (s.kind==='vertex'||s.kind==='point') {
-    const radius=Math.max(modelSize*0.0045,0.0001);
+    const radius=Math.max(modelSize*0.0018,0.0001);
     const sphere=new THREE.Mesh(
       new THREE.SphereGeometry(radius,14,10),
       new THREE.MeshBasicMaterial({color:0x84eac8,depthTest:false,transparent:true,opacity:0.9})
@@ -967,7 +967,7 @@ function highlightSelection(s,index) {
     const line=new THREE.Line(s.object.geometry.clone(),new THREE.LineBasicMaterial({color,depthTest:false}));
     line.matrix.copy(s.object.matrixWorld);line.matrixAutoUpdate=false;line.renderOrder=30;selectionRoot.add(line);
   } else if (s.kind==='vertex'||s.kind==='point') {
-    const radius=Math.max(modelSize*0.006,0.0001);
+    const radius=Math.max(modelSize*0.0024,0.0001);
     const sphere=new THREE.Mesh(new THREE.SphereGeometry(radius,16,12),new THREE.MeshBasicMaterial({color,depthTest:false}));
     sphere.position.copy(s.point);sphere.renderOrder=31;selectionRoot.add(sphere);
   } else if (s.kind==='face') {
@@ -1085,8 +1085,8 @@ function showMeasureError(message) {
 
 
 function addExactCenterMarker(point) {
-  const radius=Math.max(modelSize*0.006,0.0001);
-  const ringGeometry=new THREE.RingGeometry(radius*0.6,radius,28);
+  const radius=Math.max(modelSize*0.003,0.0001);
+  const ringGeometry=new THREE.RingGeometry(radius*0.55,radius,28);
   const ringMaterial=new THREE.MeshBasicMaterial({
     color:0x35d39a,
     side:THREE.DoubleSide,
