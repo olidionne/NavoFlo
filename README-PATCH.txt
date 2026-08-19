@@ -1,26 +1,34 @@
-NavoFlo CAD Mouse + Selection V4
+NavoFlo — Sheet Metal / Air Bending CD-401
+===========================================
 
-Remplacer:
-  public/js/viewer.js
+Fichiers à remplacer:
+- public/js/viewer.js
+- public/css/viewer.css
+- public/viewer/index.html
+- public/en/viewer/index.html
 
-Navigation:
-- Clic gauche: sélection
-- Molette maintenue: rotation autour du point sous la souris
-- Ctrl + molette maintenue: pan
-- Shift + molette maintenue: zoom
-- Molette: zoom vers le pointeur
-- Bouton droit maintenu: pan
-- Clic droit court: Select Other
-- F: Fit
+Ajouts:
+- Bouton Tôle / Sheet dans la barre d'outils.
+- Panneau Tôlerie dans Propriétés.
+- Table Air Bending CD-401 intégrée:
+  * Aluminium doux: 0.33 / 0.40 / 0.50
+  * Aluminium moyen: 0.38 / 0.43 / 0.50
+  * Acier / matériaux durs: 0.40 / 0.45 / 0.50
+  * Plages R/T: <=1, >1 à <=3, >3.
+- Calcul automatique du facteur K à partir de R/T.
+- Surcharge manuelle du facteur K possible.
+- Calcul du rayon neutre.
+- Calcul Bend Allowance.
+- Calcul Bend Deduction.
+- Récupération de T depuis une mesure entre deux faces STEP.
+- Récupération de R depuis une arête circulaire ou une face cylindrique STEP.
+- Conversion automatique mm / po / autres unités du viewer.
+- Préférences de famille matériau conservées localement.
 
-Sélection:
-- Entité 1: bleu #006DFF persistant
-- Entité 2: bleu #006DFF persistant
-- Le calcul asynchrone ne peut plus écraser une nouvelle sélection
-- Arête noire originale masquée pendant sa sélection pour éviter le z-fighting
-- Faces sélectionnées: bleu solide, depth-tested; pas de logique de visibilité frame-par-frame
+Important:
+Cette version intègre les paramètres nécessaires au futur moteur STEP -> DXF.
+Elle ne déplie pas encore automatiquement la pièce complète.
 
 Validation:
-- node --check: OK
-- ancienne navigation OrbitControls désactivée
-- anciens handlers MMB/RMB conflictuels supprimés
+- JavaScript: node --check OK
+- Base utilisée: version courante du repo olidionne/NavoFlo/main
