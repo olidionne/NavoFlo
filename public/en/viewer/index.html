@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en-CA">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NavoFlo 3D Inspector — Free 3D Viewer</title><meta name="description" content="Inspect STL, OBJ, GLB and GLTF files directly in your browser. Your models stay on your device."><meta name="theme-color" content="#0b1117">
+<link rel="canonical" href="https://navoflo.com/en/viewer/">
+<link rel="alternate" hreflang="fr-CA" href="https://navoflo.com/viewer/"><link rel="alternate" hreflang="en-CA" href="https://navoflo.com/en/viewer/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/css/styles.css"><link rel="stylesheet" href="/css/viewer.css">
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"}}</script>
+</head>
+<body class="viewer-page">
+<header class="site-header viewer-header"><div class="container nav-wrap">
+<a class="brand" href="/en/"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>NavoFlo</span></a>
+<div class="viewer-nav"><a class="viewer-back" href="/en/">← Main site</a><div class="lang-switcher"><a class="" href="/viewer/">FR</a><a class="active" href="/en/viewer/">EN</a></div></div>
+</div></header>
+
+<main>
+<section class="viewer-intro"><div class="container intro-row"><div><span class="viewer-kicker">FREE TOOL · V1</span><h1>NavoFlo <span>3D Inspector</span></h1><p>Drop a 3D model and inspect it instantly in your browser.</p></div>
+<div class="privacy-pill"><i></i><div><strong>Your model stays on your device</strong><small>No 3D file is uploaded to NavoFlo.</small></div></div></div></section>
+
+<section class="viewer-area"><div class="container viewer-grid">
+<aside class="sidebar">
+<div class="card"><div class="card-head"><span>FILE</span><button id="clear-model" disabled>Clear</button></div>
+<label id="drop-zone" class="drop-zone" for="file-input" tabindex="0"><input id="file-input" type="file" multiple hidden accept=".stl,.obj,.glb,.gltf,.bin,.png,.jpg,.jpeg,.webp"><b>＋</b><strong>Drop your model here</strong><small>or click to choose files</small><em>STL · OBJ · GLB · GLTF</em></label>
+<div id="file-status" class="file-status" role="status">No model loaded</div><p class="note">For GLTF with external files, select the .gltf, .bin and textures together.</p></div>
+
+<div class="card"><div class="card-head"><span>VIEWS</span></div><div class="view-buttons">
+<button data-view="iso" disabled>ISO</button><button data-view="front" disabled>Front</button><button data-view="right" disabled>Right</button><button data-view="top" disabled>Top</button></div>
+<button id="fit-view" class="wide" disabled>Fit to screen</button></div>
+
+<div class="card controls"><div class="card-head"><span>DISPLAY</span></div>
+<label><span>Wireframe</span><input id="wireframe-toggle" type="checkbox" disabled></label>
+<label><span>Grid</span><input id="grid-toggle" type="checkbox" checked></label>
+<label class="select"><span>Display units</span><select id="unit-select"><option value="u">Model units</option><option>mm</option><option>cm</option><option>m</option><option value="in">in</option></select></label></div>
+
+<div class="card controls"><div class="card-head"><span>SECTION</span></div>
+<label><span>Enable</span><input id="clip-toggle" type="checkbox" disabled></label>
+<label class="select"><span>Axe</span><select id="clip-axis" disabled><option>x</option><option>y</option><option>z</option></select></label>
+<label class="range"><span>Position</span><input id="clip-slider" type="range" min="-100" max="100" value="0" disabled></label></div>
+</aside>
+
+<div id="viewer-stage" class="stage"><canvas id="viewer-canvas"></canvas>
+<div id="stage-empty" class="empty"><div class="mini-mark">N</div><strong>Ready to inspect</strong><p>Drop an STL, OBJ, GLB or GLTF into the viewer.</p></div>
+<div class="stage-help"><span>Rotate: left click</span><span>Pan: right click</span><span>Zoom: wheel</span></div>
+<button id="screenshot" class="png-btn" disabled>PNG</button>
+<div id="loading-overlay" class="loading" hidden><i></i><strong id="loading-label">Loading...</strong></div>
+</div>
+
+<aside class="sidebar right">
+<div class="card"><div class="card-head"><span>ANALYSIS</span></div><dl class="stats">
+<div><dt>Format</dt><dd id="stat-format">—</dd></div><div><dt>File size</dt><dd id="stat-filesize">—</dd></div><div><dt>Meshes</dt><dd id="stat-meshes">—</dd></div><div><dt>Vertices</dt><dd id="stat-vertices">—</dd></div><div><dt>Triangles</dt><dd id="stat-triangles">—</dd></div></dl></div>
+<div class="card"><div class="card-head"><span>BOUNDING BOX</span></div><dl class="stats dims"><div><dt>X</dt><dd id="dim-x">—</dd></div><div><dt>Y</dt><dd id="dim-y">—</dd></div><div><dt>Z</dt><dd id="dim-z">—</dd></div></dl><p class="note">STL and OBJ do not always define units. Select the unit matching your file.</p></div>
+<div class="card"><div class="card-head"><span>GEOMETRY</span><em>MESH</em></div><dl class="stats"><div><dt>Surface area</dt><dd id="stat-surface">—</dd></div><div><dt>Volume</dt><dd id="stat-volume">—</dd></div></dl><p class="note">Volume is meaningful only for a closed, correctly oriented mesh.</p></div>
+<div class="card privacy-card"><b>✓</b><div><strong>Local processing</strong><p>Analysis runs in your browser. NavoFlo does not receive your model.</p></div></div>
+</aside>
+</div></section>
+
+<section class="viewer-bottom"><div class="container bottom-grid"><div><span class="viewer-kicker">V1</span><h2>Fast, simple and private.</h2></div><div><p>This V1 supports common mesh formats. STEP/STP support and deeper CAD analysis are planned later.</p><a href="mailto:contact@navoflo.com">Have a suggestion? contact@navoflo.com →</a></div></div></section>
+</main>
+<script type="module" src="/js/viewer.js"></script>
+</body></html>
