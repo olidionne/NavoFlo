@@ -56,12 +56,68 @@ const E = {
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
   stepDate:$('step-date'), stepAuthor:$('step-author'), stepOrg:$('step-org'),
   stepOrigin:$('step-origin'), stepTree:$('step-tree'), stepCustomSection:$('step-custom-section'), stepCustomProperties:$('step-custom-properties'), stepCustomNote:$('step-custom-note'), pc:$('pc-check'),
+  sheetMetal:$('sheetmetal-toggle'), sheetMetalSection:$('sheetmetal-section'),
+  smMaterial:$('sm-material-class'), smThickness:$('sm-thickness'), smThicknessUnit:$('sm-thickness-unit'),
+  smRadius:$('sm-radius'), smRadiusUnit:$('sm-radius-unit'), smAngle:$('sm-angle'),
+  smUseMeasure:$('sm-use-measure'), smUseRadius:$('sm-use-radius'),
+  smManualToggle:$('sm-manual-k-toggle'), smManualRow:$('sm-manual-k-row'), smManualK:$('sm-manual-k'),
+  smRatio:$('sm-ratio'), smBand:$('sm-band'), smK:$('sm-k'), smNeutralRadius:$('sm-neutral-radius'),
+  smBendAllowance:$('sm-bend-allowance'), smBendDeduction:$('sm-bend-deduction'), smStatus:$('sm-status'),
   statusFile:$('status-file'), statusFormat:$('status-format'), statusUnits:$('status-units')
 };
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
 const WORKER_URL = '/js/step-worker.js';
+
+const AIR_BENDING_K_TABLE = Object.freeze({
+  soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
+  medium:Object.freeze({toThickness:0.38,to3Thickness:0.43,over3Thickness:0.50}),
+  hard:Object.freeze({toThickness:0.40,to3Thickness:0.45,over3Thickness:0.50})
+});
+
+const SMT = FR ? {
+  needStep:'Chargez un STEP pour utiliser les paramètres de tôlerie.',
+  needValues:"Entrez l'épaisseur T et le rayon intérieur R.",
+  invalidValues:"L'épaisseur doit être > 0 et le rayon doit être ≥ 0.",
+  capturedThickness:'Épaisseur récupérée depuis la mesure.',
+  thicknessUnavailable:'Sélectionnez deux faces et mesurez leur distance pour récupérer T.',
+  capturedRadius:'Rayon intérieur récupéré depuis la sélection.',
+  radiusUnavailable:'Sélectionnez une arête circulaire ou une face cylindrique STEP pour récupérer R.',
+  exactRadiusUnavailable:'Cette entité ne fournit pas de rayon exact.',
+  autoK:'K automatique · Air Bending CD-401',
+  manualK:'K manuel',
+  band1:'0 ≤ R/T ≤ 1',
+  band2:'1 < R/T ≤ 3',
+  band3:'R/T > 3',
+  calculationReady:'Paramètres de pliage calculés. Utilisables par le futur moteur STEP → DXF.',
+  measurementBusy:'Lecture de la géométrie exacte…'
+} : {
+  needStep:'Load a STEP file to use sheet-metal parameters.',
+  needValues:'Enter thickness T and inside radius R.',
+  invalidValues:'Thickness must be > 0 and radius must be ≥ 0.',
+  capturedThickness:'Thickness captured from the current measurement.',
+  thicknessUnavailable:'Select two faces and measure their distance to capture T.',
+  capturedRadius:'Inside radius captured from the selection.',
+  radiusUnavailable:'Select a circular edge or cylindrical STEP face to capture R.',
+  exactRadiusUnavailable:'This entity does not expose an exact radius.',
+  autoK:'Automatic K · CD-401 Air Bending',
+  manualK:'Manual K',
+  band1:'0 ≤ R/T ≤ 1',
+  band2:'1 < R/T ≤ 3',
+  band3:'R/T > 3',
+  calculationReady:'Bend parameters calculated. Ready for the future STEP → DXF engine.',
+  measurementBusy:'Reading exact geometry…'
+};
+
+const sheetMetalState = {
+  materialClass:'hard',
+  thickness:null,
+  radius:null,
+  bendAngleDeg:90,
+  manualKEnabled:false,
+  manualK:0.40
+};
 
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, grid;
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
@@ -257,6 +313,40 @@ function bindUI() {
     syncPropertiesState();
   });
 
+  E.sheetMetal.addEventListener('click', openSheetMetalPanel);
+  E.smMaterial.addEventListener('change', () => {
+    sheetMetalState.materialClass=E.smMaterial.value;
+    try { localStorage.setItem('navoflo.sheetMetal.materialClass',sheetMetalState.materialClass); } catch {}
+    updateSheetMetalCalculation();
+  });
+  E.smThickness.addEventListener('input', () => {
+    sheetMetalState.thickness=readSheetMetalLengthInput(E.smThickness);
+    updateSheetMetalCalculation({preserveInputs:true});
+  });
+  E.smRadius.addEventListener('input', () => {
+    sheetMetalState.radius=readSheetMetalLengthInput(E.smRadius);
+    updateSheetMetalCalculation({preserveInputs:true});
+  });
+  E.smAngle.addEventListener('input', () => {
+    const value=Number(E.smAngle.value);
+    sheetMetalState.bendAngleDeg=Number.isFinite(value)?value:null;
+    updateSheetMetalCalculation({preserveInputs:true});
+  });
+  E.smManualToggle.addEventListener('change', () => {
+    sheetMetalState.manualKEnabled=E.smManualToggle.checked;
+    E.smManualRow.hidden=!sheetMetalState.manualKEnabled;
+    updateSheetMetalCalculation({preserveInputs:true});
+  });
+  E.smManualK.addEventListener('input', () => {
+    const value=Number(E.smManualK.value);
+    sheetMetalState.manualK=Number.isFinite(value)?value:null;
+    updateSheetMetalCalculation({preserveInputs:true});
+  });
+  E.smUseMeasure.addEventListener('click', captureSheetMetalThickness);
+  E.smUseRadius.addEventListener('click', captureSheetMetalRadius);
+
+  initSheetMetalUI();
+
   E.fullscreen.addEventListener('click', toggleFullscreen);
   document.addEventListener('fullscreenchange', syncFullscreenState);
   document.addEventListener('webkitfullscreenchange', syncFullscreenState);
@@ -426,6 +516,283 @@ function bindUI() {
   });
 }
 
+
+
+
+function initSheetMetalUI() {
+  if(!E.sheetMetalSection)return;
+
+  try{
+    const saved=localStorage.getItem('navoflo.sheetMetal.materialClass');
+    if(saved && AIR_BENDING_K_TABLE[saved])sheetMetalState.materialClass=saved;
+  }catch{}
+
+  E.smMaterial.value=sheetMetalState.materialClass;
+  E.smAngle.value=String(sheetMetalState.bendAngleDeg);
+  E.smManualToggle.checked=sheetMetalState.manualKEnabled;
+  E.smManualRow.hidden=!sheetMetalState.manualKEnabled;
+  E.smManualK.value=String(sheetMetalState.manualK);
+  syncSheetMetalInputs();
+}
+
+function resetSheetMetalForModel() {
+  sheetMetalState.thickness=null;
+  sheetMetalState.radius=null;
+  sheetMetalState.bendAngleDeg=90;
+  sheetMetalState.manualKEnabled=false;
+  sheetMetalState.manualK=AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness ?? 0.40;
+
+  if(E.smAngle)E.smAngle.value='90';
+  if(E.smManualToggle)E.smManualToggle.checked=false;
+  if(E.smManualRow)E.smManualRow.hidden=true;
+  if(E.smManualK)E.smManualK.value=String(sheetMetalState.manualK);
+  syncSheetMetalInputs();
+}
+
+function openSheetMetalPanel() {
+  if(!currentStepResult){
+    setSheetMetalStatus(SMT.needStep,'warn');
+    return;
+  }
+
+  E.propsDrawer.hidden=false;
+  E.sheetMetalSection.hidden=false;
+  syncPropertiesState();
+
+  requestAnimationFrame(()=>{
+    E.sheetMetalSection.scrollIntoView({behavior:'smooth',block:'start'});
+    E.sheetMetalSection.classList.remove('attention');
+    void E.sheetMetalSection.offsetWidth;
+    E.sheetMetalSection.classList.add('attention');
+  });
+}
+
+function setSheetMetalStatus(message,kind='') {
+  if(!E.smStatus)return;
+  E.smStatus.textContent=message;
+  E.smStatus.className=`sheetmetal-status${kind?' '+kind:''}`;
+}
+
+function readSheetMetalLengthInput(input) {
+  if(!input)return null;
+  const raw=String(input.value??'').trim().replace(',','.');
+  if(!raw)return null;
+
+  const value=Number(raw);
+  if(!Number.isFinite(value))return null;
+
+  return value*unitScale(displayUnit,currentUnit);
+}
+
+function formatSheetMetalScalar(value,digits=5) {
+  if(!Number.isFinite(value))return '';
+  return new Intl.NumberFormat(FR?'fr-CA':'en-CA',{
+    useGrouping:false,
+    maximumFractionDigits:digits
+  }).format(value);
+}
+
+function setSheetMetalLengthInput(input,value) {
+  if(!input)return;
+  if(!Number.isFinite(value)){
+    input.value='';
+    return;
+  }
+
+  const converted=value*unitScale(currentUnit,displayUnit);
+  input.value=String(Number(converted.toPrecision(10)));
+}
+
+function getAirBendingRule(materialClass,radius,thickness) {
+  if(!Number.isFinite(thickness)||thickness<=0||!Number.isFinite(radius)||radius<0)return null;
+
+  const ratio=radius/thickness;
+  const table=AIR_BENDING_K_TABLE[materialClass]||AIR_BENDING_K_TABLE.hard;
+
+  if(ratio<=1){
+    return {ratio,band:'toThickness',bandLabel:SMT.band1,k:table.toThickness};
+  }
+  if(ratio<=3){
+    return {ratio,band:'to3Thickness',bandLabel:SMT.band2,k:table.to3Thickness};
+  }
+  return {ratio,band:'over3Thickness',bandLabel:SMT.band3,k:table.over3Thickness};
+}
+
+function calculateAirBendParameters({
+  materialClass,
+  thickness,
+  radius,
+  bendAngleDeg,
+  manualKEnabled=false,
+  manualK=null
+}) {
+  const rule=getAirBendingRule(materialClass,radius,thickness);
+  if(!rule)return null;
+
+  const angle=Number(bendAngleDeg);
+  if(!Number.isFinite(angle)||angle<=0||angle>=180)return null;
+
+  const resolvedK=manualKEnabled?Number(manualK):rule.k;
+  if(!Number.isFinite(resolvedK)||resolvedK<0||resolvedK>1)return null;
+
+  const angleRad=THREE.MathUtils.degToRad(angle);
+  const neutralRadius=radius+resolvedK*thickness;
+  const bendAllowance=angleRad*neutralRadius;
+  const outsideSetback=Math.tan(angleRad/2)*(radius+thickness);
+  const bendDeduction=2*outsideSetback-bendAllowance;
+
+  return {
+    ...rule,
+    materialClass,
+    thickness,
+    radius,
+    bendAngleDeg:angle,
+    k:resolvedK,
+    automaticK:rule.k,
+    manualKEnabled:Boolean(manualKEnabled),
+    neutralRadius,
+    bendAllowance,
+    outsideSetback,
+    bendDeduction
+  };
+}
+
+function syncSheetMetalInputs() {
+  if(!E.sheetMetalSection)return;
+
+  const unit=unitLabel(displayUnit);
+  E.smThicknessUnit.textContent=unit;
+  E.smRadiusUnit.textContent=unit;
+  E.smMaterial.value=sheetMetalState.materialClass;
+
+  setSheetMetalLengthInput(E.smThickness,sheetMetalState.thickness);
+  setSheetMetalLengthInput(E.smRadius,sheetMetalState.radius);
+
+  if(Number.isFinite(sheetMetalState.bendAngleDeg)){
+    E.smAngle.value=String(sheetMetalState.bendAngleDeg);
+  }
+
+  E.smManualToggle.checked=sheetMetalState.manualKEnabled;
+  E.smManualRow.hidden=!sheetMetalState.manualKEnabled;
+
+  if(Number.isFinite(sheetMetalState.manualK)){
+    E.smManualK.value=String(sheetMetalState.manualK);
+  }
+
+  updateSheetMetalCalculation({preserveInputs:true});
+}
+
+function updateSheetMetalCalculation({preserveInputs=false}={}) {
+  if(!E.sheetMetalSection)return;
+
+  if(!preserveInputs){
+    syncSheetMetalInputs();
+    return;
+  }
+
+  E.smRatio.textContent='—';
+  E.smBand.textContent='—';
+  E.smK.textContent='—';
+  E.smNeutralRadius.textContent='—';
+  E.smBendAllowance.textContent='—';
+  E.smBendDeduction.textContent='—';
+
+  if(!currentStepResult){
+    setSheetMetalStatus(SMT.needStep,'warn');
+    return;
+  }
+
+  if(sheetMetalState.thickness==null||sheetMetalState.radius==null){
+    setSheetMetalStatus(SMT.needValues);
+    return;
+  }
+
+  if(
+    !Number.isFinite(sheetMetalState.thickness) ||
+    sheetMetalState.thickness<=0 ||
+    !Number.isFinite(sheetMetalState.radius) ||
+    sheetMetalState.radius<0
+  ){
+    setSheetMetalStatus(SMT.invalidValues,'warn');
+    return;
+  }
+
+  const result=calculateAirBendParameters(sheetMetalState);
+  if(!result){
+    setSheetMetalStatus(SMT.invalidValues,'warn');
+    return;
+  }
+
+  E.smRatio.textContent=formatNumber(result.ratio);
+  E.smBand.textContent=result.bandLabel;
+  E.smK.textContent=`${formatSheetMetalScalar(result.k,3)}${result.manualKEnabled?' · MANUAL':' · AUTO'}`;
+  E.smNeutralRadius.textContent=formatLength(result.neutralRadius);
+  E.smBendAllowance.textContent=formatLength(result.bendAllowance);
+  E.smBendDeduction.textContent=formatLength(result.bendDeduction);
+
+  const source=result.manualKEnabled?SMT.manualK:SMT.autoK;
+  setSheetMetalStatus(`${SMT.calculationReady} · ${source}`,'ok');
+}
+
+function captureSheetMetalThickness() {
+  if(!currentStepResult){
+    setSheetMetalStatus(SMT.needStep,'warn');
+    return;
+  }
+
+  const validPair=
+    selected.length===2 &&
+    selected.every(item=>item.kind==='face') &&
+    currentMeasureResult?.ok &&
+    currentMeasureResult.kind!=='angle' &&
+    currentMeasureResult.kind!=='center-center' &&
+    Number.isFinite(currentMeasureResult.value) &&
+    currentMeasureResult.value>0;
+
+  if(!validPair){
+    setSheetMetalStatus(SMT.thicknessUnavailable,'warn');
+    return;
+  }
+
+  sheetMetalState.thickness=currentMeasureResult.value;
+  syncSheetMetalInputs();
+  setSheetMetalStatus(SMT.capturedThickness,'ok');
+}
+
+async function captureSheetMetalRadius() {
+  if(!currentStepResult){
+    setSheetMetalStatus(SMT.needStep,'warn');
+    return;
+  }
+
+  if(selected.length!==1){
+    setSheetMetalStatus(SMT.radiusUnavailable,'warn');
+    return;
+  }
+
+  setSheetMetalStatus(SMT.measurementBusy);
+
+  try{
+    const details=await workerRequest('inspect',{selection:serialSelection(selected[0])});
+    let radius=Number(details?.radius);
+
+    if(!Number.isFinite(radius) && Number.isFinite(details?.diameter)){
+      radius=Number(details.diameter)/2;
+    }
+
+    if(!Number.isFinite(radius)||radius<0){
+      setSheetMetalStatus(SMT.exactRadiusUnavailable,'warn');
+      return;
+    }
+
+    sheetMetalState.radius=radius;
+    syncSheetMetalInputs();
+    setSheetMetalStatus(SMT.capturedRadius,'ok');
+  }catch(error){
+    console.warn('[NavoFlo sheet metal radius]',error);
+    setSheetMetalStatus(SMT.exactRadiusUnavailable,'warn');
+  }
+}
 
 
 function syncPropertiesState() {
@@ -2159,6 +2526,7 @@ function fillProperties() {
 
   if (currentStepResult) {
     E.stepMeta.hidden=false;
+    E.sheetMetalSection.hidden=false;
     const h=currentStepHeader||{};
     E.stepName.textContent=h.name||currentFile.name||'—';
     E.stepSchema.textContent=h.schema||'—';
@@ -2170,7 +2538,10 @@ function fillProperties() {
     renderStepCustomProperties();
   } else {
     E.stepMeta.hidden=true;
+    E.sheetMetalSection.hidden=true;
   }
+
+  updateSheetMetalCalculation({preserveInputs:true});
 }
 function renderTree(roots) {
   E.stepTree.replaceChildren();
@@ -2357,11 +2728,12 @@ async function clearModel(showMessage=true) {
   modelRoot.position.set(0,0,0);
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];
+  resetSheetMetalForModel();
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=true;blackEdgeMaterial.visible=true;measureEnabled=false;
   cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;
   cadNav.pivot.set(0,0,0);cadNav.wheelFocus.set(0,0,0);updateCadCursor();
   E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.add('active');E.gridToggle.classList.add('active');E.measure.classList.remove('active');
-  E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.empty.classList.remove('hidden');
+  E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.sheetMetalSection.hidden=true;E.empty.classList.remove('hidden');
   E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';E.unitSelect.value='u';
   enableTools(false);revokeObjectUrls();
 }
@@ -2388,6 +2760,7 @@ function enableTools(on) {
   [E.clear,E.fit,E.edges,E.gridToggle,E.unitSelect,E.measure,E.section,E.viewButton,E.props].forEach(el=>el.disabled=!on);
   document.querySelectorAll('[data-select-mode]').forEach(el=>el.disabled=!on);
   E.measureType.disabled=!on||!measureEnabled;
+  E.sheetMetal.disabled=!on||!currentStepResult;
 }
 function busy(on,label=T.loading,sub='') {
   E.loading.hidden=!on;E.loadingLabel.textContent=label;E.loadingSub.textContent=sub||'';
@@ -2430,6 +2803,7 @@ function updateDisplayedUnits() {
   const label=unitLabel(displayUnit);
   E.statusUnits.textContent=label;
   E.propUnits.textContent=label;
+  if(currentStepResult)syncSheetMetalInputs();
 }
 
 async function refreshMeasurementUnits() {
