@@ -507,7 +507,7 @@ async function loadFiles(files) {
     enableTools(true);
     E.statusFile.textContent=main.name;
     E.statusFormat.textContent=currentFormat;
-    E.statusUnits.textContent=displayUnit;
+    E.statusUnits.textContent=unitLabel(displayUnit);
     fitCamera('iso');
   } catch (error) {
     console.error('[NavoFlo CAD Viewer]',error);
@@ -759,10 +759,18 @@ function updateZoomClipping() {
 
 function selectAt(event) {
   const selection = pickSelectionCandidate(event.clientX,event.clientY);
+
   if (!selection) {
-    if (!measureEnabled && !event.ctrlKey && !event.metaKey) clearSelections();
+    // CAD-style behavior:
+    // clicking empty space clears the active selection.
+    // In Measure mode this immediately prepares the next measurement.
+    if (!event.ctrlKey && !event.metaKey) {
+      clearSelections();
+      clearPreselection();
+    }
     return;
   }
+
   acceptSelection(selection, event);
 }
 
@@ -1164,7 +1172,8 @@ function showSingleExact(d) {
   clearGroup(measureOverlayRoot);
 
   E.measureMain.textContent=`${labelKind(d.kind)} #${d.elementId}`;
-  details.push([T.family,d.family||'other']);
+  const familyLabel=localizeGeometryFamily(d.family);
+  details.push([T.family,familyLabel]);
 
   if (isFinite(d.length)) details.push([T.length,formatLength(d.length)]);
   if (isFinite(d.diameter)) details.push([T.diameter,formatLength(d.diameter)]);
@@ -1176,7 +1185,7 @@ function showSingleExact(d) {
     addExactCenterMarker(c);
     details.push([
       FR?'Centre':'Center',
-      `${formatNumber(convertLength(d.center[0]))}, ${formatNumber(convertLength(d.center[1]))}, ${formatNumber(convertLength(d.center[2]))} ${displayUnit}`
+      `${formatNumber(convertLength(d.center[0]))}, ${formatNumber(convertLength(d.center[1]))}, ${formatNumber(convertLength(d.center[2]))} ${unitLabel(displayUnit)}`
     ]);
   }
 
@@ -1294,6 +1303,33 @@ function renderDetails(rows) {
     dt.textContent=k;dd.textContent=v;div.append(dt,dd);E.measureDetails.append(div);
   }
 }
+function localizeGeometryFamily(value) {
+  const raw=String(value||'other');
+  if(!FR)return raw;
+
+  const map={
+    cylinder:'cylindre',
+    cylindrical:'cylindre',
+    plane:'plan',
+    planar:'plan',
+    circle:'cercle',
+    circular:'cercle',
+    line:'ligne',
+    linear:'ligne',
+    cone:'cône',
+    conical:'cône',
+    sphere:'sphère',
+    spherical:'sphère',
+    torus:'tore',
+    toroidal:'tore',
+    bspline:'B-spline',
+    bezier:'Bézier',
+    other:'autre'
+  };
+
+  return map[raw.toLowerCase()]||raw;
+}
+
 function labelKind(k){return k==='face'?T.face:k==='edge'?T.edge:k==='vertex'?T.vertex:T.point}
 function labelSelection(s){return s.meshOnly?T.point:`${labelKind(s.kind)} #${s.elementId}`}
 
@@ -1336,7 +1372,7 @@ function fitCamera(view='iso') {
 function fillProperties() {
   E.propFile.textContent=currentFile?.name||'—';
   E.propFormat.textContent=currentFormat||'—';
-  E.propUnits.textContent=displayUnit;
+  E.propUnits.textContent=unitLabel(displayUnit);
   E.propParts.textContent=String(currentStats?.partCount??1);
   E.propGeometries.textContent=String(currentStats?.geometryCount??surfaceMeshes.length);
   E.propTriangles.textContent=formatInteger(currentStats?.triangleCount??0);
@@ -1591,6 +1627,12 @@ function updatePCCheck() {
 }
 
 
+function unitLabel(unit=displayUnit) {
+  if (unit==='in') return FR ? 'po' : 'in';
+  if (unit==='u') return FR ? 'unité' : 'unit';
+  return unit;
+}
+
 function unitScale(from,to) {
   if(from==='u'||to==='u'||from===to)return 1;
   const mm={mm:1,cm:10,m:1000,in:25.4};
@@ -1603,8 +1645,9 @@ function convertLength(value,from=currentUnit,to=displayUnit) {
 }
 
 function updateDisplayedUnits() {
-  E.statusUnits.textContent=displayUnit;
-  E.propUnits.textContent=displayUnit;
+  const label=unitLabel(displayUnit);
+  E.statusUnits.textContent=label;
+  E.propUnits.textContent=label;
 }
 
 async function refreshMeasurementUnits() {
@@ -1630,13 +1673,13 @@ async function refreshMeasurementUnits() {
 function formatLength(v,unit=displayUnit){
   const sourceUnit=unit==='u'?'u':currentUnit;
   const targetUnit=unit==='u'?'u':displayUnit;
-  return `${formatNumber(convertLength(v,sourceUnit,targetUnit))} ${targetUnit}`;
+  return `${formatNumber(convertLength(v,sourceUnit,targetUnit))} ${unitLabel(targetUnit)}`;
 }
 function formatArea(v,unit=displayUnit){
   const sourceUnit=unit==='u'?'u':currentUnit;
   const targetUnit=unit==='u'?'u':displayUnit;
   const f=unitScale(sourceUnit,targetUnit);
-  return `${formatNumber(v*f*f)} ${targetUnit}²`;
+  return `${formatNumber(v*f*f)} ${unitLabel(targetUnit)}²`;
 }
 function formatAngle(v) {
   // OCCT geometric angles are expressed in radians.
@@ -1644,7 +1687,7 @@ function formatAngle(v) {
 }
 function formatPoint(p){
   const f=unitScale(currentUnit,displayUnit);
-  return `${formatNumber(p.x*f)}, ${formatNumber(p.y*f)}, ${formatNumber(p.z*f)} ${displayUnit}`;
+  return `${formatNumber(p.x*f)}, ${formatNumber(p.y*f)}, ${formatNumber(p.z*f)} ${unitLabel(displayUnit)}`;
 }
 function formatNumber(v) {
   if (!Number.isFinite(v)) return '—';
