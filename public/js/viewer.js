@@ -1289,7 +1289,10 @@ function rebuildSelectionHighlights() {
 }
 function highlightSelection(s,index) {
   const color=index===0?0x35d39a:0x9cefd4;
-  const faceColor=index===0?0x2f80ed:0x5aa2ff;
+
+  // All selected faces stay the same solid CAD blue.
+  // Selection order is already shown in the measurement summary.
+  const faceColor=0x2f80ed;
 
   if (s.kind==='edge') {
     const line=new THREE.Line(
@@ -1380,30 +1383,81 @@ function showSingleExact(d) {
 
   renderDetails(details);
 }
+function getMeasureAnnotationPoints(result) {
+  const validPoint=p=>Array.isArray(p) && p.length===3 && p.every(Number.isFinite);
+
+  if(validPoint(result?.pointA) && validPoint(result?.pointB)){
+    return [result.pointA,result.pointB];
+  }
+
+  // Fallback to the actual click locations. This is especially useful for
+  // angle and certain face/edge combinations where OCCT returns the exact
+  // scalar result but no explicit witness points for drawing.
+  const a=selected[0]?.point;
+  const b=selected[1]?.point;
+
+  if(a?.isVector3 && b?.isVector3){
+    return [a.toArray(),b.toArray()];
+  }
+
+  return [null,null];
+}
+
 function showPairExact(r) {
   if (!r?.ok) return showMeasureError(r?.message||T.exactFail);
+
   currentMeasureResult=r;
   clearGroup(measureOverlayRoot);
 
+  const [annotationA,annotationB]=getMeasureAnnotationPoints(r);
+
   if (r.kind==='angle') {
-    E.measureMain.textContent=formatAngle(r.value);
-    renderDetails([[T.angle,formatAngle(r.value)]]);
-    drawMeasurePoints(r.pointA,r.pointB,formatAngle(r.value));
+    const label=formatAngle(r.value);
+
+    E.measureMain.textContent=label;
+    renderDetails([[T.angle,label]]);
+
+    // Always show the angular value in the viewport, even when OCCT did not
+    // provide witness points for the exact angle calculation.
+    drawMeasureLine(annotationA,annotationB,label);
+
   } else if (r.kind==='center-center') {
-    E.measureMain.textContent=formatLength(r.value);
+    const label=formatLength(r.value);
+
+    E.measureMain.textContent=label;
     renderDetails([
-      [T.center,formatLength(r.value)],[T.dx,formatLength(r.dx)],[T.dy,formatLength(r.dy)],[T.dz,formatLength(r.dz)]
+      [T.center,label],
+      [T.dx,formatLength(r.dx)],
+      [T.dy,formatLength(r.dy)],
+      [T.dz,formatLength(r.dz)]
     ]);
-    drawMeasureLine(r.pointA,r.pointB,formatLength(r.value));
+
+    drawMeasureLine(annotationA,annotationB,label);
+
   } else {
-    E.measureMain.textContent=formatLength(r.value);
-    const a=r.pointA,b=r.pointB;
-    const dx=a&&b?Math.abs(b[0]-a[0]):null,dy=a&&b?Math.abs(b[1]-a[1]):null,dz=a&&b?Math.abs(b[2]-a[2]):null;
-    const rows=[[T.distance,formatLength(r.value)]];
-    if (dx!=null) rows.push([T.dx,formatLength(dx)],[T.dy,formatLength(dy)],[T.dz,formatLength(dz)]);
+    const label=formatLength(r.value);
+
+    E.measureMain.textContent=label;
+
+    const a=annotationA;
+    const b=annotationB;
+    const dx=a&&b?Math.abs(b[0]-a[0]):null;
+    const dy=a&&b?Math.abs(b[1]-a[1]):null;
+    const dz=a&&b?Math.abs(b[2]-a[2]):null;
+
+    const rows=[[T.distance,label]];
+    if (dx!=null){
+      rows.push(
+        [T.dx,formatLength(dx)],
+        [T.dy,formatLength(dy)],
+        [T.dz,formatLength(dz)]
+      );
+    }
+
     renderDetails(rows);
-    drawMeasureLine(a,b,formatLength(r.value));
+    drawMeasureLine(a,b,label);
   }
+
   E.selectionSummary.textContent=`${labelSelection(selected[0])}  →  ${labelSelection(selected[1])}`;
 }
 
