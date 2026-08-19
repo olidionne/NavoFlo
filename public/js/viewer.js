@@ -20,7 +20,7 @@ const T = FR ? {
   exactFail:'Mesure exacte non disponible pour cette sélection.', browser:'Votre navigateur',
   compatible:'Compatible STEP', limited:'Compatible, mais limité pour les gros STEP',
   incompatible:'Compatibilité STEP limitée', threads:'threads', ram:'RAM', source:'Source',
-  through:'traversant', depth:'Profondeur', hole:'Trou', reset:'Mesure effacée'
+  through:'traversant', depth:'Profondeur', hole:'Trou', reset:'Mesure effacée', fullscreen:'Plein écran', exitFullscreen:'Quitter le plein écran'
 } : {
   noModel:'No model', loading:'Loading…', stepEngine:'Initializing local CAD kernel…',
   stepOpen:'Opening STEP and extracting B-Rep…', meshOpen:'Loading mesh…',
@@ -36,7 +36,7 @@ const T = FR ? {
   exactFail:'Exact measurement is unavailable for this selection.', browser:'Your browser',
   compatible:'STEP compatible', limited:'Compatible, but limited for large STEP files',
   incompatible:'Limited STEP compatibility', threads:'threads', ram:'RAM', source:'Source',
-  through:'through', depth:'Depth', hole:'Hole', reset:'Measurement cleared'
+  through:'through', depth:'Depth', hole:'Hole', reset:'Measurement cleared', fullscreen:'Fullscreen', exitFullscreen:'Exit fullscreen'
 };
 
 const $ = id => document.getElementById(id);
@@ -50,7 +50,7 @@ const E = {
   section:$('section-toggle'), sectionPanel:$('section-panel'), clipAxis:$('clip-axis'),
   clipSlider:$('clip-slider'), clipInvert:$('clip-invert'),
   viewButton:$('view-menu-button'), viewMenu:$('view-menu'),
-  props:$('properties-toggle'), propsDrawer:$('properties-drawer'), propsClose:$('properties-close'),
+  props:$('properties-toggle'), propsDrawer:$('properties-drawer'), propsClose:$('properties-close'), fullscreen:$('fullscreen-toggle'),
   propFile:$('prop-file'), propFormat:$('prop-format'), propUnits:$('prop-units'),
   propParts:$('prop-parts'), propGeometries:$('prop-geometries'), propTriangles:$('prop-triangles'),
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
@@ -187,6 +187,10 @@ function bindUI() {
   E.props.addEventListener('click', () => E.propsDrawer.hidden = !E.propsDrawer.hidden);
   E.propsClose.addEventListener('click', () => E.propsDrawer.hidden = true);
 
+  E.fullscreen.addEventListener('click', toggleFullscreen);
+  document.addEventListener('fullscreenchange', syncFullscreenState);
+  document.addEventListener('webkitfullscreenchange', syncFullscreenState);
+
   E.canvas.addEventListener('contextmenu', e => e.preventDefault());
 
   // SolidWorks-like navigation: wheel = zoom, MMB drag = rotate, Ctrl+MMB = pan.
@@ -210,6 +214,50 @@ function bindUI() {
   addEventListener('beforeunload', () => {
     revokeObjectUrls();
     try { worker?.terminate(); } catch {}
+  });
+}
+
+
+async function toggleFullscreen() {
+  try {
+    const active = document.fullscreenElement || document.webkitFullscreenElement;
+
+    if (!active) {
+      if (E.workspace.requestFullscreen) {
+        await E.workspace.requestFullscreen();
+      } else if (E.workspace.webkitRequestFullscreen) {
+        E.workspace.webkitRequestFullscreen();
+      } else {
+        throw new Error('Fullscreen API unavailable.');
+      }
+    } else {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      }
+    }
+  } catch (error) {
+    console.warn('[NavoFlo CAD Viewer fullscreen]', error);
+  }
+}
+
+function syncFullscreenState() {
+  const active = (document.fullscreenElement || document.webkitFullscreenElement) === E.workspace;
+
+  E.workspace.classList.toggle('is-fullscreen', active);
+  E.fullscreen.classList.toggle('active', active);
+  E.fullscreen.title = active ? T.exitFullscreen : T.fullscreen;
+
+  const label = E.fullscreen.querySelector('span:last-child');
+  if (label) label.textContent = active ? T.exitFullscreen : T.fullscreen;
+
+  const icon = E.fullscreen.querySelector('.fullscreen-icon');
+  if (icon) icon.textContent = active ? '🗗' : '⛶';
+
+  requestAnimationFrame(() => {
+    resize();
+    requestAnimationFrame(resize);
   });
 }
 

@@ -24,3 +24,48 @@
 @media(max-width:1260px){.cad-toolbar{overflow-x:auto;scrollbar-width:thin}.cad-toolbar .toolbar-spacer{min-width:12px}.mouse-help span:nth-child(2){display:none}}
 @media(max-width:900px){.intro-v2-row{flex-direction:column;align-items:stretch}.privacy-pill{align-self:stretch}.cad-workspace{height:72vh;min-height:600px}.tool-group-label{display:none}.properties-drawer{width:min(330px,calc(100% - 24px))}.mouse-help{display:none}}
 @media(max-width:600px){.viewer-wide{width:96vw!important}.viewer-back{display:none}.viewer-v2-intro h1{font-size:38px}.cad-workspace{min-height:560px}.tool-button span:not(.tool-icon){display:none}.segmented button{padding:0 6px}.measure-card-v2{left:12px;right:12px;width:auto}.status-left span:first-child{max-width:130px}}
+
+
+/* Native fullscreen CAD workspace */
+.cad-workspace:fullscreen,
+.cad-workspace:-webkit-full-screen{
+  width:100vw!important;
+  height:100vh!important;
+  min-height:100vh!important;
+  max-height:none!important;
+  border:0!important;
+  border-radius:0!important;
+  box-shadow:none!important;
+  background:#0a1016;
+}
+
+.cad-workspace:fullscreen::backdrop{
+  background:#080d12;
+}
+
+.cad-workspace:-webkit-full-screen{
+  background:#0a1016;
+}
+
+.cad-workspace.is-fullscreen .cad-toolbar{
+  top:14px;
+  left:14px;
+  right:14px;
+}
+
+.cad-workspace.is-fullscreen .cad-statusbar{
+  height:38px;
+}
+
+.cad-workspace.is-fullscreen .properties-drawer{
+  top:68px;
+  bottom:50px;
+}
+
+.cad-workspace.is-fullscreen .measure-card-v2{
+  bottom:52px;
+}
+
+.fullscreen-icon{
+  font-size:15px;
+}
