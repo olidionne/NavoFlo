@@ -222,9 +222,9 @@ function bindUI() {
         // Ctrl + MMB = pan. Do not change the current target while panning.
         controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
       } else {
-        // SolidWorks-like behavior:
-        // every rotation starts around the model's absolute geometric center.
-        lockRotationPivotToModelCenter();
+        // SolidWorks-like hybrid pivot:
+        // global view = model center; close-up = current zoom focus.
+        setSmartRotationPivot();
         controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
       }
     }
@@ -359,12 +359,41 @@ function getModelRotationCenter() {
   return box.getCenter(new THREE.Vector3());
 }
 
-function lockRotationPivotToModelCenter() {
-  if (!currentModel || !controls) return;
+function setSmartRotationPivot() {
+  if (!currentModel || !controls || !camera) return;
 
-  const center = getModelRotationCenter();
+  const box = new THREE.Box3().setFromObject(modelRoot);
+  if (box.isEmpty()) return;
 
-  // Keep camera where it is; only change the orbit pivot.
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const center = sphere.center.clone();
+  const radius = Math.max(sphere.radius, 0.0001);
+
+  // Estimate the distance used by Fit. This lets us distinguish:
+  // - global/model view -> rotate about the absolute model center
+  // - close-up view      -> keep the focus created by zoom-to-cursor
+  const fov = THREE.MathUtils.degToRad(camera.fov);
+  const fittedDistance = (radius / Math.sin(fov / 2)) * 1.12;
+  const currentOrbitDistance = camera.position.distanceTo(controls.target);
+  const zoomRatio = currentOrbitDistance / Math.max(fittedDistance, 0.0001);
+
+  // OrbitControls zoomToCursor moves the target toward the area being zoomed.
+  // Keep that local target once the user is clearly working in a close-up.
+  const closeUp = zoomRatio < 0.74;
+
+  // Prevent a pan or numerical drift from leaving the pivot somewhere far
+  // outside the model. A generous margin still allows corners/surfaces.
+  const targetZone = box.clone().expandByScalar(Math.max(modelSize * 0.18, radius * 0.18));
+  const localTargetIsValid = targetZone.containsPoint(controls.target);
+
+  if (closeUp && localTargetIsValid) {
+    // Do nothing: retain the current zoom/focus pivot.
+    // This is what allows rotating around a corner, hole or local feature.
+    return;
+  }
+
+  // Global view: recover the stable absolute center so the model does not
+  // wander out of the viewport during rotation.
   controls.target.copy(center);
   controls.update();
 }
