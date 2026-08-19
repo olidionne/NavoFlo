@@ -96,7 +96,10 @@ async function load(files){
     busy(true,T.analysing);await frame();stats=analyse(model);showStats();fit('iso');
   }catch(err){
     console.error('[NavoFlo 3D Inspector]',err);
-    const wasStep=format==='STEP'||format==='STP';clear(false);fail(wasStep?T.stepError:T.error)
+    const wasStep=format==='STEP'||format==='STP';
+    const details=err?.message?` — ${err.message}`:'';
+    clear(false);
+    fail(wasStep?`${T.stepError}${details}`:`${T.error}${details}`)
   }finally{busy(false)}
 }
 
@@ -150,7 +153,14 @@ function getStepWorker(){
 
   stepWorker=new Worker('/js/step-worker.js');
   stepWorker.onmessage=(event)=>{
-    const {id,ok,result,error}=event.data||{};
+    const data=event.data||{};
+    if(data.type==='engine-error'){
+      console.error('[NavoFlo STEP engine]',data.error);
+      for(const {reject} of stepResolvers.values())reject(new Error(data.error||'STEP engine failed.'));
+      stepResolvers.clear();
+      return;
+    }
+    const {id,ok,result,error}=data;
     const pending=stepResolvers.get(id);if(!pending)return;
     stepResolvers.delete(id);
     ok?pending.resolve(result):pending.reject(new Error(error||'STEP import failed.'));
