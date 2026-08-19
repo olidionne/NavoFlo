@@ -49,3 +49,28 @@
 .pc-check.warn{border-color:rgba(255,190,80,.22);color:#e6c27d;background:rgba(255,190,80,.04)}
 .pc-check.bad{border-color:rgba(255,110,110,.22);color:#f09a9a;background:rgba(255,110,110,.04)}
 .file-status.processing{color:#8fe0c2;white-space:normal}
+
+
+/* Measurement */
+.measure-card{border-color:rgba(53,211,154,.12)}
+.measure-button,.measure-clear{width:100%;min-height:35px;padding:0 10px;border:1px solid rgba(255,255,255,.09);border-radius:7px;background:rgba(255,255,255,.025);color:#b8c6cd;font-size:10px;font-weight:750;cursor:pointer}
+.measure-button:hover:not(:disabled),.measure-clear:hover:not(:disabled){border-color:rgba(53,211,154,.3);background:rgba(53,211,154,.055);color:#35d39a}
+.measure-button.active{border-color:rgba(53,211,154,.5);background:rgba(53,211,154,.11);color:#35d39a;box-shadow:0 0 0 2px rgba(53,211,154,.05) inset}
+.measure-button:disabled,.measure-clear:disabled{opacity:.35;cursor:default}
+.measure-clear{margin-top:7px}
+.measure-status{margin:10px 0;padding:8px 9px;border-radius:7px;background:#0b1218;color:#84959f;font:650 9px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+.measure-status.active{color:#8fe0c2;border:1px solid rgba(53,211,154,.13)}
+.measure-values{margin:0}
+.measure-values>div{min-height:31px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border-bottom:1px solid rgba(255,255,255,.045)}
+.measure-values>div:last-child{border-bottom:0}
+.measure-values dt{color:#71818e;font-size:9px}.measure-values dd{margin:0;color:#35d39a;font:700 9px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+.stage.measure-mode #viewer-canvas{cursor:crosshair}
+
+/* STEP metadata and hierarchy */
+.step-properties-card{border-color:rgba(53,211,154,.13)}
+.step-meta dd{max-width:145px}
+.step-tree-head{margin:14px 0 8px;color:#71818e;font:800 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.14em}
+.step-tree{max-height:240px;overflow:auto;padding:8px;border:1px solid rgba(255,255,255,.055);border-radius:8px;background:#0b1218;color:#9aabb5;font:600 9px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;scrollbar-width:thin}
+.step-tree-node{display:block;padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step-tree-node b{color:#35d39a;font-weight:800}
+.measure-marker{pointer-events:none}
