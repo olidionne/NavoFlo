@@ -69,3 +69,140 @@
 .fullscreen-icon{
   font-size:15px;
 }
+
+
+/* V2.1 — improved readability */
+.cad-toolbar{
+  min-height:48px;
+  gap:7px;
+  padding:7px;
+}
+.tool-button,.file-tool,.tool-select,.segmented button{
+  font-size:11px;
+}
+.tool-button,.file-tool{
+  height:34px;
+  padding:0 11px;
+}
+.segmented button{
+  height:29px;
+  padding:0 9px;
+  font-size:10px;
+}
+.tool-icon{
+  font-size:14px;
+}
+.tool-select{
+  height:34px;
+  font-size:10.5px;
+}
+
+.properties-drawer{
+  width:365px;
+}
+.drawer-head{
+  height:45px;
+  padding:0 15px;
+  font-size:10px;
+}
+.drawer-stats{
+  padding:10px 15px;
+}
+.drawer-stats>div{
+  min-height:36px;
+}
+.drawer-stats dt{
+  font-size:10px;
+}
+.drawer-stats dd{
+  font-size:10px;
+  line-height:1.45;
+}
+.drawer-section{
+  padding:15px;
+}
+.drawer-section-title{
+  font-size:9px;
+}
+.step-tree{
+  font-size:9.5px;
+  line-height:1.65;
+}
+.pc-tier b{
+  font-size:9.5px;
+}
+.pc-tier span,
+.pc-check{
+  font-size:9px;
+}
+
+.cad-statusbar{
+  height:36px;
+  font-size:9px;
+}
+.mouse-help{
+  gap:14px;
+}
+.local-badge{
+  font-size:8.5px;
+}
+
+.measure-card-v2{
+  width:320px;
+  padding:14px;
+}
+.measure-card-head{
+  font-size:9px;
+}
+.measure-main{
+  font-size:22px;
+}
+.measure-details dt,
+.measure-details dd,
+.selection-summary{
+  font-size:9.5px;
+}
+
+/* Bigger again in native fullscreen */
+.cad-workspace.is-fullscreen .cad-toolbar{
+  min-height:52px;
+  padding:8px;
+}
+.cad-workspace.is-fullscreen .tool-button,
+.cad-workspace.is-fullscreen .file-tool{
+  height:36px;
+  font-size:12px;
+}
+.cad-workspace.is-fullscreen .segmented button{
+  height:31px;
+  font-size:11px;
+}
+.cad-workspace.is-fullscreen .tool-select{
+  height:36px;
+  font-size:11px;
+}
+.cad-workspace.is-fullscreen .properties-drawer{
+  width:390px;
+}
+.cad-workspace.is-fullscreen .drawer-head{
+  font-size:10.5px;
+}
+.cad-workspace.is-fullscreen .drawer-stats dt,
+.cad-workspace.is-fullscreen .drawer-stats dd{
+  font-size:10.5px;
+}
+.cad-workspace.is-fullscreen .step-tree{
+  font-size:10px;
+}
+.cad-workspace.is-fullscreen .cad-statusbar{
+  height:39px;
+  font-size:9.5px;
+}
+
+/* Preselection / SolidWorks-like hover */
+.cad-workspace.has-preselection #viewer-canvas{
+  cursor:default;
+}
+.cad-workspace.selecting.has-preselection #viewer-canvas{
+  cursor:pointer;
+}

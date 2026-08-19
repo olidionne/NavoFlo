@@ -63,14 +63,14 @@ const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
 const WORKER_URL = '/js/step-worker.js';
 
-let renderer, scene, camera, controls, modelRoot, selectionRoot, measureOverlayRoot, grid;
+let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, grid;
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u';
 let currentStats = null, currentStepHeader = null, currentStepResult = null;
 let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
 let selectionMode = 'auto', measureEnabled = false, selected = [], currentMeasureResult = null;
 let edgesVisible = true, clipEnabled = false;
 let modelBounds = null, modelSize = 1;
-let pointerDown = null;
+let pointerDown = null, hoverRAF = 0, preselected = null, middleMouseDown = false;
 let worker = null, workerSeq = 0, workerPending = new Map();
 let meshObjectUrls = [];
 let baseMaterials = new Set();
@@ -80,6 +80,11 @@ const pointer = new THREE.Vector2();
 const clipPlane = new THREE.Plane(new THREE.Vector3(1,0,0), 0);
 const blackEdgeMaterial = new THREE.LineBasicMaterial({color:0x090b0d, transparent:true, opacity:0.96});
 const selectedEdgeMaterial = new THREE.LineBasicMaterial({color:0x35d39a, depthTest:false});
+const hoverEdgeMaterial = new THREE.LineBasicMaterial({color:0x84eac8, depthTest:false, transparent:true, opacity:0.95});
+const hoverFaceMaterial = new THREE.MeshBasicMaterial({
+  color:0x7ce4c1, transparent:true, opacity:0.18, side:THREE.DoubleSide,
+  depthTest:true, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
+});
 const selectionFaceMaterial = new THREE.MeshBasicMaterial({
   color:0x35d39a, transparent:true, opacity:0.32, side:THREE.DoubleSide,
   depthTest:true, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
@@ -120,6 +125,7 @@ function init() {
 
   modelRoot = new THREE.Group(); scene.add(modelRoot);
   selectionRoot = new THREE.Group(); scene.add(selectionRoot);
+  preselectionRoot = new THREE.Group(); scene.add(preselectionRoot);
   measureOverlayRoot = new THREE.Group(); scene.add(measureOverlayRoot);
 
   createGrid(10);
@@ -166,6 +172,7 @@ function bindUI() {
       selectionMode = button.dataset.selectMode;
       document.querySelectorAll('[data-select-mode]').forEach(b => b.classList.toggle('active', b===button));
       clearSelections();
+      clearPreselection();
       updatePickingVisibility();
     });
   });
@@ -196,10 +203,15 @@ function bindUI() {
   // SolidWorks-like navigation: wheel = zoom, MMB drag = rotate, Ctrl+MMB = pan.
   E.canvas.addEventListener('pointerdown', event => {
     if (event.button === 1) {
+      middleMouseDown = true;
+      clearPreselection();
       controls.mouseButtons.MIDDLE = event.ctrlKey ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
     }
   }, true);
-  addEventListener('pointerup', () => { if (controls) controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE; }, true);
+  addEventListener('pointerup', event => {
+    if (event.button === 1) middleMouseDown = false;
+    if (controls) controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+  }, true);
 
   E.canvas.addEventListener('pointerdown', event => {
     if (event.button === 0) pointerDown = {x:event.clientX,y:event.clientY};
@@ -209,6 +221,25 @@ function bindUI() {
     const distance = Math.hypot(event.clientX-pointerDown.x, event.clientY-pointerDown.y);
     pointerDown = null;
     if (distance < 5 && currentModel) selectAt(event);
+  });
+
+  E.canvas.addEventListener('pointermove', event => {
+    if (!currentModel || middleMouseDown) return;
+    if (hoverRAF) cancelAnimationFrame(hoverRAF);
+    const x=event.clientX,y=event.clientY;
+    hoverRAF=requestAnimationFrame(()=>{
+      hoverRAF=0;
+      updatePreselection(x,y);
+    });
+  });
+  E.canvas.addEventListener('pointerleave', clearPreselection);
+
+  addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      if (document.fullscreenElement || document.webkitFullscreenElement) return;
+      clearSelections();
+      clearPreselection();
+    }
   });
 
   addEventListener('beforeunload', () => {
@@ -535,33 +566,143 @@ function createGrid(size) {
 function niceGrid(v){const p=10**Math.floor(Math.log10(v)),s=v/p;return(s<=1?1:s<=2?2:s<=5?5:10)*p}
 
 function selectAt(event) {
+  const selection = pickSelectionCandidate(event.clientX,event.clientY);
+  if (!selection) {
+    if (!measureEnabled && !event.ctrlKey && !event.metaKey) clearSelections();
+    return;
+  }
+  acceptSelection(selection, event);
+}
+
+function setRayFromClient(clientX,clientY) {
   const rect=E.canvas.getBoundingClientRect();
-  pointer.x=((event.clientX-rect.left)/rect.width)*2-1;
-  pointer.y=-((event.clientY-rect.top)/rect.height)*2+1;
+  pointer.x=((clientX-rect.left)/rect.width)*2-1;
+  pointer.y=-((clientY-rect.top)/rect.height)*2+1;
   raycaster.setFromCamera(pointer,camera);
+  return rect;
+}
 
-  let hit=null, selection=null;
+function screenDistance(point,clientX,clientY,rect) {
+  const projected=point.clone().project(camera);
+  const sx=rect.left+(projected.x+1)*0.5*rect.width;
+  const sy=rect.top+(1-projected.y)*0.5*rect.height;
+  return Math.hypot(sx-clientX,sy-clientY);
+}
 
-  if (currentStepResult) {
-    if (selectionMode==='edge'||selectionMode==='auto') {
-      hit=raycaster.intersectObjects(edgeObjects,false)[0];
-      if (hit) selection=selectionFromEdge(hit);
-    }
-    if (!selection && (selectionMode==='vertex'||selectionMode==='auto')) {
-      hit=raycaster.intersectObjects(vertexObjects,false)[0];
-      if (hit) selection=selectionFromVertex(hit);
-    }
-    if (!selection && (selectionMode==='face'||selectionMode==='auto')) {
-      hit=raycaster.intersectObjects(surfaceMeshes,false)[0];
-      if (hit) selection=selectionFromFace(hit);
-    }
-  } else {
-    hit=raycaster.intersectObjects(surfaceMeshes,true)[0];
-    if (hit) selection={kind:'point',point:hit.point.clone(),object:hit.object,meshOnly:true};
+function pickSelectionCandidate(clientX,clientY) {
+  const rect=setRayFromClient(clientX,clientY);
+
+  if (!currentStepResult) {
+    const hit=raycaster.intersectObjects(surfaceMeshes,true)[0];
+    return hit ? {kind:'point',point:hit.point.clone(),object:hit.object,meshOnly:true} : null;
   }
 
-  if (!selection) return;
-  acceptSelection(selection);
+  const wantVertex=selectionMode==='vertex'||selectionMode==='auto';
+  const wantEdge=selectionMode==='edge'||selectionMode==='auto';
+  const wantFace=selectionMode==='face'||selectionMode==='auto';
+
+  let vertexCandidate=null,edgeCandidate=null,faceCandidate=null;
+
+  if (wantVertex) {
+    const hit=raycaster.intersectObjects(vertexObjects,false)[0];
+    if (hit) {
+      const selection=selectionFromVertex(hit);
+      const px=screenDistance(selection.point,clientX,clientY,rect);
+      vertexCandidate={selection,px,depth:hit.distance};
+    }
+  }
+
+  if (wantEdge) {
+    const hits=raycaster.intersectObjects(edgeObjects,false).slice(0,8);
+    for (const hit of hits) {
+      const selection=selectionFromEdge(hit);
+      const px=screenDistance(selection.point,clientX,clientY,rect);
+      if (!edgeCandidate || px<edgeCandidate.px || (Math.abs(px-edgeCandidate.px)<0.5&&hit.distance<edgeCandidate.depth)) {
+        edgeCandidate={selection,px,depth:hit.distance};
+      }
+    }
+  }
+
+  if (wantFace) {
+    const hit=raycaster.intersectObjects(surfaceMeshes,false)[0];
+    if (hit) {
+      const selection=selectionFromFace(hit);
+      if (selection) faceCandidate={selection,px:0,depth:hit.distance};
+    }
+  }
+
+  if (selectionMode==='vertex') return vertexCandidate?.selection||null;
+  if (selectionMode==='edge') return edgeCandidate?.selection||null;
+  if (selectionMode==='face') return faceCandidate?.selection||null;
+
+  // SolidWorks-like Auto:
+  // vertex wins only when cursor is very close; edge next; otherwise face.
+  if (vertexCandidate && vertexCandidate.px<=11) return vertexCandidate.selection;
+  if (edgeCandidate && edgeCandidate.px<=7) return edgeCandidate.selection;
+  return faceCandidate?.selection || edgeCandidate?.selection || vertexCandidate?.selection || null;
+}
+
+function updatePreselection(clientX,clientY) {
+  const candidate=pickSelectionCandidate(clientX,clientY);
+  const key=candidate?selectionKey(candidate):'';
+
+  if (preselected && selectionKey(preselected)===key) return;
+
+  clearPreselection();
+  if (!candidate) return;
+
+  preselected=candidate;
+  E.workspace.classList.add('has-preselection');
+  highlightPreselection(candidate);
+}
+
+function clearPreselection() {
+  preselected=null;
+  E.workspace?.classList.remove('has-preselection');
+  clearGroup(preselectionRoot);
+}
+
+function highlightPreselection(s) {
+  if (!s) return;
+
+  if (s.kind==='edge') {
+    const line=new THREE.Line(s.object.geometry.clone(),hoverEdgeMaterial.clone());
+    line.matrix.copy(s.object.matrixWorld);
+    line.matrixAutoUpdate=false;
+    line.renderOrder=27;
+    preselectionRoot.add(line);
+    return;
+  }
+
+  if (s.kind==='vertex'||s.kind==='point') {
+    const radius=Math.max(modelSize*0.0045,0.0001);
+    const sphere=new THREE.Mesh(
+      new THREE.SphereGeometry(radius,14,10),
+      new THREE.MeshBasicMaterial({color:0x84eac8,depthTest:false,transparent:true,opacity:0.9})
+    );
+    sphere.position.copy(s.point);
+    sphere.renderOrder=28;
+    preselectionRoot.add(sphere);
+    return;
+  }
+
+  if (s.kind==='face') {
+    const face=s.def.facesById.get(Number(s.elementId));
+    if (!face) return;
+    const source=s.def.geometry;
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',source.getAttribute('position'));
+    if (source.getAttribute('normal')) g.setAttribute('normal',source.getAttribute('normal'));
+    const srcIndex=source.index.array;
+    const slice=srcIndex.slice(face.firstIndex,face.firstIndex+face.indexCount);
+    g.setIndex(new THREE.BufferAttribute(new Uint32Array(slice),1));
+
+    const mesh=new THREE.Mesh(g,hoverFaceMaterial.clone());
+    mesh.matrix.copy(s.object.matrixWorld);
+    mesh.matrixAutoUpdate=false;
+    mesh.renderOrder=26;
+    preselectionRoot.add(mesh);
+  }
 }
 
 function selectionFromEdge(hit) {
@@ -595,19 +736,28 @@ function selectionFromFace(hit) {
   };
 }
 
-async function acceptSelection(selection) {
+async function acceptSelection(selection, event={}) {
   const key=selectionKey(selection);
-  if (selected.some(s=>selectionKey(s)===key)) {
-    selected=selected.filter(s=>selectionKey(s)!==key);
-    rebuildSelectionHighlights();
-    return;
-  }
+  const existing=selected.findIndex(s=>selectionKey(s)===key);
 
   if (measureEnabled) {
+    if (existing>=0) {
+      selected.splice(existing,1);
+      rebuildSelectionHighlights();
+      return;
+    }
     if (selected.length>=2) selected=[];
     selected.push(selection);
   } else {
-    selected=[selection];
+    const multi=Boolean(event.ctrlKey||event.metaKey);
+    if (existing>=0) {
+      if (multi) selected.splice(existing,1);
+      else selected=[selection];
+    } else if (multi) {
+      selected.push(selection);
+    } else {
+      selected=[selection];
+    }
   }
   rebuildSelectionHighlights();
 
@@ -888,6 +1038,7 @@ async function parseStepHeader(file) {
 
 async function clearModel(showMessage=true) {
   clearSelections();
+  clearPreselection();
   if (currentStepResult && worker) {
     try {await workerRequest('release');} catch {}
   }
