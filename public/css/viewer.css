@@ -727,3 +727,46 @@
   background:#465a66;
   background-clip:padding-box;
 }
+
+
+/* V3.0 — dimension value attached to the 3D measurement line */
+.cad-dimension-label{
+  position:absolute;
+  z-index:44;
+  transform:translate(-50%,-50%);
+  pointer-events:none;
+  user-select:none;
+  white-space:nowrap;
+  padding:5px 8px;
+  border:1px solid rgba(53,211,154,.52);
+  border-radius:5px;
+  background:rgba(7,13,17,.96);
+  box-shadow:0 3px 12px rgba(0,0,0,.42);
+  color:#d8fff1;
+  font:800 11px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  letter-spacing:.01em;
+}
+
+.cad-dimension-label::before,
+.cad-dimension-label::after{
+  content:'';
+  position:absolute;
+  top:50%;
+  width:8px;
+  height:1px;
+  background:#35d39a;
+  opacity:.8;
+}
+
+.cad-dimension-label::before{
+  right:100%;
+}
+
+.cad-dimension-label::after{
+  left:100%;
+}
+
+.cad-workspace.is-fullscreen .cad-dimension-label{
+  padding:6px 9px;
+  font-size:12px;
+}
