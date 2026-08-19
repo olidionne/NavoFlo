@@ -1129,7 +1129,7 @@ function drawMeasureLine(a,b) {
 }
 function drawMeasurePoints(a,b){drawMeasureLine(a,b)}
 function addMeasureMarker(p) {
-  const r=Math.max(modelSize*0.0045,0.0001);
+  const r=Math.max(modelSize*0.0018,0.0001);
   const m=new THREE.Mesh(new THREE.SphereGeometry(r,14,10),new THREE.MeshBasicMaterial({color:0x35d39a,depthTest:false}));
   m.position.copy(p);m.renderOrder=41;measureOverlayRoot.add(m);
 }
