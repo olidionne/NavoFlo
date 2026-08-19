@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en-CA">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Navo2D — Local DXF Viewer and Editor</title>
+  <meta name="description" content="Navo2D views, measures, analyzes and edits DXF files locally in the browser.">
+  <meta name="theme-color" content="#080d12">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/navo2d.css">
+</head>
+<body class="navo2d-page">
+<header class="site-header n2-site-header">
+  <div class="container n2-wide nav-wrap">
+    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>NavoFlo</span></a>
+    <div class="n2-top-nav">
+      <nav class="suite-switch" aria-label="NavoFlo suite"><a class="active" href="/en/navo2d/">Navo2D</a><a href="/en/navo3d/">Navo3D</a></nav>
+      <a class="n2-back" href="/en/">← Main site</a>
+      <div class="lang-switcher"><a href="/navo2d/">FR</a><a class="active" href="/en/navo2d/">EN</a></div>
+    </div>
+  </div>
+</header>
+
+<main>
+<section class="n2-intro">
+  <div class="container n2-wide n2-intro-row">
+    <div><span class="n2-kicker">NAVOFLO · 2D ENGINE</span><h1>Navo<span>2D</span></h1><p>DXF inspection, measurement, cleanup and editing — locally in your browser.</p></div>
+    <div class="n2-local-pill"><i></i><div><strong>Local DXF</strong><small>The file never leaves your PC.</small></div></div>
+  </div>
+</section>
+
+<section class="n2-shell-section">
+<div class="container n2-wide">
+  <div id="n2-workspace" class="n2-workspace">
+    <canvas id="n2-canvas" aria-label="Navo2D DXF"></canvas>
+
+    <div class="n2-toolbar" role="toolbar">
+      <label class="n2-tool n2-open"><input id="n2-file" type="file" accept=".dxf" hidden><span class="n2-icon">＋</span><span>Open DXF</span></label>
+      <div class="n2-divider"></div>
+      <button id="n2-select" class="n2-tool active" type="button" disabled><span class="n2-icon">↖</span><span>Select</span></button>
+      <button id="n2-measure" class="n2-tool" type="button" disabled><span class="n2-icon">↔</span><span>Measure</span></button>
+      <button id="n2-move" class="n2-tool" type="button" disabled><span class="n2-icon">✥</span><span>Move</span></button>
+      <button id="n2-delete" class="n2-tool" type="button" disabled><span class="n2-icon">⌫</span><span>Delete</span></button>
+      <div class="n2-divider"></div>
+      <button id="n2-undo" class="n2-tool compact" type="button" disabled title="Undo">↶</button>
+      <button id="n2-redo" class="n2-tool compact" type="button" disabled title="Redo">↷</button>
+      <button id="n2-fit" class="n2-tool compact" type="button" disabled title="Fit">⌖</button>
+      <button id="n2-grid" class="n2-tool active" type="button" disabled><span class="n2-icon">#</span><span>Grid</span></button>
+      <button id="n2-snap" class="n2-tool active" type="button" disabled><span class="n2-icon">⊙</span><span>Snap</span></button>
+      <div class="n2-divider"></div>
+      <button id="n2-layers" class="n2-tool" type="button" disabled><span class="n2-icon">▤</span><span>Layers</span></button>
+      <button id="n2-analyze" class="n2-tool" type="button" disabled><span class="n2-icon">✓</span><span>Analyze</span></button>
+      <button id="n2-properties" class="n2-tool" type="button" disabled><span class="n2-icon">ⓘ</span><span>Properties</span></button>
+      <div class="n2-spacer"></div>
+      <button id="n2-export" class="n2-tool primary" type="button" disabled><span class="n2-icon">⇩</span><span>Export DXF</span></button>
+      <button id="n2-close" class="n2-tool compact danger" type="button" disabled title="Close">×</button>
+    </div>
+
+    <div id="n2-empty" class="n2-empty">
+      <label for="n2-file" class="n2-drop"><span class="n2-dxf-badge">2D</span><strong>Drop your DXF</strong><p>LINE · POLYLINE · CIRCLE · ARC · ELLIPSE · SPLINE · TEXT</p><small>or click here to choose a file</small></label>
+    </div>
+
+    <aside id="n2-layer-drawer" class="n2-drawer n2-left" hidden>
+      <div class="n2-drawer-head"><span>LAYERS</span><button data-close-drawer="layers">×</button></div>
+      <div class="n2-drawer-actions"><button id="n2-layers-all">Show all</button><button id="n2-layers-none">Hide all</button></div>
+      <div id="n2-layer-list" class="n2-layer-list"></div>
+    </aside>
+
+    <aside id="n2-prop-drawer" class="n2-drawer n2-right" hidden>
+      <div class="n2-drawer-head"><span>PROPRIÉTÉS</span><button data-close-drawer="properties">×</button></div>
+      <dl class="n2-stats">
+        <div><dt>File</dt><dd id="n2-prop-file">—</dd></div>
+        <div><dt>Units</dt><dd id="n2-prop-units">—</dd></div>
+        <div><dt>Entities</dt><dd id="n2-prop-entities">—</dd></div>
+        <div><dt>Layers</dt><dd id="n2-prop-layers">—</dd></div>
+        <div><dt>Dimensions</dt><dd id="n2-prop-size">—</dd></div>
+      </dl>
+      <div class="n2-drawer-section"><div class="n2-section-title">SELECTION</div><div id="n2-selection-info" class="n2-info-box">No selection</div></div>
+      <div class="n2-drawer-section"><div class="n2-section-title">ANALYSIS</div><div id="n2-analysis-info" class="n2-analysis-list"><span>Analysis not run.</span></div></div>
+    </aside>
+
+    <div id="n2-measure-card" class="n2-measure-card" hidden>
+      <div><span>MESURE</span><button id="n2-measure-clear">×</button></div>
+      <strong id="n2-measure-main">—</strong>
+      <dl><div><dt>ΔX</dt><dd id="n2-measure-dx">—</dd></div><div><dt>ΔY</dt><dd id="n2-measure-dy">—</dd></div></dl>
+      <small id="n2-measure-help">Click the first point.</small>
+    </div>
+
+    <div id="n2-toast" class="n2-toast" hidden></div>
+    <div id="n2-crosshair" class="n2-crosshair" hidden></div>
+
+    <div class="n2-statusbar">
+      <div class="n2-status-left"><span id="n2-status-file">No DXF</span><span id="n2-status-entities">—</span><span id="n2-status-units">—</span></div>
+      <div class="n2-help"><span>Wheel: zoom</span><span>Hold wheel: pan</span><span>F: fit</span></div>
+      <span class="n2-local">LOCAL</span>
+    </div>
+  </div>
+</div>
+</section>
+</main>
+<script type="module" src="/js/navo2d.js"></script>
+</body>
+</html>
