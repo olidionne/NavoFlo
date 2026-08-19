@@ -70,7 +70,7 @@ let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
 let selectionMode = 'auto', measureEnabled = false, selected = [], currentMeasureResult = null;
 let edgesVisible = true, clipEnabled = false;
 let modelBounds = null, modelSize = 1;
-let pointerDown = null, hoverRAF = 0, preselected = null, middleMouseDown = false, selectOtherMenu = null;
+let pointerDown = null, hoverRAF = 0, preselected = null, middleMouseDown = false, selectOtherMenu = null, rightPointerDown = null, rightDragged = false, suppressRightContext = false;
 let worker = null, workerSeq = 0, workerPending = new Map();
 let meshObjectUrls = [];
 let baseMaterials = new Set();
@@ -116,7 +116,7 @@ function init() {
   controls.zoomToCursor = true;
   controls.mouseButtons.LEFT = null;
   controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
-  controls.mouseButtons.RIGHT = null;
+  controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
 
   scene.add(new THREE.HemisphereLight(0xdde8f0, 0x202a30, 2.15));
   const key = new THREE.DirectionalLight(0xffffff, 2.05); key.position.set(6,9,7); scene.add(key);
@@ -206,13 +206,30 @@ function bindUI() {
 
   E.canvas.addEventListener('contextmenu', event => {
     event.preventDefault();
+
+    // A right-button drag is reserved for PAN. Do not open Select Other.
+    if (suppressRightContext || rightDragged) {
+      suppressRightContext = false;
+      rightDragged = false;
+      return;
+    }
+
     if (!currentModel) return;
     openSelectOther(event.clientX,event.clientY);
   });
 
   // SolidWorks-like navigation: wheel = zoom, MMB drag = rotate, Ctrl+MMB = pan.
   E.canvas.addEventListener('pointerdown', event => {
-    if (event.button === 0 || event.button === 1) closeSelectOther();
+    if (event.button === 0 || event.button === 1 || event.button === 2) closeSelectOther();
+
+    if (event.button === 2) {
+      // Right-button drag = pan. A short click is still used for Select Other.
+      rightPointerDown = {x:event.clientX,y:event.clientY};
+      rightDragged = false;
+      suppressRightContext = false;
+      clearPreselection();
+      controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+    }
 
     if (event.button === 1) {
       middleMouseDown = true;
@@ -231,7 +248,22 @@ function bindUI() {
   }, true);
   addEventListener('pointerup', event => {
     if (event.button === 1) middleMouseDown = false;
-    if (controls) controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+
+    if (event.button === 2) {
+      if (rightPointerDown) {
+        const moved = Math.hypot(event.clientX-rightPointerDown.x,event.clientY-rightPointerDown.y);
+        if (moved > 4 || rightDragged) {
+          suppressRightContext = true;
+          rightDragged = true;
+        }
+      }
+      rightPointerDown = null;
+    }
+
+    if (controls) {
+      controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+      controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+    }
   }, true);
 
   E.canvas.addEventListener('wheel', closeSelectOther, {passive:true});
@@ -247,6 +279,13 @@ function bindUI() {
   });
 
   E.canvas.addEventListener('pointermove', event => {
+    if (rightPointerDown && (event.buttons & 2)) {
+      const moved=Math.hypot(event.clientX-rightPointerDown.x,event.clientY-rightPointerDown.y);
+      if (moved > 4) rightDragged=true;
+      clearPreselection();
+      return;
+    }
+
     if (!currentModel || middleMouseDown) return;
     if (hoverRAF) cancelAnimationFrame(hoverRAF);
     const x=event.clientX,y=event.clientY;
