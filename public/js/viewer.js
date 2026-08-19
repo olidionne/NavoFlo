@@ -80,7 +80,8 @@ const pointer = new THREE.Vector2();
 const clipPlane = new THREE.Plane(new THREE.Vector3(1,0,0), 0);
 const blackEdgeMaterial = new THREE.LineBasicMaterial({
   color:0x090b0d,
-  transparent:false,
+  transparent:true,
+  opacity:0.96,
   depthTest:true,
   depthWrite:false
 });
@@ -93,7 +94,8 @@ const hoverEdgeMaterial = new THREE.LineBasicMaterial({
   color:0x84eac8,
   depthTest:true,
   depthWrite:false,
-  transparent:false
+  transparent:true,
+  opacity:0.95
 });
 const hoverFaceMaterial = new THREE.MeshBasicMaterial({
   color:0x7ce4c1, transparent:true, opacity:0.18, side:THREE.DoubleSide,
@@ -605,32 +607,17 @@ function buildExactStepScene(result) {
 function makeCadDefinition(source) {
   const geometry=new THREE.BufferGeometry();
   geometry.setAttribute('position',new THREE.BufferAttribute(source.positions,3));
-
-  const normalsAreUsable =
-    source.normals?.length === source.positions?.length &&
-    source.normals.length >= 3 &&
-    Array.from(source.normals).every(Number.isFinite);
-
-  if (normalsAreUsable) {
-    geometry.setAttribute('normal',new THREE.BufferAttribute(source.normals,3));
-    geometry.normalizeNormals();
-  } else {
-    geometry.computeVertexNormals();
-    geometry.normalizeNormals();
-  }
-
+  if (source.normals?.length) geometry.setAttribute('normal',new THREE.BufferAttribute(source.normals,3));
+  else geometry.computeVertexNormals();
   if (source.indices?.length) geometry.setIndex(new THREE.BufferAttribute(source.indices,1));
   geometry.computeBoundingBox();
 
   const color=source.color ? new THREE.Color(source.color.r,source.color.g,source.color.b) : new THREE.Color(0xc5c9ca);
   const material=new THREE.MeshStandardMaterial({
     color,
-    metalness:0.06,
-    roughness:0.6,
+    metalness:0.08,
+    roughness:0.56,
     side:THREE.DoubleSide,
-    polygonOffset:true,
-    polygonOffsetFactor:1,
-    polygonOffsetUnits:1,
     clippingPlanes:clipEnabled?[clipPlane]:null
   });
   baseMaterials.add(material);
@@ -656,6 +643,7 @@ function makeOccurrence(def,index) {
     eg.setAttribute('position',new THREE.BufferAttribute(edge.points,3));
     const line=new THREE.Line(eg,blackEdgeMaterial);
     line.userData={cadEdge:true,geometryId:def.source.id,elementId:Number(edge.id),def,edge};
+    line.visible=edgesVisible;
     edgeObjects.push(line); visualEdges.push(line); group.add(line);
   }
 
@@ -722,6 +710,7 @@ async function buildMeshScene(main,files) {
     const edgesGeometry=new THREE.EdgesGeometry(child.geometry,22);
     const edges=new THREE.LineSegments(edgesGeometry,blackEdgeMaterial);
     edges.userData={meshEdges:true};
+    edges.visible=edgesVisible;
     visualEdges.push(edges);
     child.add(edges);
   });
@@ -778,12 +767,36 @@ function toggleGrid() {
 
 function updateZoomClipping() {
   if(!camera||!controls||!currentModel)return;
-  const distance=Math.max(camera.position.distanceTo(controls.target),1e-9);
 
-  // Keep the near plane far enough to retain depth precision, but small
-  // enough to let users inspect tiny details at very close range.
-  camera.near=Math.max(Math.min(modelSize*0.00001,distance*0.002),1e-8);
-  camera.far=Math.max(modelSize*1000,distance*200,100);
+  const focusDistance=Math.max(camera.position.distanceTo(controls.target),1e-7);
+  const box=new THREE.Box3().setFromObject(modelRoot);
+
+  if(box.isEmpty()){
+    camera.near=Math.max(focusDistance*0.01,1e-5);
+    camera.far=Math.max(focusDistance*100,100);
+    camera.updateProjectionMatrix();
+    return;
+  }
+
+  const sphere=box.getBoundingSphere(new THREE.Sphere());
+  const radius=Math.max(sphere.radius,modelSize*0.001,1e-5);
+  const centerDistance=Math.max(camera.position.distanceTo(sphere.center),1e-7);
+
+  // Important:
+  // Do NOT use an extremely tiny near plane with an enormous far plane.
+  // That destroys depth-buffer precision and produces the gray/jagged
+  // artifacts that appeared after the deep-zoom patch.
+  //
+  // At close range, near follows the current focus distance so the user
+  // can still inspect very small features. Far only needs to contain the
+  // actual model, not a space 1000x larger than it.
+  const nearFromFocus=focusDistance*0.0125;
+  const nearFloor=radius*0.0000025;
+  camera.near=Math.max(Math.min(nearFromFocus,radius*0.02),nearFloor,1e-7);
+
+  const modelBack=centerDistance+radius*2.5;
+  camera.far=Math.max(modelBack,focusDistance*20,camera.near*5000,10);
+
   camera.updateProjectionMatrix();
 }
 
@@ -832,8 +845,8 @@ function isPickVisible(hitDistance,frontSurfaceDistance,kind='edge') {
   // Topology edges/vertices live on the surface itself, but their ray hit
   // can be a fraction behind the triangle because the Line/Points picker
   // uses a tolerance radius. Give only a small model-relative allowance.
-  const baseTolerance=Math.max(modelSize*0.0015,1e-7);
-  const tolerance=kind==='vertex' ? baseTolerance*1.25 : baseTolerance;
+  const baseTolerance=Math.max(modelSize*0.00065,1e-7);
+  const tolerance=kind==='vertex' ? baseTolerance*1.15 : baseTolerance;
 
   return hitDistance <= frontSurfaceDistance + tolerance;
 }
@@ -1407,9 +1420,23 @@ function localizeGeometryFamily(value) {
 function labelKind(k){return k==='face'?T.face:k==='edge'?T.edge:k==='vertex'?T.vertex:T.point}
 function labelSelection(s){return s.meshOnly?T.point:`${labelKind(s.kind)} #${s.elementId}`}
 
+function applyEdgesVisibility() {
+  // Shared material switch makes this authoritative even if a topology
+  // line somehow wasn't registered in visualEdges.
+  blackEdgeMaterial.visible=edgesVisible;
+
+  visualEdges.forEach(object=>{
+    object.visible=edgesVisible;
+    if(object.material===blackEdgeMaterial){
+      object.material.visible=edgesVisible;
+    }
+  });
+}
+
 function toggleEdges() {
-  edgesVisible=!edgesVisible;E.edges.classList.toggle('active',edgesVisible);
-  visualEdges.forEach(o=>o.visible=edgesVisible);
+  edgesVisible=!edgesVisible;
+  E.edges.classList.toggle('active',edgesVisible);
+  applyEdgesVisibility();
 }
 function updatePickingVisibility() {
   // Topological edges remain visually visible regardless of pick filter.
@@ -1439,7 +1466,7 @@ function fitCamera(view='iso') {
   const dir=new THREE.Vector3(...(dirs[view]||dirs.iso)).normalize();
   camera.position.copy(dir.multiplyScalar(distance));
   camera.up.set(0,view==='top'?0:1,view==='top'?-1:0);
-  camera.near=Math.max(modelSize*0.00001,1e-8);camera.far=Math.max(distance*200,modelSize*1000,100);camera.updateProjectionMatrix();
+  updateZoomClipping();
   controls.target.copy(getModelRotationCenter());controls.update();
 }
 
@@ -1651,7 +1678,7 @@ async function clearModel(showMessage=true) {
   modelRoot.position.set(0,0,0);
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];
-  modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=true;measureEnabled=false;
+  modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=true;blackEdgeMaterial.visible=true;measureEnabled=false;
   E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.add('active');E.gridToggle.classList.add('active');E.measure.classList.remove('active');
   E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.empty.classList.remove('hidden');
   E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';E.unitSelect.value='u';
