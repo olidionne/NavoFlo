@@ -1004,6 +1004,13 @@ function updatePreselection(clientX,clientY) {
   const candidate=pickSelectionCandidate(clientX,clientY);
   const key=candidate?selectionKey(candidate):'';
 
+  // A committed selection must remain visually locked in blue.
+  // Do not place the hover/preselection color over it.
+  if(candidate && selected.some(item=>selectionKey(item)===key)){
+    clearPreselection();
+    return;
+  }
+
   if (preselected && selectionKey(preselected)===key) return;
 
   clearPreselection();
@@ -1220,6 +1227,144 @@ function selectionFromFace(hit) {
   };
 }
 
+
+function closestPointOnSegment(point,a,b) {
+  const ab=b.clone().sub(a);
+  const denom=ab.lengthSq();
+
+  if(denom<=1e-20)return a.clone();
+
+  const t=THREE.MathUtils.clamp(
+    point.clone().sub(a).dot(ab)/denom,
+    0,
+    1
+  );
+
+  return a.clone().add(ab.multiplyScalar(t));
+}
+
+function getSelectedEdgeDirection(selection) {
+  if(selection?.kind!=='edge'||!selection.object?.geometry)return null;
+
+  const attr=selection.object.geometry.getAttribute('position');
+  if(!attr||attr.count<2)return null;
+
+  let bestDirection=null;
+  let bestDistance=Infinity;
+  const worldMatrix=selection.object.matrixWorld;
+
+  for(let i=0;i<attr.count-1;i++){
+    const a=new THREE.Vector3().fromBufferAttribute(attr,i).applyMatrix4(worldMatrix);
+    const b=new THREE.Vector3().fromBufferAttribute(attr,i+1).applyMatrix4(worldMatrix);
+
+    const direction=b.clone().sub(a);
+    if(direction.lengthSq()<=1e-20)continue;
+
+    const closest=closestPointOnSegment(selection.point,a,b);
+    const distance=closest.distanceToSquared(selection.point);
+
+    if(distance<bestDistance){
+      bestDistance=distance;
+      bestDirection=direction.normalize();
+    }
+  }
+
+  return bestDirection;
+}
+
+function getSelectedFaceNormal(selection) {
+  if(selection?.kind!=='face'||!selection.def?.facesById)return null;
+
+  const face=selection.def.facesById.get(Number(selection.elementId));
+  const geometry=selection.def.geometry;
+  if(!face||!geometry?.index)return null;
+
+  const positions=geometry.getAttribute('position');
+  const indices=geometry.index.array;
+  const matrix=selection.object.matrixWorld;
+
+  let bestNormal=null;
+  let bestDistance=Infinity;
+
+  for(let offset=face.firstIndex;offset<face.firstIndex+face.indexCount;offset+=3){
+    const ia=indices[offset];
+    const ib=indices[offset+1];
+    const ic=indices[offset+2];
+
+    if(ia==null||ib==null||ic==null)continue;
+
+    const a=new THREE.Vector3().fromBufferAttribute(positions,ia).applyMatrix4(matrix);
+    const b=new THREE.Vector3().fromBufferAttribute(positions,ib).applyMatrix4(matrix);
+    const c=new THREE.Vector3().fromBufferAttribute(positions,ic).applyMatrix4(matrix);
+
+    const normal=b.clone().sub(a).cross(c.clone().sub(a));
+    if(normal.lengthSq()<=1e-20)continue;
+    normal.normalize();
+
+    const centroid=a.clone().add(b).add(c).multiplyScalar(1/3);
+    const distance=centroid.distanceToSquared(selection.point);
+
+    if(distance<bestDistance){
+      bestDistance=distance;
+      bestNormal=normal;
+    }
+  }
+
+  return bestNormal;
+}
+
+function getAngleSelectionVector(selection) {
+  if(selection?.kind==='edge'){
+    const direction=getSelectedEdgeDirection(selection);
+    return direction ? {type:'line',vector:direction} : null;
+  }
+
+  if(selection?.kind==='face'){
+    const normal=getSelectedFaceNormal(selection);
+    return normal ? {type:'plane',vector:normal} : null;
+  }
+
+  return null;
+}
+
+function measureAngleFallback(a,b) {
+  const va=getAngleSelectionVector(a);
+  const vb=getAngleSelectionVector(b);
+
+  if(!va||!vb)return null;
+
+  const dot=THREE.MathUtils.clamp(
+    Math.abs(va.vector.dot(vb.vector)),
+    0,
+    1
+  );
+
+  let radians;
+
+  if(va.type==='plane'&&vb.type==='plane'){
+    // Smallest angle between two planes = angle between their normals.
+    radians=Math.acos(dot);
+  }else if(va.type==='line'&&vb.type==='line'){
+    // Smallest angle between line directions.
+    radians=Math.acos(dot);
+  }else{
+    // Line ↔ plane:
+    // angle(line, plane) = 90° - angle(line, plane normal).
+    radians=Math.asin(dot);
+  }
+
+  if(!Number.isFinite(radians))return null;
+
+  return {
+    ok:true,
+    kind:'angle',
+    value:radians,
+    pointA:a.point?.toArray?.()||null,
+    pointB:b.point?.toArray?.()||null,
+    fallback:true
+  };
+}
+
 async function acceptSelection(selection, event={}) {
   const key=selectionKey(selection);
   const existing=selected.findIndex(s=>selectionKey(s)===key);
@@ -1266,9 +1411,22 @@ async function acceptSelection(selection, event={}) {
       showSingleExact(details);
       E.selectionSummary.textContent=T.selectSecond;
     } else if (selected.length===2) {
-      const result=await workerRequest('measure',{
-        a:serialSelection(selected[0]),b:serialSelection(selected[1]),mode:E.measureType.value
+      const mode=E.measureType.value;
+
+      let result=await workerRequest('measure',{
+        a:serialSelection(selected[0]),
+        b:serialSelection(selected[1]),
+        mode
       });
+
+      // OCCT's exact angle contract is intentionally strict. For common CAD
+      // cases it rejects parallel edges, face↔edge pairs and some non-
+      // intersecting line pairs. NavoFlo falls back to the visible geometric
+      // directions/normals so the Angle tool remains useful like eDrawings.
+      if(mode==='angle'&&!result?.ok){
+        result=measureAngleFallback(selected[0],selected[1])||result;
+      }
+
       showPairExact(result);
     }
   } catch (error) {
@@ -1288,10 +1446,10 @@ function rebuildSelectionHighlights() {
   selected.forEach((s,index)=>highlightSelection(s,index));
 }
 function highlightSelection(s,index) {
-  const color=index===0?0x35d39a:0x9cefd4;
-
-  // All selected faces stay the same solid CAD blue.
-  // Selection order is already shown in the measurement summary.
+  // Every committed measurement selection is the same persistent CAD blue.
+  // Hover/preselection remains a different color so the user always knows
+  // what is already locked vs. what is merely under the mouse.
+  const color=0x2f80ed;
   const faceColor=0x2f80ed;
 
   if (s.kind==='edge') {
@@ -1404,6 +1562,14 @@ function getMeasureAnnotationPoints(result) {
 }
 
 function showPairExact(r) {
+  if (
+    r?.kind==='angle' &&
+    (!r?.ok || !Number.isFinite(r?.value)) &&
+    selected.length===2
+  ){
+    r=measureAngleFallback(selected[0],selected[1])||r;
+  }
+
   if (!r?.ok) return showMeasureError(r?.message||T.exactFail);
 
   currentMeasureResult=r;
