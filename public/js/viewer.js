@@ -99,12 +99,24 @@ const hoverEdgeMaterial = new THREE.LineBasicMaterial({
   opacity:0.95
 });
 const hoverFaceMaterial = new THREE.MeshBasicMaterial({
-  color:0x7ce4c1, transparent:true, opacity:0.18, side:THREE.DoubleSide,
-  depthTest:true, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
+  color:0x7ce4c1,
+  transparent:true,
+  opacity:0.18,
+  side:THREE.FrontSide,
+  depthTest:true,
+  polygonOffset:true,
+  polygonOffsetFactor:-2,
+  polygonOffsetUnits:-2
 });
 const selectionFaceMaterial = new THREE.MeshBasicMaterial({
-  color:0x2f80ed, transparent:true, opacity:0.38, side:THREE.DoubleSide,
-  depthTest:true, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
+  color:0x2f80ed,
+  transparent:true,
+  opacity:0.38,
+  side:THREE.FrontSide,
+  depthTest:true,
+  polygonOffset:true,
+  polygonOffsetFactor:-2,
+  polygonOffsetUnits:-2
 });
 
 init();
