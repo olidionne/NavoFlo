@@ -129,8 +129,12 @@ function init() {
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   controls.screenSpacePanning = true;
-  controls.zoomToCursor = true;
-  controls.zoomSpeed = 1.45;
+
+  // Wheel zoom is implemented by NavoFlo below. OrbitControls' native
+  // multiplicative dolly slows toward zero as camera->target shrinks and
+  // creates the "many tiny zoom-ins to undo" problem.
+  controls.enableZoom = false;
+  controls.zoomToCursor = false;
   controls.minDistance = 0;
   controls.maxDistance = Infinity;
   controls.mouseButtons.LEFT = null;
@@ -291,10 +295,7 @@ function bindUI() {
     }
   }, true);
 
-  E.canvas.addEventListener('wheel', closeSelectOther, {passive:true});
-  E.canvas.addEventListener('wheel', () => {
-    requestAnimationFrame(updateZoomClipping);
-  }, {passive:true});
+  E.canvas.addEventListener('wheel', handleCadWheelZoom, {passive:false});
 
   E.canvas.addEventListener('pointerdown', event => {
     if (event.button === 0) pointerDown = {x:event.clientX,y:event.clientY};
@@ -441,11 +442,12 @@ function setSmartRotationPivot() {
   // - close-up view      -> keep the focus created by zoom-to-cursor
   const fov = THREE.MathUtils.degToRad(camera.fov);
   const fittedDistance = (radius / Math.sin(fov / 2)) * 1.12;
-  const currentOrbitDistance = camera.position.distanceTo(controls.target);
-  const zoomRatio = currentOrbitDistance / Math.max(fittedDistance, 0.0001);
+  const currentViewDistance = camera.position.distanceTo(center);
+  const zoomRatio = currentViewDistance / Math.max(fittedDistance, 0.0001);
 
-  // OrbitControls zoomToCursor moves the target toward the area being zoomed.
-  // Keep that local target once the user is clearly working in a close-up.
+  // NavoFlo CAD zoom moves camera and target together, so camera-to-target
+  // distance deliberately stays stable. Camera-to-model distance is the
+  // reliable signal that the user is working in a close-up.
   const closeUp = zoomRatio < 0.74;
 
   // Prevent a pan or numerical drift from leaving the pivot somewhere far
@@ -743,9 +745,9 @@ function finalizeLoadedModel() {
   raycaster.params.Line.threshold=modelSize*0.004;
   raycaster.params.Points.threshold=modelSize*0.006;
 
-  // Allow very deep inspection without OrbitControls feeling stuck.
-  controls.minDistance=Math.max(modelSize*0.000001,1e-9);
-  controls.maxDistance=Math.max(modelSize*10000,1);
+  // Rotation/pan remain OrbitControls-driven; wheel dolly is NavoFlo CAD zoom.
+  controls.minDistance=0;
+  controls.maxDistance=Infinity;
   updateZoomClipping();
 
   createGrid(niceGrid(modelSize*1.6));
@@ -766,15 +768,100 @@ function toggleGrid() {
   E.gridToggle.classList.toggle('active',grid.visible);
 }
 
-function updateZoomClipping() {
-  if(!camera||!controls||!currentModel)return;
 
-  const focusDistance=Math.max(camera.position.distanceTo(controls.target),1e-7);
-  const box=new THREE.Box3().setFromObject(modelRoot);
+function normalizeWheelDelta(event) {
+  let delta=event.deltaY;
+
+  if(event.deltaMode===WheelEvent.DOM_DELTA_LINE){
+    delta*=16;
+  }else if(event.deltaMode===WheelEvent.DOM_DELTA_PAGE){
+    delta*=Math.max(E.workspace.clientHeight,600);
+  }
+
+  return delta;
+}
+
+function getCadZoomMinimumStep() {
+  if(!modelBounds)return Math.max(modelSize*0.0006,1e-6);
+
+  const size=modelBounds.getSize(new THREE.Vector3());
+  const dimensions=[size.x,size.y,size.z]
+    .filter(value=>Number.isFinite(value)&&value>modelSize*1e-7)
+    .sort((a,b)=>a-b);
+
+  const smallest=dimensions[0]||modelSize;
+
+  // On a long thin sheet-metal part, using modelSize alone would make the
+  // minimum zoom step far too coarse. Blend the smallest real dimension
+  // with a very small fraction of the model's largest dimension.
+  return Math.max(
+    smallest*0.03,
+    modelSize*0.0006,
+    1e-6
+  );
+}
+
+function handleCadWheelZoom(event) {
+  if(!currentModel||!camera||!controls)return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  closeSelectOther();
+  clearPreselection();
+
+  const delta=normalizeWheelDelta(event);
+  if(!Number.isFinite(delta)||Math.abs(delta)<0.001)return;
+
+  setRayFromClient(event.clientX,event.clientY);
+
+  const direction=raycaster.ray.direction.clone().normalize();
+  const zoomIn=delta<0;
+
+  // Use actual visible geometry under the pointer when possible.
+  const frontHit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
+
+  let referenceDistance;
+  if(frontHit){
+    referenceDistance=Math.max(frontHit.distance,1e-7);
+  }else{
+    const box=modelBounds||new THREE.Box3().setFromObject(modelRoot);
+    const center=box.getCenter(new THREE.Vector3());
+    referenceDistance=Math.max(camera.position.distanceTo(center),modelSize*0.5,1e-7);
+  }
+
+  // Mouse wheel ≈ 100 px/notch. Trackpads send much smaller deltas.
+  const wheelAmount=THREE.MathUtils.clamp(Math.abs(delta)/100,0.04,4);
+
+  // CAD behavior:
+  // - proportional movement when far from geometry
+  // - guaranteed physical movement when very close
+  // This is the important difference from OrbitControls' shrinking dolly.
+  const proportionalStep=referenceDistance*0.16;
+  const minimumStep=getCadZoomMinimumStep();
+  const travel=Math.max(proportionalStep,minimumStep)*wheelAmount;
+
+  const translation=direction.multiplyScalar(zoomIn?travel:-travel);
+
+  // Translate camera AND orbit target together. This preserves the current
+  // viewing direction and prevents camera->target distance from collapsing.
+  // Every wheel event therefore produces real movement in either direction;
+  // there is no hidden backlog to "undo" when the user starts zooming out.
+  camera.position.add(translation);
+  controls.target.add(translation);
+
+  updateZoomClipping();
+  controls.update();
+  updateDimensionLabelPosition();
+}
+
+function updateZoomClipping() {
+  if(!camera||!currentModel)return;
+
+  const box=modelBounds||new THREE.Box3().setFromObject(modelRoot);
 
   if(box.isEmpty()){
-    camera.near=Math.max(focusDistance*0.01,1e-5);
-    camera.far=Math.max(focusDistance*100,100);
+    camera.near=0.01;
+    camera.far=1000;
     camera.updateProjectionMatrix();
     return;
   }
@@ -783,20 +870,20 @@ function updateZoomClipping() {
   const radius=Math.max(sphere.radius,modelSize*0.001,1e-5);
   const centerDistance=Math.max(camera.position.distanceTo(sphere.center),1e-7);
 
-  // Important:
-  // Do NOT use an extremely tiny near plane with an enormous far plane.
-  // That destroys depth-buffer precision and produces the gray/jagged
-  // artifacts that appeared after the deep-zoom patch.
-  //
-  // At close range, near follows the current focus distance so the user
-  // can still inspect very small features. Far only needs to contain the
-  // actual model, not a space 1000x larger than it.
-  const nearFromFocus=focusDistance*0.0125;
-  const nearFloor=radius*0.0000025;
-  camera.near=Math.max(Math.min(nearFromFocus,radius*0.02),nearFloor,1e-7);
+  // Distance from camera to the model's bounding box is a better close-up
+  // signal than OrbitControls.target now that CAD zoom translates both.
+  const boxDistance=Math.max(box.distanceToPoint(camera.position),radius*0.00001);
 
-  const modelBack=centerDistance+radius*2.5;
-  camera.far=Math.max(modelBack,focusDistance*20,camera.near*5000,10);
+  // Keep enough depth-buffer precision to avoid the visual artifacts seen
+  // with an ultra-small near plane + enormous far plane.
+  camera.near=Math.max(
+    Math.min(boxDistance*0.08,radius*0.025),
+    radius*0.00001,
+    1e-7
+  );
+
+  const modelBack=centerDistance+radius*2.75;
+  camera.far=Math.max(modelBack,camera.near*10000,10);
 
   camera.updateProjectionMatrix();
 }
