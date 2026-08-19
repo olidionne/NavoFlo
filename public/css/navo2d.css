@@ -110,3 +110,24 @@ body.navo2d-page{min-height:100vh;background:#080d12;color:#d7e1e6}
 
 @media(max-width:1180px){.n2-help span:nth-child(-n+2){display:none}.n2-tool span:not(.n2-icon){display:none}.n2-toolbar{gap:4px}}
 @media(max-width:760px){.n2-appbar{padding:0 8px;gap:7px}.n2-site-link,.n2-app-local{display:none}.suite-switch a{padding:6px}.n2-brand i{display:none}.n2-drawer{width:min(350px,calc(100% - 20px))}.n2-help{display:none}.n2-measure-card{left:10px;right:10px;width:auto}}
+
+/* V3 — AutoCAD-style command engine, precision drafting and dynamic input */
+.n2-commandline{
+  position:absolute;z-index:34;left:10px;right:10px;bottom:36px;min-height:52px;
+  display:grid;grid-template-rows:20px 28px;overflow:hidden;
+  border:1px solid rgba(255,255,255,.09);border-radius:7px;
+  background:rgba(5,9,13,.96);box-shadow:0 10px 30px rgba(0,0,0,.34);
+  backdrop-filter:blur(12px);font:650 9px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace
+}
+.n2-command-history{padding:6px 9px 3px;overflow:hidden;color:#778a95;text-overflow:ellipsis;white-space:nowrap;border-bottom:1px solid rgba(255,255,255,.05)}
+.n2-command-entry{display:flex;align-items:center;gap:7px;padding:0 9px}.n2-command-entry span{flex:0 0 auto;color:#a8b6be;font-weight:800}.n2-command-entry input{flex:1;min-width:0;height:24px;padding:0;border:0;outline:0;background:transparent;color:#e0e8ec;font:750 10px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;text-transform:none;caret-color:#35d39a}
+.n2-commandline.is-active{border-color:rgba(53,211,154,.2)}.n2-commandline.is-active .n2-command-entry span{color:#35d39a}
+.n2-statusbar{height:32px}.n2-status-toggles{margin-left:auto;display:flex;align-items:center;gap:2px;height:100%}.n2-status-toggles button,.n2-status-toggles select{height:23px;padding:0 6px;border:1px solid transparent;border-radius:4px;background:transparent;color:#687a84;font:800 7.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer}.n2-status-toggles button:hover,.n2-status-toggles select:hover{color:#b6c3ca;background:rgba(255,255,255,.04)}.n2-status-toggles button.active{border-color:rgba(0,109,255,.24);background:rgba(0,109,255,.16);color:#80b5ff}.n2-status-toggles select{width:47px;padding:0 2px;background:#091017}.n2-local{margin-left:4px}
+.n2-osnap-panel{position:absolute;z-index:60;right:12px;bottom:125px;width:280px;padding:0;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(7,12,17,.985);box-shadow:0 18px 50px rgba(0,0,0,.48);backdrop-filter:blur(16px)}.n2-osnap-panel[hidden]{display:none}.n2-osnap-head{height:36px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;border-bottom:1px solid rgba(255,255,255,.07);color:#7d909b;font:800 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.1em}.n2-osnap-head button{width:25px;height:25px;border:0;background:transparent;color:#73858f;font-size:16px;cursor:pointer}.n2-osnap-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;padding:7px}.n2-osnap-grid label{display:flex;align-items:center;gap:7px;min-height:30px;padding:0 7px;border-radius:5px;color:#94a5ae;font-size:9px;cursor:pointer}.n2-osnap-grid label:hover{background:rgba(255,255,255,.035)}.n2-osnap-grid input{accent-color:#006dff}
+.n2-cmd-button{font:850 9px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+.n2-dynamic-tooltip{position:fixed;z-index:180;pointer-events:none;display:flex;gap:4px;align-items:center;padding:4px 6px;border:1px solid rgba(0,109,255,.48);border-radius:3px;background:rgba(8,14,19,.96);color:#d7e6ee;font:800 9px/1 ui-monospace,SFMono-Regular,Menlo,monospace;box-shadow:0 5px 18px rgba(0,0,0,.32)}
+.n2-workspace.command-active #n2-canvas{cursor:crosshair}
+.n2-toast{bottom:98px}
+@media(max-width:1180px){.n2-status-toggles button{padding:0 4px;font-size:7px}.n2-status-toggles select{width:42px}.n2-commandline{right:8px;left:8px}.n2-local{display:none}}
+@media(max-width:820px){.n2-status-toggles button:nth-of-type(5),.n2-status-toggles button:nth-of-type(6){display:none}.n2-command-history{display:none}.n2-commandline{grid-template-rows:32px;min-height:32px}.n2-command-entry{height:32px}.n2-osnap-panel{left:10px;right:10px;width:auto}.n2-status-left span:nth-child(n+2){display:none}}
+.n2-layer-row.is-current{background:rgba(0,109,255,.09);box-shadow:inset 2px 0 0 #006dff}.n2-layer-row.is-current .n2-layer-name{color:#83b8ff}

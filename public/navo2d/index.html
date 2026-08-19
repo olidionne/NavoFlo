@@ -34,6 +34,13 @@
       <button id="n2-measure" class="n2-tool" type="button" disabled><span class="n2-icon">↔</span><span>Mesure</span></button>
       <button id="n2-move" class="n2-tool" type="button" disabled><span class="n2-icon">✥</span><span>Déplacer</span></button>
       <button id="n2-delete" class="n2-tool" type="button" disabled><span class="n2-icon">⌫</span><span>Supprimer</span></button>
+
+      <div class="n2-divider"></div>
+      <button class="n2-tool compact n2-cmd-button" type="button" data-command="LINE" title="Ligne · L">L</button>
+      <button class="n2-tool compact n2-cmd-button" type="button" data-command="PLINE" title="Polyligne · PL">PL</button>
+      <button class="n2-tool compact n2-cmd-button" type="button" data-command="CIRCLE" title="Cercle · C">○</button>
+      <button class="n2-tool compact n2-cmd-button" type="button" data-command="ARC" title="Arc · A">⌒</button>
+      <button class="n2-tool compact n2-cmd-button" type="button" data-command="RECTANG" title="Rectangle · REC">▭</button>
       <div class="n2-divider"></div>
       <button id="n2-undo" class="n2-tool compact" type="button" disabled title="Annuler">↶</button>
       <button id="n2-redo" class="n2-tool compact" type="button" disabled title="Rétablir">↷</button>
@@ -82,11 +89,43 @@
       <small id="n2-measure-help">Cliquez le premier point.</small>
     </div>
 
+
+    <div id="n2-osnap-panel" class="n2-osnap-panel" hidden>
+      <div class="n2-osnap-head"><span>ACCROCHAGE AUX OBJETS</span><button id="n2-osnap-close" type="button">×</button></div>
+      <div class="n2-osnap-grid">
+        <label><input type="checkbox" data-osnap="end" checked><span>Extrémité</span></label>
+        <label><input type="checkbox" data-osnap="mid" checked><span>Milieu</span></label>
+        <label><input type="checkbox" data-osnap="center" checked><span>Centre</span></label>
+        <label><input type="checkbox" data-osnap="quad" checked><span>Quadrant</span></label>
+        <label><input type="checkbox" data-osnap="intersection" checked><span>Intersection</span></label>
+        <label><input type="checkbox" data-osnap="perp"><span>Perpendiculaire</span></label>
+        <label><input type="checkbox" data-osnap="tangent"><span>Tangente</span></label>
+        <label><input type="checkbox" data-osnap="nearest"><span>Proche</span></label>
+                <label><input type="checkbox" data-osnap="gcenter"><span>Centre géométrique</span></label>
+        <label><input type="checkbox" data-osnap="insert"><span>Insertion</span></label>
+<label><input type="checkbox" data-osnap="node" checked><span>Nœud</span></label>
+      </div>
+    </div>
+
+    <div class="n2-commandline">
+      <div id="n2-command-history" class="n2-command-history">Navo2D prêt. Tapez une commande (L, PL, C, A, REC, M, CO, RO, MI, SC, O, E...)</div>
+      <div class="n2-command-entry"><span id="n2-command-prompt">Commande:</span><input id="n2-command-input" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Commande"></div>
+    </div>
+
     <div id="n2-toast" class="n2-toast" hidden></div>
 
     <div class="n2-statusbar">
-      <div class="n2-status-left"><span id="n2-status-file">Aucun DXF</span><span id="n2-status-entities">—</span><span id="n2-status-units">—</span></div>
-      <div class="n2-help"><span>→ Fenêtre : entièrement dedans</span><span>← Crossing : dedans ou croisé</span><span>Shift : retirer</span><span>Molette maintenue : pan</span></div>
+      <div class="n2-status-left"><span id="n2-status-file">Aucun DXF</span><span id="n2-status-entities">—</span><span id="n2-status-units">—</span><span id="n2-current-layer">Layer: 0</span></div>
+      <div class="n2-status-toggles">
+        <button id="n2-status-grid" type="button" class="active" title="F7">GRILLE</button>
+        <button id="n2-status-gridsnap" type="button" title="F9">SNAP</button>
+        <button id="n2-status-ortho" type="button" title="F8">ORTHO</button>
+        <button id="n2-status-polar" type="button" class="active" title="F10">POLAR</button>
+        <select id="n2-polar-angle" title="Incrément polar"><option>90</option><option>60</option><option selected>45</option><option>30</option><option>22.5</option><option>15</option><option>10</option><option>5</option></select>
+        <button id="n2-status-osnap" type="button" class="active" title="F3">OSNAP</button>
+        <button id="n2-status-otrack" type="button" class="active" title="F11">OTRACK</button>
+        <button id="n2-status-dyn" type="button" class="active" title="F12">DYN</button>
+      </div>
       <span class="n2-local">LOCAL</span>
     </div>
   </div>
