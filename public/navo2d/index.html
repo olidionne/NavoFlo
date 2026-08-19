@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Navo2D — Viewer et éditeur DXF local</title>
+  <title>Navo2D — Éditeur DXF local</title>
   <meta name="description" content="Navo2D visualise, mesure, analyse et modifie les DXF localement dans le navigateur.">
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -11,28 +11,20 @@
   <link rel="stylesheet" href="/css/navo2d.css">
 </head>
 <body class="navo2d-page">
-<header class="site-header n2-site-header">
-  <div class="container n2-wide nav-wrap">
-    <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>NavoFlo</span></a>
-    <div class="n2-top-nav">
-      <nav class="suite-switch" aria-label="Suite NavoFlo"><a class="active" href="/navo2d/">Navo2D</a><a href="/navo3d/">Navo3D</a></nav>
-      <a class="n2-back" href="/">← Site principal</a>
-      <div class="lang-switcher"><a class="active" href="/navo2d/">FR</a><a href="/en/navo2d/">EN</a></div>
-    </div>
-  </div>
+<header class="n2-appbar">
+  <a class="n2-brand" href="/" aria-label="NavoFlo">
+    <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+    <strong>NavoFlo</strong><i>/</i><b>Navo2D</b>
+  </a>
+  <nav class="suite-switch" aria-label="Suite NavoFlo"><a class="active" href="/navo2d/">Navo2D</a><a href="/navo3d/">Navo3D</a></nav>
+  <span class="n2-app-local"><i></i> LOCAL</span>
+  <div class="n2-appbar-spacer"></div>
+  <a class="n2-site-link" href="/">Site principal</a>
+  <div class="lang-switcher"><a class="active" href="/navo2d/">FR</a><a href="/en/navo2d/">EN</a></div>
 </header>
 
-<main>
-<section class="n2-intro">
-  <div class="container n2-wide n2-intro-row">
-    <div><span class="n2-kicker">NAVOFLO · MOTEUR 2D</span><h1>Navo<span>2D</span></h1><p>Inspection, mesure, nettoyage et modification DXF — localement dans votre navigateur.</p></div>
-    <div class="n2-local-pill"><i></i><div><strong>DXF local</strong><small>Le fichier ne quitte pas votre PC.</small></div></div>
-  </div>
-</section>
-
-<section class="n2-shell-section">
-<div class="container n2-wide">
-  <div id="n2-workspace" class="n2-workspace">
+<main class="n2-main">
+  <div id="n2-workspace" class="n2-workspace tool-select">
     <canvas id="n2-canvas" aria-label="Navo2D DXF"></canvas>
 
     <div class="n2-toolbar" role="toolbar">
@@ -54,6 +46,7 @@
       <button id="n2-properties" class="n2-tool" type="button" disabled><span class="n2-icon">ⓘ</span><span>Propriétés</span></button>
       <div class="n2-spacer"></div>
       <button id="n2-export" class="n2-tool primary" type="button" disabled><span class="n2-icon">⇩</span><span>Exporter DXF</span></button>
+      <button id="n2-fullscreen" class="n2-tool compact" type="button" title="Plein écran">⛶</button>
       <button id="n2-close" class="n2-tool compact danger" type="button" disabled title="Fermer">×</button>
     </div>
 
@@ -62,7 +55,8 @@
     </div>
 
     <aside id="n2-layer-drawer" class="n2-drawer n2-left" hidden>
-      <div class="n2-drawer-head"><span>LAYERS</span><button data-close-drawer="layers">×</button></div>
+      <div class="n2-drawer-head"><span>LAYERS DXF</span><button data-close-drawer="layers">×</button></div>
+      <div class="n2-layer-note">Couleurs DXF / ACI · Les layers inutilisés sont conservés.</div>
       <div class="n2-drawer-actions"><button id="n2-layers-all">Tout afficher</button><button id="n2-layers-none">Tout cacher</button></div>
       <div id="n2-layer-list" class="n2-layer-list"></div>
     </aside>
@@ -89,16 +83,13 @@
     </div>
 
     <div id="n2-toast" class="n2-toast" hidden></div>
-    <div id="n2-crosshair" class="n2-crosshair" hidden></div>
 
     <div class="n2-statusbar">
       <div class="n2-status-left"><span id="n2-status-file">Aucun DXF</span><span id="n2-status-entities">—</span><span id="n2-status-units">—</span></div>
-      <div class="n2-help"><span>Molette : zoom</span><span>Molette maintenue : pan</span><span>F : ajuster</span></div>
+      <div class="n2-help"><span>→ Fenêtre : entièrement dedans</span><span>← Crossing : dedans ou croisé</span><span>Shift : retirer</span><span>Molette maintenue : pan</span></div>
       <span class="n2-local">LOCAL</span>
     </div>
   </div>
-</div>
-</section>
 </main>
 <script type="module" src="/js/navo2d.js"></script>
 </body>
