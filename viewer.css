@@ -368,3 +368,204 @@
     left:14px;
   }
 }
+
+
+/* V2.3 — eDrawings-like interaction polish */
+
+/* Measurement is permanently docked at bottom-left.
+   It never competes spatially with the Properties drawer. */
+.measure-card-v2,
+.cad-workspace.properties-open .measure-card-v2,
+.cad-workspace.is-fullscreen.properties-open .measure-card-v2{
+  left:16px!important;
+  right:auto!important;
+  bottom:52px!important;
+  width:390px!important;
+  z-index:38!important;
+  padding:17px!important;
+  border-color:rgba(53,211,154,.28);
+  background:rgba(8,14,18,.97);
+}
+
+.measure-card-head{
+  margin-bottom:13px!important;
+  font-size:11px!important;
+}
+
+.measure-card-head span:last-child{
+  font-size:9px!important;
+  padding:5px 7px!important;
+}
+
+.measure-main{
+  min-height:35px;
+  font-size:29px!important;
+  line-height:1.15!important;
+}
+
+.measure-details{
+  margin:13px 0!important;
+}
+
+.measure-details>div{
+  min-height:30px;
+  padding:7px 0!important;
+}
+
+.measure-details dt{
+  font-size:11.5px!important;
+}
+
+.measure-details dd{
+  font-size:12px!important;
+}
+
+.selection-summary{
+  margin-top:12px!important;
+  font-size:11.5px!important;
+  line-height:1.65!important;
+  color:#a2b2ba!important;
+}
+
+/* Properties: practical reading size rather than micro-dashboard text */
+.properties-drawer{
+  width:400px!important;
+}
+
+.drawer-head{
+  height:50px!important;
+  font-size:11.5px!important;
+}
+
+.drawer-stats>div{
+  min-height:41px!important;
+}
+
+.drawer-stats dt,
+.drawer-stats dd{
+  font-size:11.5px!important;
+}
+
+.drawer-section-title{
+  font-size:10.5px!important;
+}
+
+.step-tree{
+  font-size:11px!important;
+  line-height:1.72!important;
+}
+
+.pc-tier b{
+  font-size:11px!important;
+}
+
+.pc-tier span,
+.pc-check{
+  font-size:10.25px!important;
+  line-height:1.6!important;
+}
+
+.cad-workspace.is-fullscreen .properties-drawer{
+  width:420px!important;
+}
+
+.cad-workspace.is-fullscreen .measure-card-v2{
+  width:420px!important;
+  bottom:56px!important;
+}
+
+.cad-workspace.is-fullscreen .measure-main{
+  font-size:31px!important;
+}
+
+.cad-workspace.is-fullscreen .measure-details dt,
+.cad-workspace.is-fullscreen .measure-details dd,
+.cad-workspace.is-fullscreen .selection-summary{
+  font-size:12px!important;
+}
+
+/* Select Other context menu */
+.cad-select-other{
+  position:absolute;
+  z-index:70;
+  min-width:220px;
+  max-width:310px;
+  padding:6px;
+  border:1px solid rgba(255,255,255,.13);
+  border-radius:9px;
+  background:rgba(7,12,17,.98);
+  box-shadow:0 20px 55px rgba(0,0,0,.5);
+  backdrop-filter:blur(14px);
+}
+
+.cad-select-other[hidden]{
+  display:none;
+}
+
+.cad-select-other-title{
+  padding:7px 9px 8px;
+  color:#70828e;
+  font:800 9px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  letter-spacing:.13em;
+}
+
+.cad-select-other button{
+  width:100%;
+  min-height:34px;
+  display:grid;
+  grid-template-columns:auto 1fr auto;
+  align-items:center;
+  gap:8px;
+  padding:6px 9px;
+  border:0;
+  border-radius:6px;
+  background:transparent;
+  color:#b8c6cd;
+  text-align:left;
+  font-size:10.5px;
+  cursor:pointer;
+}
+
+.cad-select-other button:hover{
+  background:rgba(53,211,154,.08);
+  color:#35d39a;
+}
+
+.cad-select-other .entity-kind{
+  min-width:48px;
+  color:#35d39a;
+  font:800 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  letter-spacing:.06em;
+}
+
+.cad-select-other .entity-name{
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.cad-select-other .entity-id{
+  color:#71818e;
+  font:700 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+
+/* Small exact-center cue */
+.exact-center-marker{
+  pointer-events:none;
+}
+
+/* Keep a usable footprint on smaller screens */
+@media(max-width:900px){
+  .measure-card-v2,
+  .cad-workspace.properties-open .measure-card-v2,
+  .cad-workspace.is-fullscreen.properties-open .measure-card-v2{
+    left:12px!important;
+    right:12px!important;
+    width:auto!important;
+  }
+
+  .properties-drawer,
+  .cad-workspace.is-fullscreen .properties-drawer{
+    width:min(410px,calc(100% - 24px))!important;
+  }
+}

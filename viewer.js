@@ -70,7 +70,7 @@ let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
 let selectionMode = 'auto', measureEnabled = false, selected = [], currentMeasureResult = null;
 let edgesVisible = true, clipEnabled = false;
 let modelBounds = null, modelSize = 1;
-let pointerDown = null, hoverRAF = 0, preselected = null, middleMouseDown = false;
+let pointerDown = null, hoverRAF = 0, preselected = null, middleMouseDown = false, selectOtherMenu = null;
 let worker = null, workerSeq = 0, workerPending = new Map();
 let meshObjectUrls = [];
 let baseMaterials = new Set();
@@ -116,7 +116,7 @@ function init() {
   controls.zoomToCursor = true;
   controls.mouseButtons.LEFT = null;
   controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
-  controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+  controls.mouseButtons.RIGHT = null;
 
   scene.add(new THREE.HemisphereLight(0xdde8f0, 0x202a30, 2.15));
   const key = new THREE.DirectionalLight(0xffffff, 2.05); key.position.set(6,9,7); scene.add(key);
@@ -204,10 +204,15 @@ function bindUI() {
   document.addEventListener('fullscreenchange', syncFullscreenState);
   document.addEventListener('webkitfullscreenchange', syncFullscreenState);
 
-  E.canvas.addEventListener('contextmenu', e => e.preventDefault());
+  E.canvas.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    if (!currentModel) return;
+    openSelectOther(event.clientX,event.clientY);
+  });
 
   // SolidWorks-like navigation: wheel = zoom, MMB drag = rotate, Ctrl+MMB = pan.
   E.canvas.addEventListener('pointerdown', event => {
+    if (event.button === 0 || event.button === 1) closeSelectOther();
     if (event.button === 1) {
       middleMouseDown = true;
       clearPreselection();
@@ -218,6 +223,8 @@ function bindUI() {
     if (event.button === 1) middleMouseDown = false;
     if (controls) controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
   }, true);
+
+  E.canvas.addEventListener('wheel', closeSelectOther, {passive:true});
 
   E.canvas.addEventListener('pointerdown', event => {
     if (event.button === 0) pointerDown = {x:event.clientX,y:event.clientY};
@@ -241,10 +248,35 @@ function bindUI() {
   E.canvas.addEventListener('pointerleave', clearPreselection);
 
   addEventListener('keydown', event => {
+    if (event.target && ['INPUT','SELECT','TEXTAREA'].includes(event.target.tagName)) return;
+
     if (event.key === 'Escape') {
-      if (document.fullscreenElement || document.webkitFullscreenElement) return;
+      closeSelectOther();
       clearSelections();
       clearPreselection();
+      return;
+    }
+
+    if (!currentModel) return;
+
+    const key=event.key.toLowerCase();
+
+    if (key==='f') {
+      event.preventDefault();
+      fitCamera('iso');
+    } else if (key==='m') {
+      event.preventDefault();
+      toggleMeasure();
+    } else if (key==='e') {
+      event.preventDefault();
+      toggleEdges();
+    } else if (key==='p') {
+      event.preventDefault();
+      E.propsDrawer.hidden=!E.propsDrawer.hidden;
+      syncPropertiesState();
+    } else if (event.code==='Space') {
+      event.preventDefault();
+      E.viewMenu.hidden=!E.viewMenu.hidden;
     }
   });
 
@@ -718,6 +750,119 @@ function highlightPreselection(s) {
   }
 }
 
+function collectSelectionCandidates(clientX,clientY) {
+  const rect=setRayFromClient(clientX,clientY);
+  const candidates=[];
+  const seen=new Set();
+
+  const push=(selection,score,depth)=>{
+    if(!selection)return;
+    const key=selectionKey(selection);
+    if(seen.has(key))return;
+    seen.add(key);
+    candidates.push({selection,score,depth});
+  };
+
+  if (!currentStepResult) {
+    for(const hit of raycaster.intersectObjects(surfaceMeshes,true).slice(0,5)) {
+      push({kind:'point',point:hit.point.clone(),object:hit.object,meshOnly:true},0,hit.distance);
+    }
+    return candidates.sort((a,b)=>a.depth-b.depth).map(x=>x.selection);
+  }
+
+  for(const hit of raycaster.intersectObjects(vertexObjects,false).slice(0,6)) {
+    const selection=selectionFromVertex(hit);
+    push(selection,screenDistance(selection.point,clientX,clientY,rect)-4,hit.distance);
+  }
+
+  for(const hit of raycaster.intersectObjects(edgeObjects,false).slice(0,12)) {
+    const selection=selectionFromEdge(hit);
+    push(selection,screenDistance(selection.point,clientX,clientY,rect)-2,hit.distance);
+  }
+
+  for(const hit of raycaster.intersectObjects(surfaceMeshes,false).slice(0,8)) {
+    const selection=selectionFromFace(hit);
+    push(selection,6,hit.distance);
+  }
+
+  return candidates
+    .sort((a,b)=>(a.score-b.score)||(a.depth-b.depth))
+    .slice(0,10)
+    .map(x=>x.selection);
+}
+
+function ensureSelectOtherMenu() {
+  if(selectOtherMenu)return selectOtherMenu;
+
+  const menu=document.createElement('div');
+  menu.className='cad-select-other';
+  menu.hidden=true;
+  E.workspace.appendChild(menu);
+  selectOtherMenu=menu;
+  return menu;
+}
+
+function openSelectOther(clientX,clientY) {
+  const candidates=collectSelectionCandidates(clientX,clientY);
+  if(!candidates.length) {
+    closeSelectOther();
+    return;
+  }
+
+  const menu=ensureSelectOtherMenu();
+  menu.replaceChildren();
+
+  const title=document.createElement('div');
+  title.className='cad-select-other-title';
+  title.textContent=FR?'SÉLECTIONNER AUTRE':'SELECT OTHER';
+  menu.appendChild(title);
+
+  candidates.forEach((selection,index)=>{
+    const button=document.createElement('button');
+    button.type='button';
+
+    const kind=document.createElement('span');
+    kind.className='entity-kind';
+    kind.textContent=labelKind(selection.kind).toUpperCase();
+
+    const name=document.createElement('span');
+    name.className='entity-name';
+    const objName=selection.object?.parent?.name||selection.object?.name||'';
+    name.textContent=objName || (FR?'Entité':'Entity');
+
+    const id=document.createElement('span');
+    id.className='entity-id';
+    id.textContent=selection.elementId!=null?`#${selection.elementId}`:`${index+1}`;
+
+    button.append(kind,name,id);
+    button.addEventListener('mouseenter',()=>{
+      clearPreselection();
+      preselected=selection;
+      E.workspace.classList.add('has-preselection');
+      highlightPreselection(selection);
+    });
+    button.addEventListener('click',event=>{
+      event.stopPropagation();
+      closeSelectOther();
+      acceptSelection(selection,event);
+    });
+
+    menu.appendChild(button);
+  });
+
+  const rect=E.workspace.getBoundingClientRect();
+  const x=Math.max(8,Math.min(clientX-rect.left,rect.width-325));
+  const y=Math.max(62,Math.min(clientY-rect.top,rect.height-390));
+  menu.style.left=`${x}px`;
+  menu.style.top=`${y}px`;
+  menu.hidden=false;
+}
+
+function closeSelectOther() {
+  if(selectOtherMenu)selectOtherMenu.hidden=true;
+}
+
+
 function selectionFromEdge(hit) {
   const o=hit.object;
   return {
@@ -869,16 +1014,30 @@ function clearMeasurement() {
 
 function showSingleExact(d) {
   const details=[];
+  clearGroup(measureOverlayRoot);
+
   E.measureMain.textContent=`${labelKind(d.kind)} #${d.elementId}`;
   details.push([T.family,d.family||'other']);
+
   if (isFinite(d.length)) details.push([T.length,formatLength(d.length)]);
   if (isFinite(d.diameter)) details.push([T.diameter,formatLength(d.diameter)]);
   if (isFinite(d.radius)) details.push([T.radius,formatLength(d.radius)]);
   if (isFinite(d.area)) details.push([T.area,formatArea(d.area)]);
+
+  if (d.center && d.center.length===3) {
+    const c=new THREE.Vector3(...d.center);
+    addExactCenterMarker(c);
+    details.push([
+      FR?'Centre':'Center',
+      `${formatNumber(d.center[0])}, ${formatNumber(d.center[1])}, ${formatNumber(d.center[2])} ${currentUnit}`
+    ]);
+  }
+
   if (d.hole?.diameter) {
     details.push([T.hole,`Ø ${formatLength(d.hole.diameter)}`]);
     if (isFinite(d.hole.depth)) details.push([T.depth,formatLength(d.hole.depth)]);
   }
+
   renderDetails(details);
 }
 function showPairExact(r) {
@@ -922,6 +1081,40 @@ function showMeasureError(message) {
   E.measureMain.textContent='—';
   renderDetails([]);
   E.selectionSummary.textContent=message;
+}
+
+
+function addExactCenterMarker(point) {
+  const radius=Math.max(modelSize*0.006,0.0001);
+  const ringGeometry=new THREE.RingGeometry(radius*0.6,radius,28);
+  const ringMaterial=new THREE.MeshBasicMaterial({
+    color:0x35d39a,
+    side:THREE.DoubleSide,
+    depthTest:false,
+    transparent:true,
+    opacity:0.95
+  });
+
+  const ring=new THREE.Mesh(ringGeometry,ringMaterial);
+  ring.position.copy(point);
+  ring.quaternion.copy(camera.quaternion);
+  ring.renderOrder=45;
+  ring.userData.exactCenter=true;
+  measureOverlayRoot.add(ring);
+
+  const crossSize=radius*1.35;
+  const geometry=new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(point.x-crossSize,point.y,point.z),
+    new THREE.Vector3(point.x+crossSize,point.y,point.z),
+    new THREE.Vector3(point.x,point.y-crossSize,point.z),
+    new THREE.Vector3(point.x,point.y+crossSize,point.z)
+  ]);
+  const cross=new THREE.LineSegments(
+    geometry,
+    new THREE.LineBasicMaterial({color:0x35d39a,depthTest:false})
+  );
+  cross.renderOrder=46;
+  measureOverlayRoot.add(cross);
 }
 
 function drawMeasureLine(a,b) {
@@ -1050,6 +1243,7 @@ async function parseStepHeader(file) {
 }
 
 async function clearModel(showMessage=true) {
+  closeSelectOther();
   clearSelections();
   clearPreselection();
   if (currentStepResult && worker) {
