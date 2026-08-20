@@ -403,11 +403,34 @@ function drawGrid(w,h){
   ctx.lineWidth=1;ctx.strokeStyle='rgba(130,150,160,.085)';ctx.beginPath();for(let x=Math.floor(tl.x/step)*step;x<=br.x;x+=step){const s=worldToScreen({x,y:0});ctx.moveTo(Math.round(s.x)+.5,0);ctx.lineTo(Math.round(s.x)+.5,h);}for(let y=Math.floor(br.y/step)*step;y<=tl.y;y+=step){const s=worldToScreen({x:0,y});ctx.moveTo(0,Math.round(s.y)+.5);ctx.lineTo(w,Math.round(s.y)+.5);}ctx.stroke();
   const o=worldToScreen({x:0,y:0});ctx.strokeStyle='rgba(53,211,154,.18)';ctx.beginPath();ctx.moveTo(o.x,0);ctx.lineTo(o.x,h);ctx.moveTo(0,o.y);ctx.lineTo(w,o.y);ctx.stroke();
 }
+function isForegroundLayer(e){return String(e?.layer??'').trim()==='0';}
 function drawEntities(){
-  for(const e of state.entities){
-    if(!layerVisible(e.layer))continue;
-    const selected=state.selected.has(e.id),hover=state.hover===e.id;
-    drawEntity(e,selected?'#006dff':hover?'#35d39a':resolvedEntityColor(e),selected?2.2:hover?1.8:1.15);
+  const visible=state.entities.filter(e=>layerVisible(e.layer));
+
+  // CAD draw order:
+  // 1) ordinary layers
+  // 2) layer 0 (foreground reference geometry)
+  // 3) hover
+  // 4) selected geometry (always topmost)
+  for(const foreground of [false,true]){
+    for(const e of visible){
+      if(state.selected.has(e.id)||state.hover===e.id||isForegroundLayer(e)!==foreground)continue;
+      drawEntity(e,resolvedEntityColor(e),1.15);
+    }
+  }
+
+  for(const foreground of [false,true]){
+    for(const e of visible){
+      if(state.selected.has(e.id)||state.hover!==e.id||isForegroundLayer(e)!==foreground)continue;
+      drawEntity(e,'#35d39a',1.8);
+    }
+  }
+
+  for(const foreground of [false,true]){
+    for(const e of visible){
+      if(!state.selected.has(e.id)||isForegroundLayer(e)!==foreground)continue;
+      drawEntity(e,'#006dff',2.2);
+    }
   }
 }
 function drawEntity(e,color,width){
@@ -658,7 +681,21 @@ function segmentsIntersect(a,b,c,d){
 
 function wheel(ev){if(!state.file)return;ev.preventDefault();const before=screenToWorld(ev.clientX,ev.clientY),factor=Math.exp(-Math.sign(ev.deltaY)*Math.min(0.22,Math.abs(ev.deltaY)*0.0018));state.view.scale=clamp(state.view.scale*factor,1e-6,1e7);const after=screenToWorld(ev.clientX,ev.clientY);state.view.cx+=before.x-after.x;state.view.cy+=before.y-after.y;}
 
-function hitTest(clientX,clientY){const w=screenToWorld(clientX,clientY),tol=8/state.view.scale;let best=null,bestD=tol;for(let i=state.entities.length-1;i>=0;i--){const e=state.entities[i];if(!layerVisible(e.layer))continue;const d=distanceToEntity(w,e);if(d<=bestD){best=e;bestD=d;}}return best;}
+function hitTest(clientX,clientY){
+  const w=screenToWorld(clientX,clientY),tol=8/state.view.scale,tieTol=0.75/state.view.scale;
+  let best=null,bestD=tol;
+  for(let i=state.entities.length-1;i>=0;i--){
+    const e=state.entities[i];
+    if(!layerVisible(e.layer))continue;
+    const d=distanceToEntity(w,e);
+    if(d>tol)continue;
+    const clearlyCloser=!best||d<bestD-tieTol;
+    const essentiallyTied=best&&Math.abs(d-bestD)<=tieTol;
+    const winsLayerPriority=essentiallyTied&&isForegroundLayer(e)&&!isForegroundLayer(best);
+    if(clearlyCloser||winsLayerPriority||(essentiallyTied&&isForegroundLayer(e)===isForegroundLayer(best))){best=e;bestD=d;}
+  }
+  return best;
+}
 function distanceToEntity(q,e){
   if(e.type==='LINE')return pointSegmentDistance(q,e.p1,e.p2);if(e.type==='POLYLINE'){const s=polylineSamples(e);let d=Infinity;for(let i=0;i<s.length-1;i++)d=Math.min(d,pointSegmentDistance(q,s[i],s[i+1]));return d;}
   if(e.type==='CIRCLE')return Math.abs(Math.hypot(q.x-e.center.x,q.y-e.center.y)-e.radius);if(e.type==='ARC'){const a=Math.atan2(q.y-e.center.y,q.x-e.center.x);if(angleWithin(a,e.start,e.end))return Math.abs(Math.hypot(q.x-e.center.x,q.y-e.center.y)-e.radius);const p1={x:e.center.x+e.radius*Math.cos(e.start),y:e.center.y+e.radius*Math.sin(e.start)},p2={x:e.center.x+e.radius*Math.cos(e.end),y:e.center.y+e.radius*Math.sin(e.end)};return Math.min(dist(q,p1),dist(q,p2));}
