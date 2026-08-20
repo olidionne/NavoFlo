@@ -43,6 +43,7 @@
           <button class="n2-tool n2-cmd-button" type="button" data-command="CIRCLE" title="Circle · C"><span class="n2-icon">○</span><span>Circle</span></button>
           <button class="n2-tool n2-cmd-button" type="button" data-command="ARC" title="Arc · A"><span class="n2-icon">⌒</span><span>Arc</span></button>
           <button class="n2-tool n2-cmd-button" type="button" data-command="RECTANG" title="Rectangle · REC"><span class="n2-icon">▭</span><span>Rectangle</span></button>
+          <button class="n2-tool n2-cmd-button" type="button" data-command="TEXT" title="Text · T"><span class="n2-icon">T</span><span>Text</span></button>
         </div>
         <small>DRAW</small>
       </section>
@@ -61,7 +62,7 @@
           <button class="n2-tool" type="button" data-command="STRETCH" title="Stretch · S"><span class="n2-icon">⇱</span><span>Stretch</span></button>
           <button id="n2-more-toggle" class="n2-tool" type="button"><span class="n2-icon">⋯</span><span>More</span></button>
         </div>
-        <small>MODIFY</small>
+        <small>MODIFIER</small>
       </section>
 
       <section class="n2-ribbon-group n2-group-select">
@@ -76,7 +77,7 @@
 
       <section class="n2-ribbon-group n2-group-layer">
         <div class="n2-ribbon-row">
-          <div class="n2-layer-picker" title="Current / selected layer"><span id="n2-layer-swatch" class="n2-layer-swatch" aria-hidden="true"></span><select id="n2-layer-select" class="n2-layer-select" disabled aria-label="Layer courant"></select></div>
+          <div class="n2-layer-picker" title="Current / selected layer"><span id="n2-layer-swatch" class="n2-layer-swatch" aria-hidden="true"></span><select id="n2-layer-select" class="n2-layer-select" disabled aria-label="Current layer"></select></div>
           <button id="n2-layers" class="n2-tool" type="button" disabled><span class="n2-icon">▤</span><span>Layers</span></button>
         </div>
         <small>LAYERS</small>
@@ -87,7 +88,7 @@
           <button id="n2-measure" class="n2-tool" type="button" disabled><span class="n2-icon">↔</span><span>Measure</span></button>
           <button id="n2-analyze" class="n2-tool" type="button" disabled><span class="n2-icon">✓</span><span>Analyze</span></button>
           <button id="n2-properties" class="n2-tool" type="button" disabled><span class="n2-icon">ⓘ</span><span>Properties</span></button>
-          <button id="n2-fit" class="n2-tool compact" type="button" disabled title="Trim la vue">⌖</button>
+          <button id="n2-fit" class="n2-tool compact" type="button" disabled title="Fit view">⌖</button>
         </div>
         <small>INSPECT</small>
       </section>
@@ -98,7 +99,7 @@
           <button id="n2-fullscreen" class="n2-tool compact" type="button" title="CAD fullscreen">⛶</button>
           <button id="n2-close" class="n2-tool compact danger" type="button" disabled title="Close">×</button>
         </div>
-        <small>VUE</small>
+        <small>VIEW</small>
       </section>
     </div>
 
@@ -112,6 +113,7 @@
               <button type="button" data-command="JOIN"><b>J</b><span>Join</span></button>
               <button type="button" data-command="EXPLODE"><b>X</b><span>Explode</span></button>
               <button type="button" data-command="SCALE"><b>SC</b><span>Scale</span></button>
+              <button type="button" data-command="TEXTEDIT"><b>ED</b><span>Edit text</span></button>
     </div>
 
     <div id="n2-empty" class="n2-empty">
@@ -119,7 +121,7 @@
     </div>
 
     <aside id="n2-layer-drawer" class="n2-drawer n2-left" hidden>
-      <div class="n2-drawer-head"><span>LAYERS DXF</span><button data-close-drawer="layers">×</button></div>
+      <div class="n2-drawer-head"><span>DXF LAYERS</span><button data-close-drawer="layers">×</button></div>
       <div class="n2-layer-note">DXF / ACI colors · Unused layers are preserved.</div>
       <div class="n2-drawer-actions"><button id="n2-layers-all">Show all</button><button id="n2-layers-none">Hide all</button></div>
       <div id="n2-layer-list" class="n2-layer-list"></div>
@@ -158,7 +160,7 @@
         <label><input type="checkbox" data-osnap="perp"><span>Perpendicular</span></label>
         <label><input type="checkbox" data-osnap="tangent"><span>Tangent</span></label>
         <label><input type="checkbox" data-osnap="nearest" checked><span>Nearest</span></label>
-                <label><input type="checkbox" data-osnap="gcenter"><span>Geometric Center</span></label>
+                <label><input type="checkbox" data-osnap="gcenter"><span>Center géométrique</span></label>
         <label><input type="checkbox" data-osnap="insert"><span>Insertion</span></label>
 <label><input type="checkbox" data-osnap="node" checked><span>Node</span></label>
         <label><input type="checkbox" data-osnap="extension"><span>Extension</span></label>
@@ -169,7 +171,7 @@
 
     <div class="n2-commandline">
       <div id="n2-command-history" class="n2-command-history">Navo2D ready. Type a command (L, PL, C, A, REC · TR, EX, F, CHA, S, AR, BR, LEN, PE...)</div>
-      <div class="n2-command-entry"><span id="n2-command-prompt">Command:</span><input id="n2-command-input" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Command"></div>
+      <div class="n2-command-entry"><span id="n2-command-prompt">Command:</span><input id="n2-command-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command"></div>
     </div>
 
     <div id="n2-toast" class="n2-toast" hidden></div>

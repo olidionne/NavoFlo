@@ -43,6 +43,7 @@
           <button class="n2-tool n2-cmd-button" type="button" data-command="CIRCLE" title="Cercle · C"><span class="n2-icon">○</span><span>Cercle</span></button>
           <button class="n2-tool n2-cmd-button" type="button" data-command="ARC" title="Arc · A"><span class="n2-icon">⌒</span><span>Arc</span></button>
           <button class="n2-tool n2-cmd-button" type="button" data-command="RECTANG" title="Rectangle · REC"><span class="n2-icon">▭</span><span>Rectangle</span></button>
+          <button class="n2-tool n2-cmd-button" type="button" data-command="TEXT" title="Texte · T"><span class="n2-icon">T</span><span>Texte</span></button>
         </div>
         <small>DESSINER</small>
       </section>
@@ -112,6 +113,7 @@
               <button type="button" data-command="JOIN"><b>J</b><span>Joindre</span></button>
               <button type="button" data-command="EXPLODE"><b>X</b><span>Décomposer</span></button>
               <button type="button" data-command="SCALE"><b>SC</b><span>Échelle</span></button>
+              <button type="button" data-command="TEXTEDIT"><b>ED</b><span>Éditer texte</span></button>
     </div>
 
     <div id="n2-empty" class="n2-empty">
@@ -169,7 +171,7 @@
 
     <div class="n2-commandline">
       <div id="n2-command-history" class="n2-command-history">Navo2D prêt. Tapez une commande (L, PL, C, A, REC · TR, EX, F, CHA, S, AR, BR, LEN, PE...)</div>
-      <div class="n2-command-entry"><span id="n2-command-prompt">Commande:</span><input id="n2-command-input" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Commande"></div>
+      <div class="n2-command-entry"><span id="n2-command-prompt">Commande:</span><input id="n2-command-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Commande"></div>
     </div>
 
     <div id="n2-toast" class="n2-toast" hidden></div>

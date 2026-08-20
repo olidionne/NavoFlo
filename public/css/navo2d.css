@@ -294,3 +294,22 @@ body.n2-focus-mode{overflow:hidden}
   #n2-command-prompt.n2-command-prompt-rich{max-width:58vw;}
   #n2-command-prompt .n2-command-prompt-text{display:none;}
 }
+
+
+/* V6.7 — in-place text editor */
+.n2-text-editor{
+  position:fixed;z-index:1200;width:min(390px,calc(100vw - 20px));padding:0;
+  border:1px solid rgba(120,170,255,.38);border-radius:8px;background:rgba(8,14,20,.985);
+  box-shadow:0 24px 70px rgba(0,0,0,.62);backdrop-filter:blur(16px);
+  color:#c7d2d8;font:750 10.5px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+.n2-text-editor-head{height:38px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;border-bottom:1px solid rgba(255,255,255,.08);color:#7bc4ff;letter-spacing:.08em}
+.n2-text-editor-head button{width:27px;height:27px;border:0;border-radius:4px;background:transparent;color:#8797a1;font-size:17px;cursor:pointer}
+.n2-text-editor label{display:grid;gap:5px;color:#7f909a;font-size:9.5px}.n2-text-editor-main{padding:10px 10px 6px}
+.n2-text-editor input{box-sizing:border-box;width:100%;border:1px solid rgba(255,255,255,.11);border-radius:5px;outline:0;background:#071017;color:#e0e8ec;font:750 11px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.n2-text-editor input{height:32px;padding:0 8px}
+.n2-text-editor input:focus{border-color:rgba(105,170,255,.55);box-shadow:0 0 0 2px rgba(0,109,255,.10)}
+.n2-text-editor-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:6px 10px 10px}
+.n2-text-editor-actions{display:flex;justify-content:flex-end;gap:7px;padding:9px 10px;border-top:1px solid rgba(255,255,255,.07)}
+.n2-text-editor-actions button{height:30px;padding:0 11px;border:1px solid rgba(255,255,255,.11);border-radius:5px;background:rgba(255,255,255,.035);color:#aebbc3;font:800 9.5px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;cursor:pointer}
+.n2-text-editor-actions button.primary{border-color:rgba(0,109,255,.42);background:rgba(0,109,255,.18);color:#9ac7ff}
