@@ -1,0 +1,17 @@
+occt-js / Open CASCADE Technology notice
+
+Navo3D currently uses the tx-code/occt-js bridge pinned at commit
+ad8ffb6007eb3fd25179232f291b626d6e78a195 (engine label in Navo3D:
+"occt-js 0.1.14-dev @ ad8ffb6").
+
+The occt-js project states that its bridge code is licensed under GNU LGPL
+version 2.1 to maintain compatibility with Open CASCADE Technology (OCCT).
+The bridge links against OCCT. The current Navo3D worker identifies OCCT 7.9.3
+through this pinned bridge distribution.
+
+The full GNU LGPL 2.1 text is included as LGPL-2.1.txt. The Open CASCADE
+exception is included as OPEN-CASCADE-EXCEPTION.txt.
+
+Before commercial launch, NavoFlo should self-host the exact JavaScript/WASM
+artifacts used by Navo3D, publish the corresponding source/build information,
+and preserve a practical replacement/relink path for the LGPL component.

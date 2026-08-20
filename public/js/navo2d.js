@@ -575,6 +575,19 @@ function cycleDimensionArrowMode(groupId){
   const updated={...JSON.parse(JSON.stringify(meta)),arrowMode:next};pushHistory();rebuildDimensionGroup(groupId,updated);afterGeometryChange();
   state.selected=new Set(dimensionGroupEntities(groupId).map(e=>e.id));syncSelectionUI();toast(FR?`Flèches : ${next==='auto'?'Auto':next==='inside'?'Intérieur':'Extérieur'}`:`Arrows: ${next}`);return true;
 }
+function flipDimensionArrow(groupId,index=1){
+  const meta=dimensionGroupMeta(groupId);if(!meta)return false;
+  const key=index===2?'arrow2Flipped':'arrow1Flipped',updated=JSON.parse(JSON.stringify(meta));updated[key]=!Boolean(updated[key]);
+  pushHistory();if(!rebuildDimensionGroup(groupId,updated))return false;afterGeometryChange();state.selected=new Set(dimensionGroupEntities(groupId).map(e=>e.id));syncSelectionUI();
+  toast(FR?`Flèche ${index} : ${updated[key]?'inversée':'normale'}`:`Arrow ${index}: ${updated[key]?'flipped':'normal'}`);return true;
+}
+function resetDimensionArrowFlips(groupId){
+  const meta=dimensionGroupMeta(groupId);if(!meta)return false;const updated=JSON.parse(JSON.stringify(meta));updated.arrow1Flipped=false;updated.arrow2Flipped=false;
+  pushHistory();if(!rebuildDimensionGroup(groupId,updated))return false;afterGeometryChange();state.selected=new Set(dimensionGroupEntities(groupId).map(e=>e.id));syncSelectionUI();toast(FR?'Flèches remises au style.':'Arrows reset to style.');return true;
+}
+function dimensionArrowTips(groupId){
+  return dimensionGroupEntities(groupId).filter(e=>e.type==='POLYLINE'&&e.dimFilled&&Array.isArray(e.points)&&e.points.length>=3).map(e=>copyPoint(e.points[0]));
+}
 
 // -----------------------------------------------------------------------------
 // V5.2 — AutoCAD-style grips / direct manipulation
@@ -582,7 +595,7 @@ function cycleDimensionArrowMode(groupId){
 // selected objects and are intentionally suppressed on locked layers.
 // -----------------------------------------------------------------------------
 function layerLocked(name){return Boolean((state.layers.get(name)?.flags||0)&4);}
-function gripLabel(kind){return({endpoint:'Endpoint',midpoint:'Midpoint',vertex:'Vertex',segment:'Midpoint',center:'Center',quadrant:'Quadrant',arcStart:'Start',arcEnd:'End',arcMid:'Midpoint',insert:'Insertion',dimLocation:'Position cote',dimText:'Position texte'})[kind]||'Grip';}
+function gripLabel(kind){return({endpoint:'Endpoint',midpoint:'Midpoint',vertex:'Vertex',segment:'Midpoint',center:'Center',quadrant:'Quadrant',arcStart:'Start',arcEnd:'End',arcMid:'Midpoint',insert:'Insertion',dimLocation:FR?'Position cote':'Dimension location',dimText:FR?'Position texte':'Text position',dimArrow1:FR?'Flipper flèche 1':'Flip arrow 1',dimArrow2:FR?'Flipper flèche 2':'Flip arrow 2'})[kind]||'Grip';}
 function segmentGripPoint(a,b){
   if(Math.abs(a?.bulge||0)>1e-10){const arc=bulgeArc(a,b,a.bulge);if(arc){const t=arc.start+arc.span/2;return{x:arc.center.x+arc.r*Math.cos(t),y:arc.center.y+arc.r*Math.sin(t)};}}
   return{x:(a.x+b.x)/2,y:(a.y+b.y)/2};
@@ -617,6 +630,7 @@ function dimensionGroupGrips(groupId){
   const meta=dimensionGroupMeta(groupId);if(!meta)return[];const out=[],add=(id,kind,point,role)=>{if(point)out.push({id:`dim:${groupId}:${id}`,entityId:null,dimGroupId:groupId,kind,point:copyPoint(point),role});};
   if(meta.kind==='linear'||meta.kind==='aligned'||meta.kind==='angular')add('loc','dimLocation',meta.location,'dimLocation');
   else if(meta.kind==='radius'||meta.kind==='diameter')add('text','dimText',meta.location,'dimText');
+  const tips=dimensionArrowTips(groupId);if(tips[0])add('arrow1','dimArrow1',tips[0],'dimArrow1');if(tips[1])add('arrow2','dimArrow2',tips[1],'dimArrow2');
   return out;
 }
 function selectedGrips(){
@@ -864,7 +878,9 @@ function pointerDown(ev){
   if(!state.command&&state.tool==='select'){
     const grip=hitGrip(ev.clientX,ev.clientY);
     if(grip){
-      ev.preventDefault();beginGripEdit(grip);
+      ev.preventDefault();
+      if(grip.dimGroupId&&(grip.role==='dimArrow1'||grip.role==='dimArrow2')){flipDimensionArrow(grip.dimGroupId,grip.role==='dimArrow2'?2:1);return;}
+      beginGripEdit(grip);
       state.drag={mode:'grip',id:ev.pointerId,startX:ev.clientX,startY:ev.clientY,lastX:ev.clientX,lastY:ev.clientY,moved:false};
       try{E.canvas.setPointerCapture(ev.pointerId)}catch{}
       return;
@@ -990,7 +1006,7 @@ function pointerUp(ev){
 
   if(state.command&&!state.command.selecting){
     const c=state.command;
-    const rawPick=(['TRIM','EXTEND'].includes(c.name))||(['FILLET','CHAMFER'].includes(c.name)&&['first','second','distanceA','distancePickSecond','polyline'].includes(c.step))||(['BREAK','BREAKATPOINT','LENGTHEN','TEXTEDIT'].includes(c.name)&&c.step==='selectEntity');
+    const rawPick=(['TRIM','EXTEND','AIDIMFLIPARROW'].includes(c.name))||(['FILLET','CHAMFER'].includes(c.name)&&['first','second','distanceA','distancePickSecond','polyline'].includes(c.step))||(['BREAK','BREAKATPOINT','LENGTHEN','TEXTEDIT'].includes(c.name)&&c.step==='selectEntity');
     commandPoint(rawPick?raw:point,ev);
     return;
   }
@@ -1959,7 +1975,7 @@ function openContextMenu(clientX,clientY){
   item(FR?'Zoom étendu':'Zoom Extents','F',fitView);
   item(FR?'Supprimer':'Erase','Del',deleteSelected,!state.selected.size);
   const dimGid=dimensionGroupIdFromSelection();
-  if(dimGid){sep();item(FR?'Propriétés de cote':'Dimension properties','',()=>openDimensionEditor(dimGid,clientX,clientY));item(FR?'Flipper flèches Auto/In/Out':'Flip arrows Auto/In/Out','',()=>cycleDimensionArrowMode(dimGid));}
+  if(dimGid){sep();item(FR?'Propriétés de cote':'Dimension properties','',()=>openDimensionEditor(dimGid,clientX,clientY));item(FR?'Mode flèches Auto/In/Out':'Arrow fit Auto/In/Out','',()=>cycleDimensionArrowMode(dimGid));item(FR?'Flipper flèche 1':'Flip arrow 1','',()=>flipDimensionArrow(dimGid,1));if(dimensionArrowTips(dimGid).length>1)item(FR?'Flipper flèche 2':'Flip arrow 2','',()=>flipDimensionArrow(dimGid,2));item(FR?'Réinitialiser les flèches':'Reset arrow flips','',()=>resetDimensionArrowFlips(dimGid));}
 
   document.body.append(menu);contextMenuEl=menu;
   const r=menu.getBoundingClientRect();
@@ -2000,6 +2016,7 @@ const COMMAND_ALIASES=new Map(Object.entries({
   BR:'BREAK',BREAK:'BREAK',BREAKATPOINT:'BREAKATPOINT',LEN:'LENGTHEN',LENGTHEN:'LENGTHEN',PE:'PEDIT',PEDIT:'PEDIT',
   D:'DIMSTYLE',DIMSTYLE:'DIMSTYLE',DST:'DIMSTYLE',DIM:'DIM',DLI:'DIMLINEAR',DIMLINEAR:'DIMLINEAR',DAL:'DIMALIGNED',DIMALIGNED:'DIMALIGNED',
   DRA:'DIMRADIUS',DIMRADIUS:'DIMRADIUS',DDI:'DIMDIAMETER',DIMDIAMETER:'DIMDIAMETER',DAN:'DIMANGULAR',DIMANGULAR:'DIMANGULAR',
+  AIDIMFLIPARROW:'AIDIMFLIPARROW',DIMFLIPARROW:'AIDIMFLIPARROW',
   DI:'DIST',DIST:'DIST',DISTANCE:'DIST',ID:'ID',
   Z:'ZOOM',ZOOM:'ZOOM',ZE:'ZOOMEXTENTS',LA:'LAYER',LAYER:'LAYER',
   U:'UNDO',UNDO:'UNDO',REDO:'REDO',
@@ -2289,6 +2306,9 @@ function startCommand(rawName){
   }
   else if(name==='DIMANGULAR'){
     state.command.step='firstLine';setCommandPrompt(FR?'DIMANGULAR Sélectionnez la première ligne:':'DIMANGULAR Select first line:');
+  }
+  else if(name==='AIDIMFLIPARROW'){
+    state.command.step='pickArrow';setCommandPrompt(FR?'AIDIMFLIPARROW Sélectionnez la flèche de cote à inverser:':'AIDIMFLIPARROW Select dimension arrow to flip:');
   }
   else if(name==='BREAK'||name==='BREAKATPOINT'){state.command.step='selectEntity';setCommandPrompt(FR?`${name} Sélectionnez l’objet`:`${name} Select object`);}
   else if(name==='LENGTHEN'){state.command.step='delta';setCommandPrompt(FR?'LENGTHEN Entrez le delta de longueur:':'LENGTHEN Enter length delta:');}
@@ -2645,6 +2665,14 @@ function commandPoint(point,event,fromKeyboard=false){
     state.selected=new Set([hit.id]);syncSelectionUI();openTextEditor(hit,event?.clientX,event?.clientY);finishCommand(false);return;
   }
 
+  if(c.name==='AIDIMFLIPARROW'&&c.step==='pickArrow'){
+    const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+    if(!hit?.dimGenerated||!hit.dimGroupId)return commandError(FR?'Sélectionnez une flèche de cote.':'Select a dimension arrow.');
+    const tips=dimensionArrowTips(hit.dimGroupId);if(!tips.length)return commandError(FR?'Cette cote ne contient aucune flèche modifiable.':'This dimension has no flippable arrow.');
+    let index=1;if(tips.length>1&&dist(point,tips[1])<dist(point,tips[0]))index=2;
+    flipDimensionArrow(hit.dimGroupId,index);finishCommand(false);return;
+  }
+
   if(c.name==='DIM'){
     if(c.step==='smartFirst'){
       const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
@@ -2955,6 +2983,7 @@ function commandNeedsPoint(c){
   if(c.name==='DIMLINEAR'||c.name==='DIMALIGNED')return ['first','second','place'].includes(c.step);
   if(c.name==='DIMRADIUS'||c.name==='DIMDIAMETER')return ['selectEntity','place'].includes(c.step);
   if(c.name==='DIMANGULAR')return ['firstLine','secondLine','place'].includes(c.step);
+  if(c.name==='AIDIMFLIPARROW')return c.step==='pickArrow';
   if(c.name==='TEXT')return c.step==='insertion';
   if(c.name==='TEXTEDIT')return c.step==='selectEntity';
   if(c.name==='CIRCLE')return c.step==='center'||c.step==='radius';
@@ -3210,9 +3239,10 @@ function dimExtension(items,origin,dimPoint,dir,style,groupId='preview'){const L
 function dimensionNumber(v,meta=null){const n=Math.abs(Number(v)||0),p=Math.max(0,Math.min(8,Number(meta?.precision??state.dimPrecision)||0));return new Intl.NumberFormat(FR?'fr-CA':'en-CA',{maximumFractionDigits:p}).format(n);}
 function resolvedArrowMode(meta,space,textWidth,style){const mode=meta?.arrowMode||state.dimArrowMode||'auto';if(mode==='inside'||mode==='outside')return mode;return space>=textWidth+style.gap*2+style.arrow*3.2?'inside':'outside';}
 function addDimensionLineWithArrows(items,q1,q2,u,value,style,meta,groupId){
-  const L=dist(q1,q2),mode=resolvedArrowMode(meta,L,dimensionTextWidth(value,style),style),outside=mode==='outside';
-  let a=q1,b=q2;if(outside){a={x:q1.x-u.x*style.arrow*1.45,y:q1.y-u.y*style.arrow*1.45};b={x:q2.x+u.x*style.arrow*1.45,y:q2.y+u.y*style.arrow*1.45};}
-  const dl=dimLine(a,b,groupId);if(dl)items.push(dl);dimArrow(items,q1,outside?{x:-u.x,y:-u.y}:u,style.arrow,groupId);dimArrow(items,q2,outside?u:{x:-u.x,y:-u.y},style.arrow,groupId);return mode;
+  const L=dist(q1,q2),mode=resolvedArrowMode(meta,L,dimensionTextWidth(value,style),style),baseOutside=mode==='outside';
+  const outside1=baseOutside!==Boolean(meta?.arrow1Flipped),outside2=baseOutside!==Boolean(meta?.arrow2Flipped);
+  let a=q1,b=q2;if(outside1)a={x:q1.x-u.x*style.arrow*1.45,y:q1.y-u.y*style.arrow*1.45};if(outside2)b={x:q2.x+u.x*style.arrow*1.45,y:q2.y+u.y*style.arrow*1.45};
+  const dl=dimLine(a,b,groupId);if(dl)items.push(dl);dimArrow(items,q1,outside1?{x:-u.x,y:-u.y}:u,style.arrow,groupId);dimArrow(items,q2,outside2?u:{x:-u.x,y:-u.y},style.arrow,groupId);return mode;
 }
 function buildLinearDimension(p1,p2,location,orientation='auto',groupId='preview',meta=null){
   if(!p1||!p2||!location)return[];const style=dimensionStyle(meta),dx=p2.x-p1.x,dy=p2.y-p1.y,mid={x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2};let horizontal=orientation==='horizontal'?true:orientation==='vertical'?false:Math.abs(location.y-mid.y)>=Math.abs(location.x-mid.x);if(Math.abs(dx)<1e-12)horizontal=false;if(Math.abs(dy)<1e-12)horizontal=true;
@@ -3222,21 +3252,22 @@ function buildLinearDimension(p1,p2,location,orientation='auto',groupId='preview
 function buildAlignedDimension(p1,p2,location,groupId='preview',meta=null){
   if(!p1||!p2||!location)return[];const style=dimensionStyle(meta),vx=p2.x-p1.x,vy=p2.y-p1.y,L=Math.hypot(vx,vy);if(L<1e-12)return[];const u={x:vx/L,y:vy/L},n={x:-u.y,y:u.x},mid={x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2};let off=(location.x-mid.x)*n.x+(location.y-mid.y)*n.y;if(Math.abs(off)<style.textHeight*.5)off=(off<0?-1:1)*style.textHeight*1.5;const q1={x:p1.x+n.x*off,y:p1.y+n.y*off},q2={x:p2.x+n.x*off,y:p2.y+n.y*off},extDir={x:n.x*Math.sign(off),y:n.y*Math.sign(off)},items=[],value=dimensionNumber(L,meta);dimExtension(items,p1,q1,extDir,style,groupId);dimExtension(items,p2,q2,extDir,style,groupId);addDimensionLineWithArrows(items,q1,q2,u,value,style,meta,groupId);items.push(dimText(value,{x:(q1.x+q2.x)/2,y:(q1.y+q2.y)/2},Math.atan2(u.y,u.x),style,groupId));return items;
 }
-function addDoglegLeader(items,tip,label,style,groupId){
-  const side=label.x>=tip.x?1:-1,landingEnd={x:label.x-side*style.gap,y:label.y},elbow={x:landingEnd.x-side*style.landing,y:label.y};const a=dimLine(tip,elbow,groupId),b=dimLine(elbow,landingEnd,groupId);if(a)items.push(a);if(b)items.push(b);dimArrow(items,tip,{x:tip.x-elbow.x,y:tip.y-elbow.y},style.arrow,groupId);
+function addDoglegLeader(items,tip,label,style,groupId,meta=null,arrowIndex=1){
+  const side=label.x>=tip.x?1:-1,landingEnd={x:label.x-side*style.gap,y:label.y},elbow={x:landingEnd.x-side*style.landing,y:label.y};const a=dimLine(tip,elbow,groupId),b=dimLine(elbow,landingEnd,groupId);if(a)items.push(a);if(b)items.push(b);
+  let dir={x:tip.x-elbow.x,y:tip.y-elbow.y};if(Boolean(meta?.[arrowIndex===2?'arrow2Flipped':'arrow1Flipped']))dir={x:-dir.x,y:-dir.y};dimArrow(items,tip,dir,style.arrow,groupId);
 }
 function buildRadiusDimension(e,location,groupId='preview',meta=null){
   if(!e||!['CIRCLE','ARC'].includes(e.type)||!(e.radius>0))return[];const style=dimensionStyle(meta),c=e.center,raw={x:location.x-c.x,y:location.y-c.y},L=Math.hypot(raw.x,raw.y),u=L>1e-12?{x:raw.x/L,y:raw.y/L}:{x:1,y:0},tip={x:c.x+u.x*e.radius,y:c.y+u.y*e.radius},label=copyPoint(location),items=[],outside=dist(label,tip)>style.textHeight*1.8;
-  if(outside)addDoglegLeader(items,tip,label,style,groupId);else{const leader=dimLine(c,tip,groupId);if(leader)items.push(leader);dimArrow(items,tip,{x:c.x-tip.x,y:c.y-tip.y},style.arrow,groupId);}items.push(dimText(`R${dimensionNumber(e.radius,meta)}`,label,0,style,groupId));return items;
+  if(outside)addDoglegLeader(items,tip,label,style,groupId,meta,1);else{const leader=dimLine(c,tip,groupId);if(leader)items.push(leader);let dir={x:c.x-tip.x,y:c.y-tip.y};if(Boolean(meta?.arrow1Flipped))dir={x:-dir.x,y:-dir.y};dimArrow(items,tip,dir,style.arrow,groupId);}items.push(dimText(`R${dimensionNumber(e.radius,meta)}`,label,0,style,groupId));return items;
 }
 function buildDiameterDimension(e,location,groupId='preview',meta=null){
   if(!e||!['CIRCLE','ARC'].includes(e.type)||!(e.radius>0))return[];const style=dimensionStyle(meta),c=e.center,raw={x:location.x-c.x,y:location.y-c.y},L=Math.hypot(raw.x,raw.y),u=L>1e-12?{x:raw.x/L,y:raw.y/L}:{x:1,y:0},q1={x:c.x-u.x*e.radius,y:c.y-u.y*e.radius},q2={x:c.x+u.x*e.radius,y:c.y+u.y*e.radius},items=[],label=copyPoint(location),value=`Ø${dimensionNumber(e.radius*2,meta)}`;
-  if(L>e.radius+style.textHeight*1.5){addDoglegLeader(items,q2,label,style,groupId);items.push(dimText(value,label,0,style,groupId));return items;}
+  if(L>e.radius+style.textHeight*1.5){addDoglegLeader(items,q2,label,style,groupId,meta,1);items.push(dimText(value,label,0,style,groupId));return items;}
   addDimensionLineWithArrows(items,q1,q2,u,value,style,meta,groupId);items.push(dimText(value,c,Math.atan2(u.y,u.x),style,groupId));return items;
 }
 function buildAngularDimension(a,b,pickA,pickB,location,groupId='preview',meta=null){
   if(a?.type!=='LINE'||b?.type!=='LINE')return[];const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);if(!I)return[];const d1=branchDirection(a,I,pickA),d2=branchDirection(b,I,pickB);if(!d1||!d2)return[];const dot=Math.max(-1,Math.min(1,d1.x*d2.x+d1.y*d2.y)),theta=Math.acos(dot);if(theta<1e-7||Math.PI-theta<1e-7)return[];const style=dimensionStyle(meta),minR=style.textHeight*2.4,r=Math.max(dist(I,location),minR),cross=d1.x*d2.y-d1.y*d2.x,sdir=cross>=0?d1:d2,edir=cross>=0?d2:d1,start=Math.atan2(sdir.y,sdir.x),end=Math.atan2(edir.y,edir.x),items=[],value=`${dimensionNumber(theta*180/Math.PI,meta)}°`;
-  const arc=dimArc(I,r,start,end,groupId);if(arc)items.push(arc);const ps={x:I.x+sdir.x*r,y:I.y+sdir.y*r},pe={x:I.x+edir.x*r,y:I.y+edir.y*r},ts={x:-sdir.y,y:sdir.x},te={x:-edir.y,y:edir.x},mode=resolvedArrowMode(meta,r*theta,dimensionTextWidth(value,style),style),outside=mode==='outside';dimArrow(items,ps,outside?{x:-ts.x,y:-ts.y}:ts,style.arrow,groupId);dimArrow(items,pe,outside?te:{x:-te.x,y:-te.y},style.arrow,groupId);
+  const arc=dimArc(I,r,start,end,groupId);if(arc)items.push(arc);const ps={x:I.x+sdir.x*r,y:I.y+sdir.y*r},pe={x:I.x+edir.x*r,y:I.y+edir.y*r},ts={x:-sdir.y,y:sdir.x},te={x:-edir.y,y:edir.x},mode=resolvedArrowMode(meta,r*theta,dimensionTextWidth(value,style),style),baseOutside=mode==='outside',outside1=baseOutside!==Boolean(meta?.arrow1Flipped),outside2=baseOutside!==Boolean(meta?.arrow2Flipped);dimArrow(items,ps,outside1?{x:-ts.x,y:-ts.y}:ts,style.arrow,groupId);dimArrow(items,pe,outside2?te:{x:-te.x,y:-te.y},style.arrow,groupId);
   const es1=dimLine({x:I.x+sdir.x*(r-style.textHeight*.65),y:I.y+sdir.y*(r-style.textHeight*.65)},{x:I.x+sdir.x*(r+style.extBeyond),y:I.y+sdir.y*(r+style.extBeyond)},groupId),es2=dimLine({x:I.x+edir.x*(r-style.textHeight*.65),y:I.y+edir.y*(r-style.textHeight*.65)},{x:I.x+edir.x*(r+style.extBeyond),y:I.y+edir.y*(r+style.extBeyond)},groupId);if(es1)items.push(es1);if(es2)items.push(es2);const midA=start+theta/2,tc={x:I.x+Math.cos(midA)*(r+style.textHeight*.62),y:I.y+Math.sin(midA)*(r+style.textHeight*.62)};items.push(dimText(value,tc,0,style,groupId));return items;
 }
 function buildDimensionFromMeta(meta,groupId='preview'){
@@ -3255,12 +3286,18 @@ function dimensionPreviewForCommand(c,p){
 let dimensionEditorEl=null;
 function closeDimensionEditor(){if(dimensionEditorEl){dimensionEditorEl.remove();dimensionEditorEl=null;}}
 function openDimensionEditor(groupId,clientX=20,clientY=120){
-  const meta=dimensionGroupMeta(groupId);if(!meta)return;closeDimensionEditor();const panel=document.createElement('div');panel.className='n2-dim-editor';const mode=meta.arrowMode||'auto',precision=meta.precision??state.dimPrecision,textScale=meta.textScale||1,arrowScale=meta.arrowScale||1;
-  panel.innerHTML=`<div class="n2-text-editor-head"><strong>${FR?'PROPRIÉTÉS COTE':'DIMENSION PROPERTIES'}</strong><button type="button" data-dim-close>×</button></div><div class="n2-text-editor-grid"><label><span>${FR?'Flèches':'Arrows'}</span><select data-dim-arrow><option value="auto">Auto</option><option value="inside">${FR?'Intérieur':'Inside'}</option><option value="outside">${FR?'Extérieur':'Outside'}</option></select></label><label><span>${FR?'Précision':'Precision'}</span><input data-dim-precision type="number" min="0" max="8" step="1"></label><label><span>${FR?'Échelle texte':'Text scale'}</span><input data-dim-textscale type="number" min="0.25" max="4" step="0.05"></label><label><span>${FR?'Échelle flèche':'Arrow scale'}</span><input data-dim-arrowscale type="number" min="0.2" max="4" step="0.05"></label></div><div class="n2-text-editor-actions"><button type="button" data-dim-flip>${FR?'Flipper flèches':'Flip arrows'}</button><button type="button" class="primary" data-dim-apply>${FR?'Appliquer':'Apply'}</button></div>`;
+  const meta=dimensionGroupMeta(groupId);if(!meta)return;closeDimensionEditor();const panel=document.createElement('div');panel.className='n2-dim-editor';
+  let working=JSON.parse(JSON.stringify(meta));const mode=working.arrowMode||'auto',precision=working.precision??state.dimPrecision,textScale=working.textScale||1,arrowScale=working.arrowScale||1,arrowCount=dimensionArrowTips(groupId).length;
+  panel.innerHTML=`<div class="n2-text-editor-head"><strong>${FR?'PROPRIÉTÉS COTE':'DIMENSION PROPERTIES'}</strong><button type="button" data-dim-close>×</button></div><div class="n2-text-editor-grid"><label><span>${FR?'Placement flèches':'Arrow fit'}</span><select data-dim-arrow><option value="auto">Auto</option><option value="inside">${FR?'Intérieur':'Inside'}</option><option value="outside">${FR?'Extérieur':'Outside'}</option></select></label><label><span>${FR?'Précision':'Precision'}</span><input data-dim-precision type="number" min="0" max="8" step="1"></label><label><span>${FR?'Échelle texte':'Text scale'}</span><input data-dim-textscale type="number" min="0.25" max="4" step="0.05"></label><label><span>${FR?'Échelle flèche':'Arrow scale'}</span><input data-dim-arrowscale type="number" min="0.2" max="4" step="0.05"></label></div><div class="n2-text-editor-actions"><button type="button" data-dim-flip1>${FR?'Flipper flèche 1':'Flip arrow 1'}</button>${arrowCount>1?`<button type="button" data-dim-flip2>${FR?'Flipper flèche 2':'Flip arrow 2'}</button>`:''}<button type="button" data-dim-reset-flips>${FR?'Réinitialiser':'Reset flips'}</button><button type="button" class="primary" data-dim-apply>${FR?'Appliquer':'Apply'}</button></div>`;
   document.body.append(panel);dimensionEditorEl=panel;const arrow=panel.querySelector('[data-dim-arrow]'),prec=panel.querySelector('[data-dim-precision]'),ts=panel.querySelector('[data-dim-textscale]'),as=panel.querySelector('[data-dim-arrowscale]');arrow.value=mode;prec.value=precision;ts.value=textScale;as.value=arrowScale;
-  const apply=()=>{const m=JSON.parse(JSON.stringify(meta));m.arrowMode=arrow.value;m.precision=Math.max(0,Math.min(8,Math.round(Number(prec.value)||0)));m.textScale=Math.max(.25,Number(ts.value)||1);m.arrowScale=Math.max(.2,Number(as.value)||1);pushHistory();rebuildDimensionGroup(groupId,m);afterGeometryChange();state.selected=new Set(dimensionGroupEntities(groupId).map(e=>e.id));syncSelectionUI();};panel.querySelector('[data-dim-apply]').addEventListener('click',()=>{apply();closeDimensionEditor();});panel.querySelector('[data-dim-flip]').addEventListener('click',()=>{const order=['auto','inside','outside'],i=order.indexOf(arrow.value);arrow.value=order[(i+1)%order.length];});panel.querySelector('[data-dim-close]').addEventListener('click',closeDimensionEditor);panel.addEventListener('keydown',e=>{if(e.key==='Escape')closeDimensionEditor();});const r=panel.getBoundingClientRect();panel.style.left=`${Math.max(10,Math.min(clientX+12,innerWidth-r.width-10))}px`;panel.style.top=`${Math.max(10,Math.min(clientY+12,innerHeight-r.height-10))}px`;
+  const readFields=()=>{working.arrowMode=arrow.value;working.precision=Math.max(0,Math.min(8,Math.round(Number(prec.value)||0)));working.textScale=Math.max(.25,Number(ts.value)||1);working.arrowScale=Math.max(.2,Number(as.value)||1);};
+  const previewApply=(history=false)=>{readFields();if(history)pushHistory();rebuildDimensionGroup(groupId,working);afterGeometryChange();state.selected=new Set(dimensionGroupEntities(groupId).map(e=>e.id));syncSelectionUI();};
+  panel.querySelector('[data-dim-apply]').addEventListener('click',()=>{previewApply(true);closeDimensionEditor();});
+  panel.querySelector('[data-dim-flip1]').addEventListener('click',()=>{readFields();working.arrow1Flipped=!Boolean(working.arrow1Flipped);pushHistory();rebuildDimensionGroup(groupId,working);afterGeometryChange();state.selected=new Set(dimensionGroupEntities(groupId).map(e=>e.id));syncSelectionUI();});
+  panel.querySelector('[data-dim-flip2]')?.addEventListener('click',()=>{readFields();working.arrow2Flipped=!Boolean(working.arrow2Flipped);pushHistory();rebuildDimensionGroup(groupId,working);afterGeometryChange();state.selected=new Set(dimensionGroupEntities(groupId).map(e=>e.id));syncSelectionUI();});
+  panel.querySelector('[data-dim-reset-flips]').addEventListener('click',()=>{readFields();working.arrow1Flipped=false;working.arrow2Flipped=false;pushHistory();rebuildDimensionGroup(groupId,working);afterGeometryChange();state.selected=new Set(dimensionGroupEntities(groupId).map(e=>e.id));syncSelectionUI();});
+  panel.querySelector('[data-dim-close]').addEventListener('click',closeDimensionEditor);panel.addEventListener('keydown',e=>{if(e.key==='Escape')closeDimensionEditor();});const r=panel.getBoundingClientRect();panel.style.left=`${Math.max(10,Math.min(clientX+12,innerWidth-r.width-10))}px`;panel.style.top=`${Math.max(10,Math.min(clientY+12,innerHeight-r.height-10))}px`;
 }
-
 function openDimensionStyleEditor(){
   closeDimensionEditor();const panel=document.createElement('div');panel.className='n2-dim-editor';panel.innerHTML=`<div class="n2-text-editor-head"><strong>${FR?'STYLE DE COTE':'DIMENSION STYLE'}</strong><button type="button" data-dim-close>×</button></div><div class="n2-text-editor-grid"><label><span>${FR?'Flèches défaut':'Default arrows'}</span><select data-ds-arrow><option value="auto">Auto</option><option value="inside">${FR?'Intérieur':'Inside'}</option><option value="outside">${FR?'Extérieur':'Outside'}</option></select></label><label><span>${FR?'Précision':'Precision'}</span><input data-ds-precision type="number" min="0" max="8" step="1"></label><label><span>${FR?'Texte / diagonale':'Text / diagonal'}</span><input data-ds-text type="number" min="0.001" max="0.2" step="0.001"></label><label><span>${FR?'Flèche / texte':'Arrow / text'}</span><input data-ds-arrowfactor type="number" min="0.2" max="2" step="0.05"></label></div><div class="n2-text-editor-actions"><button type="button" class="primary" data-ds-apply>${FR?'Appliquer':'Apply'}</button></div>`;document.body.append(panel);dimensionEditorEl=panel;const a=panel.querySelector('[data-ds-arrow]'),p=panel.querySelector('[data-ds-precision]'),t=panel.querySelector('[data-ds-text]'),f=panel.querySelector('[data-ds-arrowfactor]');a.value=state.dimArrowMode||'auto';p.value=state.dimPrecision;t.value=state.dimTextRatio;f.value=state.dimArrowFactor;panel.querySelector('[data-ds-apply]').addEventListener('click',()=>{state.dimArrowMode=a.value;state.dimPrecision=Math.max(0,Math.min(8,Math.round(Number(p.value)||0)));state.dimTextRatio=Math.max(.001,Number(t.value)||.02);state.dimArrowFactor=Math.max(.2,Number(f.value)||.55);closeDimensionEditor();toast(FR?'Style de cote mis à jour.':'Dimension style updated.');});panel.querySelector('[data-dim-close]').addEventListener('click',closeDimensionEditor);const r=panel.getBoundingClientRect();panel.style.left=`${Math.max(10,(innerWidth-r.width)/2)}px`;panel.style.top='120px';
 }

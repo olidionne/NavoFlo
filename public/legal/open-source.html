@@ -1,0 +1,49 @@
+<!doctype html><html lang="fr-CA"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NavoFlo — Avis logiciels tiers</title><style>
+:root{color-scheme:dark;--bg:#080d12;--panel:#111922;--text:#e7eef3;--muted:#9fb0bc;--accent:#35d39a;--line:#273540}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:980px;margin:auto;padding:36px 24px 70px}a{color:#7bc4ff}h1{font-size:30px;margin:0 0 8px}h2{margin-top:32px}.brand{font-weight:800;color:var(--accent);letter-spacing:.04em}.muted{color:var(--muted)}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin:18px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0a1118;border:1px solid var(--line);padding:16px;border-radius:9px}ul{padding-left:22px}.licenses{display:grid;gap:8px}.licenses a{display:block;background:#0c141c;border:1px solid var(--line);padding:10px 12px;border-radius:7px;text-decoration:none}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:30px}.top a{text-decoration:none}.note{border-left:3px solid var(--accent);padding-left:14px}
+</style></head><body><main class="wrap"><div class="top"><div><div class="brand">NAVOFLO</div><h1>Avis logiciels tiers</h1><div class="muted">Open source et marques de tiers</div></div><a href="/">← NavoFlo</a></div><div class="card note">NavoFlo utilise des composants open source. Les droits accordés par leurs licences demeurent applicables indépendamment des conditions commerciales NavoFlo.</div><h2>Inventaire</h2><pre>NAVOFLO — THIRD-PARTY SOFTWARE NOTICES
+Draft inventory: 2026-08-20
+
+This file is intended to be shipped/published with NavoFlo products. It does
+not replace the complete license texts in LEGAL/licenses/.
+
+1. dxf-parser 1.1.2
+   Project: gdsestimating/dxf-parser
+   License: MIT
+   Copyright (c) 2015 GDS Storefront Estimating
+   Used by: Navo2D DXF parsing.
+   License file: licenses/DXF-PARSER-MIT.txt
+
+2. loglevel 1.7.x
+   Project: pimterry/loglevel
+   License: MIT
+   Copyright (c) 2013 Tim Perry
+   Relationship: dependency declared by dxf-parser 1.1.2 and may be included
+   by CDN bundling/build tooling.
+   License file: licenses/LOGLEVEL-MIT.txt
+
+3. three.js r185 / 0.185.0
+   Project: mrdoob/three.js
+   License: MIT
+   Copyright © 2010-2026 three.js authors
+   Used by: Navo3D rendering and Three.js loaders/controls.
+   License file: licenses/THREE-MIT.txt
+
+4. occt-js, pinned commit ad8ffb6007eb3fd25179232f291b626d6e78a195
+   Project: tx-code/occt-js
+   License stated by project: GNU LGPL 2.1
+   Used by: Navo3D exact STEP/B-Rep operations.
+   License files: licenses/LGPL-2.1.txt and licenses/OCCT-JS-NOTICE.txt
+
+5. Open CASCADE Technology (OCCT)
+   Version used through the pinned occt-js bridge: 7.9.3
+   License: GNU LGPL 2.1 with Open CASCADE Exception 1.0
+   Used by: Navo3D STEP/B-Rep kernel through WebAssembly.
+   License files: licenses/LGPL-2.1.txt and
+                  licenses/OPEN-CASCADE-EXCEPTION.txt
+
+TRADEMARKS
+SOLIDWORKS is a trademark of Dassault Systèmes SolidWorks Corporation or its
+affiliates. AutoCAD and Autodesk are trademarks of Autodesk, Inc. NavoFlo is
+an independent product and is not affiliated with or endorsed by those
+companies unless an explicit written partner agreement says otherwise.
+</pre><h2>Textes de licence</h2><div class="licenses"><a href="licenses/DXF-PARSER-MIT.txt">dxf-parser — MIT</a><a href="licenses/LOGLEVEL-MIT.txt">loglevel — MIT</a><a href="licenses/THREE-MIT.txt">three.js — MIT</a><a href="licenses/LGPL-2.1.txt">GNU LGPL 2.1</a><a href="licenses/OCCT-JS-NOTICE.txt">occt-js notice</a><a href="licenses/OPEN-CASCADE-EXCEPTION.txt">Open CASCADE Exception 1.0</a></div><div class="card"><strong>Open CASCADE Technology</strong><p class="muted">Navo3D utilise Open CASCADE Technology par l’intermédiaire de occt-js/WebAssembly pour les opérations STEP/B-Rep. OCCT est utilisé sous GNU LGPL 2.1 avec l’exception Open CASCADE indiquée ci-dessus.</p></div></main></body></html>

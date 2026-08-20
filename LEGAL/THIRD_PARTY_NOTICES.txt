@@ -1,0 +1,46 @@
+NAVOFLO — THIRD-PARTY SOFTWARE NOTICES
+Draft inventory: 2026-08-20
+
+This file is intended to be shipped/published with NavoFlo products. It does
+not replace the complete license texts in LEGAL/licenses/.
+
+1. dxf-parser 1.1.2
+   Project: gdsestimating/dxf-parser
+   License: MIT
+   Copyright (c) 2015 GDS Storefront Estimating
+   Used by: Navo2D DXF parsing.
+   License file: licenses/DXF-PARSER-MIT.txt
+
+2. loglevel 1.7.x
+   Project: pimterry/loglevel
+   License: MIT
+   Copyright (c) 2013 Tim Perry
+   Relationship: dependency declared by dxf-parser 1.1.2 and may be included
+   by CDN bundling/build tooling.
+   License file: licenses/LOGLEVEL-MIT.txt
+
+3. three.js r185 / 0.185.0
+   Project: mrdoob/three.js
+   License: MIT
+   Copyright © 2010-2026 three.js authors
+   Used by: Navo3D rendering and Three.js loaders/controls.
+   License file: licenses/THREE-MIT.txt
+
+4. occt-js, pinned commit ad8ffb6007eb3fd25179232f291b626d6e78a195
+   Project: tx-code/occt-js
+   License stated by project: GNU LGPL 2.1
+   Used by: Navo3D exact STEP/B-Rep operations.
+   License files: licenses/LGPL-2.1.txt and licenses/OCCT-JS-NOTICE.txt
+
+5. Open CASCADE Technology (OCCT)
+   Version used through the pinned occt-js bridge: 7.9.3
+   License: GNU LGPL 2.1 with Open CASCADE Exception 1.0
+   Used by: Navo3D STEP/B-Rep kernel through WebAssembly.
+   License files: licenses/LGPL-2.1.txt and
+                  licenses/OPEN-CASCADE-EXCEPTION.txt
+
+TRADEMARKS
+SOLIDWORKS is a trademark of Dassault Systèmes SolidWorks Corporation or its
+affiliates. AutoCAD and Autodesk are trademarks of Autodesk, Inc. NavoFlo is
+an independent product and is not affiliated with or endorsed by those
+companies unless an explicit written partner agreement says otherwise.
