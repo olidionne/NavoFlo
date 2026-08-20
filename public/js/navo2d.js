@@ -2237,18 +2237,18 @@ function commandText(raw){
   }
 
   if(c.name==='LINE'){
-    if(u==='C'||u==='CLOSE'){
+    if(u==='C'||u==='CLOSE'||u==='F'||u==='FERMER'){
       if(c.points.length>=2){addLine(c.points[c.points.length-1],c.points[0]);finishCommand();}return;
     }
-    if(u==='U'||u==='UNDO'){
+    if(u==='U'||u==='UNDO'||u==='A'||u==='ANNULER'){
       const id=c.createdIds.pop();if(id){state.entities=state.entities.filter(e=>e.id!==id);c.points.pop();afterGeometryChange();}return;
     }
   }
   if(c.name==='PLINE'){
-    if(u==='C'||u==='CLOSE'){
+    if(u==='C'||u==='CLOSE'||u==='F'||u==='FERMER'){
       if(c.points.length>=2){commitPolyline(c.points,true);finishCommand();}return;
     }
-    if(u==='U'||u==='UNDO'){if(c.points.length)c.points.pop();setCommandPrompt(`${c.name} ${c.points.length?CMDT.specifyNext:CMDT.specifyFirst}:`);return;}
+    if(u==='U'||u==='UNDO'||u==='A'||u==='ANNULER'){if(c.points.length)c.points.pop();setCommandPrompt(`${c.name} ${c.points.length?CMDT.specifyNext:CMDT.specifyFirst}:`);return;}
   }
   if(c.name==='CIRCLE'&&c.step==='radius'&&(u==='D'||u==='DIAMETER')){
     c.data.diameter=true;setCommandPrompt(`${c.name} ${CMDT.diameter}:`);return;
@@ -2617,8 +2617,101 @@ function cancelCommand(log=true){
   updateCommandPrompt();
 }
 
+// V6.6 — AutoCAD-style rich command options.
+// Any [Option/Option] or [Option Option Option] group in a command prompt is
+// rendered as clickable option chips. The highlighted character is also the
+// one-letter keyboard shortcut handled by commandText().
+function commandOptionShortcut(label){
+  const chars=Array.from(String(label||''));
+  let firstLetter=-1;
+  for(let i=0;i<chars.length;i++){
+    if(/[A-Za-zÀ-ÖØ-öø-ÿ]/.test(chars[i])){firstLetter=i;break;}
+  }
+  if(firstLetter<0)return{index:0,key:String(chars[0]||'').toUpperCase()};
+
+  // AutoCAD convention: an intentionally capitalized internal character,
+  // such as mEthod, declares the shortcut. Otherwise the first letter wins.
+  let index=firstLetter;
+  const first=chars[firstLetter];
+  if(first===first.toLowerCase()){
+    for(let i=firstLetter+1;i<chars.length;i++){
+      if(/[A-ZÀ-ÖØ-Þ]/.test(chars[i])){index=i;break;}
+    }
+  }
+  const raw=chars[index];
+  const key=raw.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+  return{index,key};
+}
+function splitCommandOptions(groupText){
+  const value=String(groupText||'').trim();
+  if(!value)return[];
+  if(value.includes('/'))return value.split('/').map(x=>x.trim()).filter(Boolean);
+  return value.split(/\s+/).map(x=>x.trim()).filter(Boolean);
+}
+function appendCommandPromptText(parent,text){
+  if(!text)return;
+  const span=document.createElement('span');
+  span.className='n2-command-prompt-text';
+  span.textContent=text;
+  parent.append(span);
+}
+function appendCommandOption(parent,label){
+  const option=document.createElement('button');
+  option.type='button';
+  option.className='n2-command-option';
+  option.tabIndex=-1;
+  const hot=commandOptionShortcut(label);
+  option.dataset.commandOption=hot.key;
+  option.title=`${hot.key} — ${label}`;
+  option.setAttribute('aria-label',`${label} (${hot.key})`);
+
+  const chars=Array.from(label);
+  chars.forEach((ch,index)=>{
+    const span=document.createElement('span');
+    span.className=index===hot.index?'n2-command-option-hotkey':'n2-command-option-char';
+    span.textContent=ch;
+    option.append(span);
+  });
+
+  // Prevent the click from stealing the command-line interaction. Clicking an
+  // option executes exactly the same one-letter path as typing its hotkey.
+  option.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();});
+  option.addEventListener('click',event=>{
+    event.preventDefault();event.stopPropagation();
+    const key=option.dataset.commandOption;
+    if(state.command&&key)commandText(key);
+    requestAnimationFrame(()=>{
+      try{E.commandInput?.focus({preventScroll:true});}catch{try{E.commandInput?.focus();}catch{}}
+    });
+  });
+  parent.append(option);
+}
+function renderCommandPrompt(text){
+  if(!E.commandPrompt)return;
+  const value=String(text||CMDT.command);
+  E.commandPrompt.replaceChildren();
+  E.commandPrompt.classList.add('n2-command-prompt-rich');
+
+  const re=/\[([^\]]+)\]/g;
+  let last=0,match;
+  while((match=re.exec(value))){
+    appendCommandPromptText(E.commandPrompt,value.slice(last,match.index));
+    const group=document.createElement('span');
+    group.className='n2-command-option-group';
+    const open=document.createElement('span');open.className='n2-command-option-bracket';open.textContent='[';group.append(open);
+    const options=splitCommandOptions(match[1]);
+    options.forEach((label,index)=>{
+      if(index){const gap=document.createElement('span');gap.className='n2-command-option-gap';gap.textContent=' ';group.append(gap);}
+      appendCommandOption(group,label);
+    });
+    const close=document.createElement('span');close.className='n2-command-option-bracket';close.textContent=']';group.append(close);
+    E.commandPrompt.append(group);
+    last=re.lastIndex;
+  }
+  appendCommandPromptText(E.commandPrompt,value.slice(last));
+}
 function setCommandPrompt(text){
-  if(E.commandPrompt)E.commandPrompt.textContent=text||CMDT.command;
+  renderCommandPrompt(text||CMDT.command);
   E.commandInput?.closest('.n2-commandline')?.classList.toggle('is-active',Boolean(state.command));
 }
 function updateCommandPrompt(){

@@ -209,3 +209,88 @@ body.n2-focus-mode{overflow:hidden}
 }
 .n2-ribbon-menu-portal[hidden]{display:none!important}
 .n2-ribbon-menu-portal button{position:relative;z-index:1}
+
+/* V6.6 — AutoCAD-like clickable command options */
+#n2-command-prompt.n2-command-prompt-rich{
+  display:inline-flex;
+  align-items:center;
+  flex:0 1 auto;
+  min-width:0;
+  max-width:min(78vw,1180px);
+  gap:2px;
+  white-space:nowrap;
+  overflow:hidden;
+  color:#aeb8bf;
+  font-weight:800;
+}
+#n2-command-prompt .n2-command-prompt-text{
+  flex:0 0 auto;
+  color:#aeb8bf;
+}
+#n2-command-prompt .n2-command-option-group{
+  display:inline-flex;
+  align-items:center;
+  flex:0 0 auto;
+  gap:1px;
+  color:#8e9aa3;
+}
+#n2-command-prompt .n2-command-option-bracket,
+#n2-command-prompt .n2-command-option-gap{
+  flex:0 0 auto;
+  color:#75838d;
+  font-weight:750;
+}
+#n2-command-prompt .n2-command-option{
+  appearance:none;
+  -webkit-appearance:none;
+  height:21px;
+  display:inline-flex;
+  align-items:center;
+  padding:0 4px;
+  margin:0;
+  border:1px solid rgba(196,205,212,.20);
+  border-radius:2px;
+  outline:0;
+  background:rgba(154,165,174,.18);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
+  color:#b8c2c8;
+  font:800 10.5px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  cursor:pointer;
+  user-select:none;
+}
+#n2-command-prompt .n2-command-option:hover{
+  border-color:rgba(205,216,224,.38);
+  background:rgba(177,188,197,.28);
+  color:#e0e6ea;
+}
+#n2-command-prompt .n2-command-option:active{
+  transform:translateY(1px);
+  background:rgba(132,145,155,.32);
+}
+#n2-command-prompt .n2-command-option-char{
+  flex:0 0 auto;
+  color:inherit!important;
+  font:inherit;
+}
+#n2-command-prompt .n2-command-option-hotkey{
+  flex:0 0 auto;
+  color:#69aaff!important;
+  font:900 10.5px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  text-decoration:underline;
+  text-decoration-thickness:1px;
+  text-underline-offset:2px;
+}
+.n2-commandline.is-active #n2-command-prompt,
+.n2-commandline.is-active #n2-command-prompt .n2-command-prompt-text{
+  color:#b6c1c7;
+}
+@media(max-width:1250px){
+  #n2-command-prompt.n2-command-prompt-rich{max-width:65vw;overflow-x:auto;scrollbar-width:none;}
+  #n2-command-prompt.n2-command-prompt-rich::-webkit-scrollbar{display:none;}
+  #n2-command-prompt .n2-command-option{padding:0 3px;font-size:9.5px;}
+  #n2-command-prompt .n2-command-option-hotkey{font-size:9.5px;}
+}
+@media(max-width:820px){
+  #n2-command-prompt.n2-command-prompt-rich{max-width:58vw;}
+  #n2-command-prompt .n2-command-prompt-text{display:none;}
+}
