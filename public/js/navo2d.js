@@ -1063,12 +1063,122 @@ function performExtendAtPoint(entity,pick,opts={}){
   if(entity.type==='POLYLINE'&&!entity.closed&&entity.points.length>=2){const first=entity.points[0],last=entity.points[entity.points.length-1],moveFirst=dist(pick,first)<dist(pick,last),origin=moveFirst?entity.points[1]:entity.points[entity.points.length-2],current=moveFirst?first:last,v={x:current.x-origin.x,y:current.y-origin.y},L=Math.hypot(v.x,v.y);if(L<1e-12)return false;const dir={x:v.x/L,y:v.y/L},hits=[];for(const o of state.entities)if(o.id!==entity.id&&layerVisible(o.layer))hits.push(...rayIntersectionsWithEntity(origin,dir,o).filter(h=>h.t>L+1e-8));if(!hits.length)return opts.quiet?false:commandError(FR?'Aucune limite trouvée.':'No boundary found.');hits.sort((a,b)=>a.t-b.t);if(opts.history!==false)pushHistory();if(moveFirst){entity.points[0].x=hits[0].p.x;entity.points[0].y=hits[0].p.y;}else{last.x=hits[0].p.x;last.y=hits[0].p.y;}afterGeometryChange();if(!opts.silent)toast(FR?'Polyligne prolongée.':'Polyline extended.');return true;}
   return opts.quiet?false:commandError(FR?'EXTEND supporte lignes et extrémités de polylignes ouvertes.':'EXTEND supports lines and open polyline endpoints.');
 }
-function branchDirection(line,intersection,pick){const a={x:line.p1.x-intersection.x,y:line.p1.y-intersection.y},b={x:line.p2.x-intersection.x,y:line.p2.y-intersection.y},q={x:pick.x-intersection.x,y:pick.y-intersection.y};const da=a.x*q.x+a.y*q.y,db=b.x*q.x+b.y*q.y,v=da>=db?a:b,L=Math.hypot(v.x,v.y);return L<1e-12?null:{x:v.x/L,y:v.y/L};}
-function trimLineToPoint(line,I,dir,p){const aDot=(line.p1.x-I.x)*dir.x+(line.p1.y-I.y)*dir.y,bDot=(line.p2.x-I.x)*dir.x+(line.p2.y-I.y)*dir.y;if(aDot>=bDot)line.p2=copyPoint(p);else line.p1=copyPoint(p);}
-function performFillet(a,b,pickA,pickB,r){
-  if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'FILLET V6 supporte les lignes exactes; polylignes à venir.':'V6 FILLET supports exact lines; polyline fillet is next.');const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);if(!I)return commandError(FR?'Les lignes sont parallèles.':'Lines are parallel.');const d1=branchDirection(a,I,pickA),d2=branchDirection(b,I,pickB);if(!d1||!d2)return false;let dot=Math.max(-1,Math.min(1,d1.x*d2.x+d1.y*d2.y)),theta=Math.acos(dot);if(theta<1e-5||Math.abs(Math.PI-theta)<1e-5)return commandError(FR?'Angle invalide pour un congé.':'Invalid fillet angle.');pushHistory();if(!(r>1e-12)){trimLineToPoint(a,I,d1,I);trimLineToPoint(b,I,d2,I);afterGeometryChange();toast(FR?'Coin fermé (R0).':'Sharp corner (R0).');return true;}const t=r/Math.tan(theta/2),p1={x:I.x+d1.x*t,y:I.y+d1.y*t},p2={x:I.x+d2.x*t,y:I.y+d2.y*t},bis={x:d1.x+d2.x,y:d1.y+d2.y},bl=Math.hypot(bis.x,bis.y);if(bl<1e-12)return false;bis.x/=bl;bis.y/=bl;const cDist=r/Math.sin(theta/2),center={x:I.x+bis.x*cDist,y:I.y+bis.y*cDist};trimLineToPoint(a,I,d1,p1);trimLineToPoint(b,I,d2,p2);const arc=copyEntityProps(a,'ARC');arc.layer=a.layer===b.layer?a.layer:state.activeLayer;arc.center=center;arc.radius=r;let sA=Math.atan2(p1.y-center.y,p1.x-center.x),sB=Math.atan2(p2.y-center.y,p2.x-center.x);const cross=d1.x*d2.y-d1.y*d2.x;if(cross<0){const t0=sA;sA=sB;sB=t0;}arc.start=sA;arc.end=sB;state.entities.push(arc);afterGeometryChange();toast(FR?`Congé R${fmt(r)} créé.`:`Fillet R${fmt(r)} created.`);return true;
+// Navo2D V6.2 — FILLET / CHAMFER use the actual object-pick side, not entity endpoint order.
+// This mirrors AutoCAD: the portions clicked by the user are the portions kept,
+// while the opposite ends are trimmed or extended to the new corner geometry.
+function branchDirection(line,intersection,pick){
+  const vx=line.p2.x-line.p1.x,vy=line.p2.y-line.p1.y,L=Math.hypot(vx,vy);
+  if(L<1e-12)return null;
+  let ux=vx/L,uy=vy/L;
+  const projected=projectPointToLine(pick,line.p1,line.p2,false)||pick;
+  let along=(projected.x-intersection.x)*ux+(projected.y-intersection.y)*uy;
+  const tol=1e-10*Math.max(1,L,dist(intersection,projected));
+
+  // A pick exactly on the theoretical intersection is ambiguous. Fall back to
+  // the endpoint nearest the actual click, then to the longest available ray.
+  if(Math.abs(along)<=tol){
+    const aAlong=(line.p1.x-intersection.x)*ux+(line.p1.y-intersection.y)*uy;
+    const bAlong=(line.p2.x-intersection.x)*ux+(line.p2.y-intersection.y)*uy;
+    along=dist(pick,line.p1)<=dist(pick,line.p2)?aAlong:bAlong;
+    if(Math.abs(along)<=tol)along=Math.abs(aAlong)>=Math.abs(bAlong)?aAlong:bAlong;
+  }
+  if(Math.abs(along)<=tol)return null;
+  if(along<0){ux=-ux;uy=-uy;}
+  return{x:ux,y:uy};
 }
-function performChamfer(a,b,pickA,pickB,dA,dB){if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'CHAMFER V6 supporte les lignes exactes.':'V6 CHAMFER supports exact lines.');const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);if(!I)return commandError(FR?'Les lignes sont parallèles.':'Lines are parallel.');const u=branchDirection(a,I,pickA),v=branchDirection(b,I,pickB);if(!u||!v)return false;const p1={x:I.x+u.x*dA,y:I.y+u.y*dA},p2={x:I.x+v.x*dB,y:I.y+v.y*dB};pushHistory();trimLineToPoint(a,I,u,p1);trimLineToPoint(b,I,v,p2);const n=copyEntityProps(a,'LINE');n.layer=a.layer===b.layer?a.layer:state.activeLayer;n.p1=p1;n.p2=p2;state.entities.push(n);afterGeometryChange();toast(FR?'Chanfrein créé.':'Chamfer created.');return true;}
+
+function trimLineToPoint(line,I,dir,p){
+  const aDot=(line.p1.x-I.x)*dir.x+(line.p1.y-I.y)*dir.y;
+  const bDot=(line.p2.x-I.x)*dir.x+(line.p2.y-I.y)*dir.y;
+  // Keep the endpoint on the ray that was picked and replace the opposite end.
+  if(aDot>=bDot)line.p2=copyPoint(p);
+  else line.p1=copyPoint(p);
+}
+
+function performFillet(a,b,pickA,pickB,r){
+  if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'FILLET supporte actuellement deux lignes exactes.':'FILLET currently supports two exact lines.');
+  const radius=Number(r);
+  if(!Number.isFinite(radius)||radius<0)return commandError(FR?'Le rayon doit être positif ou nul.':'Radius must be zero or greater.');
+  const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);
+  if(!I)return commandError(FR?'Les lignes sont parallèles ou colinéaires.':'Lines are parallel or collinear.');
+  const d1=branchDirection(a,I,pickA),d2=branchDirection(b,I,pickB);
+  if(!d1||!d2)return commandError(FR?'Sélectionnez chaque ligne du côté du coin à conserver.':'Pick each line on the side of the corner to keep.');
+  const dot=Math.max(-1,Math.min(1,d1.x*d2.x+d1.y*d2.y));
+  const theta=Math.acos(dot);
+  if(theta<1e-7||Math.abs(Math.PI-theta)<1e-7)return commandError(FR?'Angle invalide pour un congé.':'Invalid fillet angle.');
+
+  if(radius<=1e-12){
+    pushHistory();
+    trimLineToPoint(a,I,d1,I);
+    trimLineToPoint(b,I,d2,I);
+    afterGeometryChange();
+    toast(FR?'Coin fermé (R0).':'Sharp corner (R0).');
+    return true;
+  }
+
+  // Tangency distance along each selected ray and center on the internal bisector.
+  const tangentDistance=radius/Math.tan(theta/2);
+  const p1={x:I.x+d1.x*tangentDistance,y:I.y+d1.y*tangentDistance};
+  const p2={x:I.x+d2.x*tangentDistance,y:I.y+d2.y*tangentDistance};
+  const bis={x:d1.x+d2.x,y:d1.y+d2.y};
+  const bisLength=Math.hypot(bis.x,bis.y);
+  if(bisLength<1e-12)return commandError(FR?'Impossible de calculer le centre du congé.':'Unable to calculate fillet center.');
+  bis.x/=bisLength;bis.y/=bisLength;
+  const centerDistance=radius/Math.sin(theta/2);
+  const center={x:I.x+bis.x*centerDistance,y:I.y+bis.y*centerDistance};
+  if(![p1.x,p1.y,p2.x,p2.y,center.x,center.y].every(Number.isFinite))return commandError(FR?'Géométrie de congé invalide.':'Invalid fillet geometry.');
+
+  // DXF ARC is stored CCW. Always select the minor arc between the tangent
+  // points; the previous cross-product rule could select the 360°-side arc.
+  let sA=Math.atan2(p1.y-center.y,p1.x-center.x);
+  let sB=Math.atan2(p2.y-center.y,p2.x-center.x);
+  if(positiveSpan(sA,sB)>Math.PI){const tmp=sA;sA=sB;sB=tmp;}
+
+  pushHistory();
+  trimLineToPoint(a,I,d1,p1);
+  trimLineToPoint(b,I,d2,p2);
+  const arc=copyEntityProps(a,'ARC');
+  arc.layer=a.layer===b.layer?a.layer:state.activeLayer;
+  arc.center=center;arc.radius=radius;arc.start=sA;arc.end=sB;
+  state.entities.push(arc);
+  afterGeometryChange();
+  toast(FR?`Congé R${fmt(radius)} créé.`:`Fillet R${fmt(radius)} created.`);
+  return true;
+}
+
+function performChamfer(a,b,pickA,pickB,dA,dB){
+  if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'CHAMFER supporte actuellement deux lignes exactes.':'CHAMFER currently supports two exact lines.');
+  const firstDistance=Number(dA),secondDistance=Number(dB);
+  if(!Number.isFinite(firstDistance)||!Number.isFinite(secondDistance)||firstDistance<0||secondDistance<0)return commandError(FR?'Les distances de chanfrein doivent être positives ou nulles.':'Chamfer distances must be zero or greater.');
+  const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);
+  if(!I)return commandError(FR?'Les lignes sont parallèles ou colinéaires.':'Lines are parallel or collinear.');
+  const u=branchDirection(a,I,pickA),v=branchDirection(b,I,pickB);
+  if(!u||!v)return commandError(FR?'Sélectionnez chaque ligne du côté du coin à conserver.':'Pick each line on the side of the corner to keep.');
+  const dot=Math.max(-1,Math.min(1,u.x*v.x+u.y*v.y));
+  const theta=Math.acos(dot);
+  if(theta<1e-7||Math.abs(Math.PI-theta)<1e-7)return commandError(FR?'Angle invalide pour un chanfrein.':'Invalid chamfer angle.');
+
+  const p1={x:I.x+u.x*firstDistance,y:I.y+u.y*firstDistance};
+  const p2={x:I.x+v.x*secondDistance,y:I.y+v.y*secondDistance};
+  if(![p1.x,p1.y,p2.x,p2.y].every(Number.isFinite))return commandError(FR?'Géométrie de chanfrein invalide.':'Invalid chamfer geometry.');
+
+  pushHistory();
+  trimLineToPoint(a,I,u,p1);
+  trimLineToPoint(b,I,v,p2);
+
+  // AutoCAD CHAMFER with 0,0 simply trims/extends to a sharp intersection.
+  // Do not create a zero-length LINE entity in that case.
+  const bevelTolerance=1e-10*Math.max(1,firstDistance,secondDistance,dist(I,p1),dist(I,p2));
+  if(dist(p1,p2)>bevelTolerance){
+    const n=copyEntityProps(a,'LINE');
+    n.layer=a.layer===b.layer?a.layer:state.activeLayer;
+    n.p1=copyPoint(p1);n.p2=copyPoint(p2);
+    state.entities.push(n);
+  }
+  afterGeometryChange();
+  toast(firstDistance<=1e-12&&secondDistance<=1e-12?(FR?'Coin fermé (chanfrein 0,0).':'Sharp corner (chamfer 0,0).'):(FR?'Chanfrein créé.':'Chamfer created.'));
+  return true;
+}
 function applyStretchMutation(e,dx,dy,rect){
   if(!rect||entityInsideRect(e,rect)){translateEntity(e,dx,dy);return;}
   const inside=p=>pointInRect(p,rect);
