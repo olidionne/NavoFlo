@@ -62,6 +62,22 @@ export function planConfig(env, plan) {
   throw new Error('Unknown NavoFlo plan.');
 }
 
+
+export function taxRatesForProvince(env, province) {
+  const code = String(province || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) throw new Error('Province is required for manual tax calculation.');
+  const key = `STRIPE_TAX_RATES_${code}`;
+  const raw = env?.[key];
+  if (!raw) {
+    throw new Error(`Manual tax rates are not configured for province ${code}. Add ${key} in Cloudflare before accepting checkout from this province.`);
+  }
+  const rates = String(raw).split(',').map(v => v.trim()).filter(Boolean);
+  if (!rates.length || rates.some(v => !v.startsWith('txr_'))) {
+    throw new Error(`Invalid manual Stripe tax-rate configuration for ${code}.`);
+  }
+  return rates;
+}
+
 export function safeOrigin(request, env) {
   const configured = env?.PUBLIC_APP_URL;
   if (configured) return configured.replace(/\/$/, '');

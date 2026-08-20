@@ -1,39 +1,55 @@
-# NavoFlo — Stripe Billing setup (Card + Canadian PAD)
+# NavoFlo — Stripe Billing setup V2 (Card + Canadian PAD + manual taxes)
 
 This package is designed for Cloudflare Pages + Pages Functions.
 No Stripe secret key is ever exposed in browser JavaScript.
 
-## 1. Stripe account
-Create/activate the NavoFlo Stripe account in Canada.
-Enable Card and ACSS Debit / Canadian pre-authorized debit (PAD) in Payment methods.
-Enable the Stripe Customer Portal.
+## IMPORTANT SECURITY FIRST
+If a Stripe secret key has ever appeared in a screenshot, chat, ticket, email, or source file, rotate it in Stripe before using this integration. Never commit `sk_test_...`, `sk_live_...` or `whsec_...` values to GitHub.
 
-## 2. Create four recurring annual Prices in Stripe
-All prices should be CAD / yearly recurring:
+## 1. Stripe products / annual prices
+Create the following CAD yearly recurring prices and copy each `price_...` ID:
 
 - NavoBase Main: 1995 CAD/year
 - NavoBase Additional Seat: 495 CAD/year
 - NavoPro Main: 3495 CAD/year
 - NavoPro Additional Seat: 895 CAD/year
 
-Copy each `price_...` ID.
+All product prices must be **tax exclusive / taxes added on top**.
 
-## 3. Cloudflare Pages environment variables
+## 2. Payment methods
+Enable:
+- Card
+- Canadian pre-authorized debit / ACSS Debit (PAD)
+
+The Checkout code requests a business PAD mandate.
+
+## 3. Manual tax rates
+Stripe Automatic Tax must NOT be enabled by this integration.
+For Quebec, create two active **exclusive** manual tax rates:
+- GST / TPS: 5%
+- QST / TVQ: 9.975%
+
+Copy both `txr_...` IDs.
+
+The integration intentionally does not guess Canadian interprovincial tax rules. It uses a province-to-tax-rate environment variable. At launch you can enable Quebec only, then add other provinces after their tax treatment has been confirmed.
+
+## 4. Cloudflare Pages environment variables / secrets
 In Cloudflare > Pages > NavoFlo > Settings > Environment variables / Secrets:
 
-STRIPE_SECRET_KEY=sk_test_...   (then sk_live_... at launch)
-STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_SECRET_KEY=sk_test_...   (secret; use sk_live_... only at production launch)
+STRIPE_WEBHOOK_SECRET=whsec_... (secret)
 STRIPE_PRICE_NAVOBASE_MAIN=price_...
 STRIPE_PRICE_NAVOBASE_SEAT=price_...
 STRIPE_PRICE_NAVOPRO_MAIN=price_...
 STRIPE_PRICE_NAVOPRO_SEAT=price_...
+STRIPE_TAX_RATES_QC=txr_GST_ID,txr_QST_ID
 PUBLIC_APP_URL=https://navoflo.com
-STRIPE_AUTOMATIC_TAX=false
 
-Use secrets for STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET.
-Never commit secret values into GitHub.
+Use Cloudflare **Secrets** for STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET.
 
-## 4. Webhook
+Do NOT define STRIPE_AUTOMATIC_TAX in V2. Manual tax rates are applied directly to every subscription line item.
+
+## 5. Webhook
 In Stripe Developers > Webhooks, add:
 https://navoflo.com/api/stripe/webhook
 
@@ -47,33 +63,31 @@ Subscribe at minimum to:
 
 Copy the signing secret into STRIPE_WEBHOOK_SECRET.
 
-## 5. Optional Cloudflare D1 subscription database
+## 6. Optional Cloudflare D1 subscription database
 Create a D1 database, bind it to the Pages project as `NAVOFLO_DB`, then run:
 
 migrations/0001_billing.sql
 
-The checkout works without D1, but D1 is strongly recommended before access-control goes live.
-
-## 6. Stripe Tax
-The code supports Stripe Automatic Tax when STRIPE_AUTOMATIC_TAX=true.
-Do not enable it until the Stripe tax registrations/settings have been reviewed for NavoFlo.
+The Checkout can open without D1, but D1 is strongly recommended before access-control goes live.
 
 ## 7. PAD behavior
-PAD can remain pending for days. Do NOT grant permanent NavoBase/NavoPro access solely because the browser returned from Checkout.
-Access should be based on the server-side subscription state updated by Stripe webhooks, particularly `invoice.paid`.
+PAD is delayed-notification. Do NOT grant permanent NavoBase/NavoPro access solely because the browser returned from Checkout. Access must be based on the server-side subscription/payment state updated by Stripe webhooks, especially `invoice.paid`.
 
 ## 8. Current scope
-Implemented now:
+Implemented:
 - NavoBase / NavoPro annual Checkout
-- Main license + additional-seat quantities
+- Main licence + additional-seat quantities
 - Card + Canadian PAD
-- Stripe Customer Portal after Checkout
+- Manual Stripe tax rates by configured province
+- Quebec GST 5% + QST 9.975% ready through `STRIPE_TAX_RATES_QC`
+- Stripe Customer Portal endpoint
 - Webhook signature verification
-- Subscription state persistence hook for Cloudflare D1
+- D1 subscription-state persistence hook
 - FR/EN pricing and success pages
 
-Next product step:
-- NavoFlo account login / organizations
+Next product layer:
+- NavoFlo login / organizations
 - seat assignment per user
-- device activation for installable applications
+- device activation for installable Windows applications
+- NavoBase/NavoPro entitlements
 - protect Navo2D/Navo3D based on NavoPro entitlement

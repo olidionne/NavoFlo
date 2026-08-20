@@ -1,4 +1,4 @@
-import { json, planConfig, safeOrigin, stripeRequest } from '../../_lib/stripe.js';
+import { json, planConfig, safeOrigin, stripeRequest, taxRatesForProvince } from '../../_lib/stripe.js';
 
 export async function onRequestPost(context) {
   try {
@@ -7,13 +7,16 @@ export async function onRequestPost(context) {
     const plan = planConfig(env, body.plan);
     const seats = Math.max(1, Math.min(250, Math.floor(Number(body.seats) || 1)));
     const locale = body.locale === 'en' ? 'en' : 'fr';
+    const province = String(body.province || '').trim().toUpperCase();
     const origin = safeOrigin(request, env);
+    const taxRates = taxRatesForProvince(env, province);
 
     const form = {
       mode: 'subscription',
       locale,
       'payment_method_types[0]': 'card',
       'payment_method_types[1]': 'acss_debit',
+      'payment_method_options[acss_debit][mandate_options][transaction_type]': 'business',
       'line_items[0][price]': plan.mainPrice,
       'line_items[0][quantity]': 1,
       success_url: `${origin}/${locale === 'en' ? 'en/' : ''}billing/success/?session_id={CHECKOUT_SESSION_ID}`,
@@ -22,18 +25,23 @@ export async function onRequestPost(context) {
       'tax_id_collection[enabled]': 'true',
       'subscription_data[metadata][navoflo_plan]': plan.code,
       'subscription_data[metadata][navoflo_seats]': seats,
+      'subscription_data[metadata][navoflo_province]': province,
       'metadata[navoflo_plan]': plan.code,
       'metadata[navoflo_seats]': seats,
+      'metadata[navoflo_province]': province,
       'metadata[source]': 'navoflo_web'
     };
+
+    taxRates.forEach((rate, index) => {
+      form[`line_items[0][tax_rates][${index}]`] = rate;
+    });
 
     if (seats > 1) {
       form['line_items[1][price]'] = plan.seatPrice;
       form['line_items[1][quantity]'] = seats - 1;
-    }
-
-    if (String(env.STRIPE_AUTOMATIC_TAX || '').toLowerCase() === 'true') {
-      form['automatic_tax[enabled]'] = 'true';
+      taxRates.forEach((rate, index) => {
+        form[`line_items[1][tax_rates][${index}]`] = rate;
+      });
     }
 
     const session = await stripeRequest(env, '/checkout/sessions', {
