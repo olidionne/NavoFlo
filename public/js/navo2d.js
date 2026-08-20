@@ -1095,6 +1095,32 @@ function trimLineToPoint(line,I,dir,p){
   else line.p1=copyPoint(p);
 }
 
+function lineCornerEndpoint(line,I){
+  return dist(line.p1,I)<=dist(line.p2,I)?line.p1:line.p2;
+}
+function arcEndPoints(arc){
+  return[
+    {x:arc.center.x+arc.radius*Math.cos(arc.start),y:arc.center.y+arc.radius*Math.sin(arc.start)},
+    {x:arc.center.x+arc.radius*Math.cos(arc.end),y:arc.center.y+arc.radius*Math.sin(arc.end)}
+  ];
+}
+function existingFilletArcIds(a,b,I){
+  // If these same two lines were already filleted, their endpoints nearest the
+  // theoretical intersection are the two tangent points of the existing arc.
+  // Replace that connector instead of stacking another ARC on top of it.
+  const ea=lineCornerEndpoint(a,I),eb=lineCornerEndpoint(b,I);
+  const drawingScale=Math.max(1,state.bounds?.width||0,state.bounds?.height||0,dist(ea,I),dist(eb,I));
+  const tol=Math.max(1e-8,drawingScale*1e-7);
+  const near=(p,q)=>dist(p,q)<=tol;
+  const ids=[];
+  for(const e of state.entities){
+    if(e.id===a.id||e.id===b.id||e.type!=='ARC'||!e.center||!(e.radius>=0))continue;
+    const [x,y]=arcEndPoints(e);
+    if((near(x,ea)&&near(y,eb))||(near(x,eb)&&near(y,ea)))ids.push(e.id);
+  }
+  return ids;
+}
+
 function performFillet(a,b,pickA,pickB,r){
   if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'FILLET supporte actuellement deux lignes exactes.':'FILLET currently supports two exact lines.');
   const radius=Number(r);
@@ -1107,8 +1133,14 @@ function performFillet(a,b,pickA,pickB,r){
   const theta=Math.acos(dot);
   if(theta<1e-7||Math.abs(Math.PI-theta)<1e-7)return commandError(FR?'Angle invalide pour un congé.':'Invalid fillet angle.');
 
+  const oldFilletIds=existingFilletArcIds(a,b,I);
+
   if(radius<=1e-12){
     pushHistory();
+    if(oldFilletIds.length){
+      const remove=new Set(oldFilletIds);
+      state.entities=state.entities.filter(e=>!remove.has(e.id));
+    }
     trimLineToPoint(a,I,d1,I);
     trimLineToPoint(b,I,d2,I);
     afterGeometryChange();
@@ -1135,6 +1167,10 @@ function performFillet(a,b,pickA,pickB,r){
   if(positiveSpan(sA,sB)>Math.PI){const tmp=sA;sA=sB;sB=tmp;}
 
   pushHistory();
+  if(oldFilletIds.length){
+    const remove=new Set(oldFilletIds);
+    state.entities=state.entities.filter(e=>!remove.has(e.id));
+  }
   trimLineToPoint(a,I,d1,p1);
   trimLineToPoint(b,I,d2,p2);
   const arc=copyEntityProps(a,'ARC');
@@ -1838,6 +1874,19 @@ function commandEnter(){
     performMirror(false);finishCommand();return;
   }
   if(c.name==='TRIM'||c.name==='EXTEND'||c.name==='OFFSET'){finishCommand();return;}
+  if(c.name==='CHAMFER'&&c.step==='distanceA'){
+    c.data.a=Number.isFinite(Number(c.data.a))?Number(c.data.a):state.chamferA;
+    c.step='distanceB';
+    setCommandPrompt(FR?`CHAMFER Deuxième distance <${fmt(state.chamferB)}>`:`CHAMFER Second distance <${fmt(state.chamferB)}>`);
+    return;
+  }
+  if(c.name==='CHAMFER'&&c.step==='distanceB'){
+    c.data.b=Number.isFinite(Number(c.data.b))?Number(c.data.b):state.chamferB;
+    state.chamferA=c.data.a;state.chamferB=c.data.b;
+    c.step='first';
+    setCommandPrompt(FR?'CHAMFER Sélectionnez la première ligne:':'CHAMFER Select first line:');
+    return;
+  }
   if(c.name==='FILLET'||c.name==='CHAMFER'){finishCommand();return;}
   if(c.name==='ARRAY'&&c.step==='arrayType'){c.name='ARRAYRECT';c.step='columns';setCommandPrompt(FR?'ARRAYRECT Nombre de colonnes <2>:' :'ARRAYRECT Number of columns <2>:');return;}
   if(c.name==='ARRAYRECT'&&c.step==='columns'){c.data.columns=2;c.step='rows';setCommandPrompt(FR?'Nombre de rangées <2>:':'Number of rows <2>:');return;}
@@ -1900,8 +1949,8 @@ function commandText(raw){
     if(c.step==='radiusValue'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);state.filletRadius=n;c.data.radius=n;c.step='first';setCommandPrompt(FR?'FILLET Sélectionnez le premier objet:':'FILLET Select first object:');return;}
   }
   if(c.name==='CHAMFER'){
-    if(c.step==='first'&&(u==='D'||u==='DISTANCE')){c.step='distanceA';setCommandPrompt(FR?'CHAMFER Première distance:':'CHAMFER First distance:');return;}
-    if(c.step==='distanceA'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);c.data.a=n;c.step='distanceB';setCommandPrompt(FR?'CHAMFER Deuxième distance:':'CHAMFER Second distance:');return;}
+    if(c.step==='first'&&(u==='D'||u==='DISTANCE')){c.step='distanceA';setCommandPrompt(FR?`CHAMFER Première distance <${fmt(state.chamferA)}>`:`CHAMFER First distance <${fmt(state.chamferA)}>`);return;}
+    if(c.step==='distanceA'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);c.data.a=n;c.step='distanceB';setCommandPrompt(FR?`CHAMFER Deuxième distance <${fmt(state.chamferB)}>`:`CHAMFER Second distance <${fmt(state.chamferB)}>`);return;}
     if(c.step==='distanceB'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);c.data.b=n;state.chamferA=c.data.a;state.chamferB=n;c.step='first';setCommandPrompt(FR?'CHAMFER Sélectionnez la première ligne:':'CHAMFER Select first line:');return;}
   }
   if(c.name==='LENGTHEN'&&c.step==='delta'){const n=parseNumber(raw);if(!Number.isFinite(n))return commandError(CMDT.valueInvalid);c.data.delta=n;c.step='selectEntity';setCommandPrompt(FR?'LENGTHEN Sélectionnez près de l’extrémité à modifier:':'LENGTHEN Select near endpoint to modify:');return;}
@@ -1972,6 +2021,21 @@ function commandPoint(point,event,fromKeyboard=false){
     const ok=effective==='TRIM'?performTrimAtPoint(hit,point):performExtendAtPoint(hit,point);
     if(ok){setCommandPrompt(c.name==='TRIM'?(FR?'TRIM Sélectionnez une autre portion (Shift=Prolonger) <Entrée>':'TRIM Select another portion (Shift=Extend) <Enter>'):(FR?'EXTEND Sélectionnez un autre objet (Shift=Ajuster) <Entrée>':'EXTEND Select another object (Shift=Trim) <Enter>'));}
     return;
+  }
+  if(c.name==='CHAMFER'&&(c.step==='distanceA'||c.step==='distanceB')){
+    // Convenience compatible with the user's CAD workflow: after D, a click
+    // directly on a line accepts the currently displayed distance defaults and
+    // immediately starts the two-line selection. Numeric entry + Enter remains
+    // available and follows AutoCAD's Dist1 / Dist2 prompts.
+    const hit=event?hitTest(event.clientX,event.clientY):null;
+    if(hit?.type==='LINE'){
+      if(c.step==='distanceA')c.data.a=Number.isFinite(Number(c.data.a))?Number(c.data.a):state.chamferA;
+      c.data.b=Number.isFinite(Number(c.data.b))?Number(c.data.b):state.chamferB;
+      state.chamferA=c.data.a;state.chamferB=c.data.b;
+      c.data.firstId=hit.id;c.data.firstPick=copyPoint(point);c.step='second';
+      setCommandPrompt(FR?'CHAMFER Sélectionnez la deuxième ligne:':'CHAMFER Select second line:');
+      return;
+    }
   }
   if(c.name==='FILLET'||c.name==='CHAMFER'){
     const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);if(!hit)return;
