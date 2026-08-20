@@ -78,7 +78,8 @@ const state={
   ortho:false,polar:true,polarIncrement:45,gridSnap:false,gridSnapStep:1,otrack:true,dyn:true,
   osnapModes:new Set(['end','mid','center','quad','intersection','node']),snapOverride:null,
   trackingPoint:null,trackingSince:0,lastSnap:null,snapCycle:0,snapCandidateKey:'',
-  dynEditing:false,dynField:'distance',dynDistance:null,dynAngle:null,focusMode:false
+  dynEditing:false,dynField:'distance',dynDistance:null,dynAngle:null,focusMode:false,
+  gripEdit:null,hoverGrip:null,gripLimit:100
 };
 
 const UNIT_LABELS={0:'u',1:'in',2:'ft',3:'mi',4:'mm',5:'cm',6:'m',7:'km',8:'µin',9:'mil',10:'yd',11:'Å',12:'nm',13:'µm',14:'dm'};
@@ -390,9 +391,11 @@ function draw(){
   if(state.file){drawEntities();state.cursorPoint=resolveDraftPoint(state.pointer.x,state.pointer.y);}
   drawMeasure();
   drawCommandPreview();
+  drawGripPreview();
   drawDraftingGuides();
   drawSnapMarker();
   drawSelectionBox();
+  drawGrips();
   ctx.restore();
 }
 function worldToScreen(q){const r=E.canvas.getBoundingClientRect();return{x:(q.x-state.view.cx)*state.view.scale+r.width/2,y:(state.view.cy-q.y)*state.view.scale+r.height/2};}
@@ -442,6 +445,138 @@ function drawEntity(e,color,width){
   if(e.type==='POINT'){const s=worldToScreen(e.point);ctx.beginPath();ctx.arc(s.x,s.y,3.2,0,Math.PI*2);ctx.fill();return;}
   if(e.type==='TEXT'){const s=worldToScreen(e.point);ctx.save();ctx.translate(s.x,s.y);ctx.rotate(-e.rotation*Math.PI/180);ctx.font=`${Math.max(8,e.height*state.view.scale)}px ui-monospace,monospace`;ctx.fillText(e.text,0,0);ctx.restore();}
 }
+
+// -----------------------------------------------------------------------------
+// V5.2 — AutoCAD-style grips / direct manipulation
+// Cold grips are blue; the active (hot) grip is red. Grips are shown only on
+// selected objects and are intentionally suppressed on locked layers.
+// -----------------------------------------------------------------------------
+function layerLocked(name){return Boolean((state.layers.get(name)?.flags||0)&4);}
+function gripLabel(kind){return({endpoint:'Endpoint',midpoint:'Midpoint',vertex:'Vertex',segment:'Midpoint',center:'Center',quadrant:'Quadrant',arcStart:'Start',arcEnd:'End',arcMid:'Midpoint',insert:'Insertion'})[kind]||'Grip';}
+function segmentGripPoint(a,b){
+  if(Math.abs(a?.bulge||0)>1e-10){const arc=bulgeArc(a,b,a.bulge);if(arc){const t=arc.start+arc.span/2;return{x:arc.center.x+arc.r*Math.cos(t),y:arc.center.y+arc.r*Math.sin(t)};}}
+  return{x:(a.x+b.x)/2,y:(a.y+b.y)/2};
+}
+function entityGrips(e){
+  if(!e||layerLocked(e.layer))return[];
+  const out=[],add=(id,kind,point,data={})=>out.push({id:`${e.id}:${id}`,entityId:e.id,kind,point:{x:point.x,y:point.y},...data});
+  if(e.type==='LINE'){
+    add('p1','endpoint',e.p1,{role:'p1'});add('p2','endpoint',e.p2,{role:'p2'});
+    add('mid','midpoint',{x:(e.p1.x+e.p2.x)/2,y:(e.p1.y+e.p2.y)/2},{role:'move'});
+  }else if(e.type==='POLYLINE'){
+    const pts=e.points||[];
+    pts.forEach((q,i)=>add(`v${i}`,'vertex',q,{index:i,role:'vertex'}));
+    const segmentCount=Math.max(0,pts.length-1+(e.closed?1:0));
+    for(let i=0;i<segmentCount;i++){
+      const j=(i+1)%pts.length;if(i===j)continue;
+      add(`s${i}`,'segment',segmentGripPoint(pts[i],pts[j]),{index:i,nextIndex:j,role:'segment'});
+    }
+  }else if(e.type==='CIRCLE'){
+    add('c','center',e.center,{role:'move'});
+    for(let i=0;i<4;i++){const a=i*Math.PI/2;add(`q${i}`,'quadrant',{x:e.center.x+e.radius*Math.cos(a),y:e.center.y+e.radius*Math.sin(a)},{role:'radius'});}
+  }else if(e.type==='ARC'){
+    const span=positiveSpan(e.start,e.end),mid=e.start+span/2;
+    add('c','center',e.center,{role:'move'});
+    add('start','arcStart',{x:e.center.x+e.radius*Math.cos(e.start),y:e.center.y+e.radius*Math.sin(e.start)},{role:'arcStart'});
+    add('mid','arcMid',{x:e.center.x+e.radius*Math.cos(mid),y:e.center.y+e.radius*Math.sin(mid)},{role:'radius'});
+    add('end','arcEnd',{x:e.center.x+e.radius*Math.cos(e.end),y:e.center.y+e.radius*Math.sin(e.end)},{role:'arcEnd'});
+  }else if(e.type==='POINT'||e.type==='TEXT')add('ins','insert',e.point,{role:'move'});
+  return out;
+}
+function selectedGrips(){
+  if(!state.selected.size||state.selected.size>state.gripLimit||state.command)return[];
+  const out=[];for(const e of state.entities)if(state.selected.has(e.id))out.push(...entityGrips(e));return out;
+}
+function hitGrip(clientX,clientY){
+  const r=E.canvas.getBoundingClientRect(),x=clientX-r.left,y=clientY-r.top,aperture=9;
+  let best=null,bestD=aperture;
+  for(const g of selectedGrips()){
+    const s=worldToScreen(g.point),d=Math.hypot(s.x-x,s.y-y);
+    if(d<bestD){best=g;bestD=d;}
+  }
+  return best;
+}
+function drawGrips(){
+  const grips=selectedGrips();if(!grips.length)return;
+  const hotId=state.gripEdit?.grip?.id||null,hoverId=state.hoverGrip?.id||null;
+  ctx.save();ctx.lineWidth=1;
+  for(const g of grips){
+    const s=worldToScreen(g.point),hot=g.id===hotId,hover=g.id===hoverId,size=hot?9:8;
+    ctx.fillStyle=hot?'#ff3b30':hover?'#7dc6ff':'#006dff';ctx.strokeStyle=hot?'#ffd0cc':'#b9ddff';
+    ctx.fillRect(Math.round(s.x-size/2)+.5,Math.round(s.y-size/2)+.5,size,size);
+    ctx.strokeRect(Math.round(s.x-size/2)+.5,Math.round(s.y-size/2)+.5,size,size);
+  }
+  if(state.hoverGrip&&!state.gripEdit){
+    const s=worldToScreen(state.hoverGrip.point),label=gripLabel(state.hoverGrip.kind);ctx.font='700 10px ui-monospace,SFMono-Regular,Menlo,monospace';
+    const w=ctx.measureText(label).width+12,x=s.x+10,y=s.y-22;ctx.fillStyle='rgba(5,10,14,.96)';ctx.strokeStyle='rgba(125,198,255,.5)';ctx.fillRect(x,y,w,20);ctx.strokeRect(x+.5,y+.5,w-1,19);ctx.fillStyle='#d9ecff';ctx.fillText(label,x+6,y+14);
+  }
+  ctx.restore();
+}
+function beginGripEdit(grip){
+  const entity=state.entities.find(e=>e.id===grip.entityId);if(!entity)return false;
+  state.gripEdit={entityId:entity.id,grip:{...grip,point:{...grip.point}},original:cloneEntity(entity,false),base:{...grip.point},previewTarget:{...grip.point},dynField:'distance',dynDistance:null,dynAngle:null,armed:true};
+  state.hoverGrip=grip;state.lastSnap=null;state.draftingGuide=null;closeContextMenu();
+  if(E.commandInput){E.commandInput.value='';E.commandInput.placeholder=FR?'Distance / angle du grip':'Grip distance / angle';}
+  return true;
+}
+function cancelGripEdit(log=false){
+  if(!state.gripEdit)return;state.gripEdit=null;state.hoverGrip=null;state.lastSnap=null;state.draftingGuide=null;
+  if(E.commandInput){E.commandInput.value='';E.commandInput.placeholder='';}
+  if(log)commandLog(FR?'GRIP — *Annuler*':'GRIP — *Cancel*');
+}
+function gripTargetFromDynamic(){
+  const g=state.gripEdit;if(!g)return null;const current=g.previewTarget||g.base,dx=current.x-g.base.x,dy=current.y-g.base.y;
+  const d=Number.isFinite(g.dynDistance)?g.dynDistance:Math.hypot(dx,dy),a=Number.isFinite(g.dynAngle)?g.dynAngle*Math.PI/180:Math.atan2(dy,dx);
+  return{x:g.base.x+d*Math.cos(a),y:g.base.y+d*Math.sin(a)};
+}
+function commitGripDynamicField(raw){
+  const g=state.gripEdit,n=parseNumber(raw);if(!g||!Number.isFinite(n))return false;
+  if(g.dynField==='distance'){if(n<0)return false;g.dynDistance=n;}else g.dynAngle=n;return true;
+}
+function cycleGripDynamicField(raw=''){
+  const g=state.gripEdit;if(!g)return false;if(String(raw).trim()&&!commitGripDynamicField(raw))return false;
+  g.dynField=g.dynField==='distance'?'angle':'distance';if(E.commandInput)E.commandInput.value='';return true;
+}
+function resolveGripPoint(clientX,clientY){
+  const g=state.gripEdit;if(!g)return screenToWorld(clientX,clientY);
+  let raw=screenToWorld(clientX,clientY),base=g.base;state.draftingGuide=null;
+  if(state.gridSnap){const step=Math.max(1e-12,state.gridSnapStep);raw={x:Math.round(raw.x/step)*step,y:Math.round(raw.y/step)*step};}
+  if(state.snap){const snap=nearestSnap(clientX,clientY,base);if(snap){state.lastSnap=snap;raw={...snap.point};}else state.lastSnap=null;}
+  if(state.ortho){const dx=raw.x-base.x,dy=raw.y-base.y;raw=Math.abs(dx)>=Math.abs(dy)?{x:raw.x,y:base.y}:{x:base.x,y:raw.y};state.draftingGuide={from:base,to:raw,type:'ortho'};}
+  else if(state.polar){const dx=raw.x-base.x,dy=raw.y-base.y,d=Math.hypot(dx,dy);if(d>1e-12){const inc=state.polarIncrement*Math.PI/180,a=Math.atan2(dy,dx),sa=Math.round(a/inc)*inc;if(Math.abs(normalizeAngle(a-sa))<=5*Math.PI/180){raw={x:base.x+d*Math.cos(sa),y:base.y+d*Math.sin(sa)};state.draftingGuide={from:base,to:raw,type:'polar',angle:sa};}}}
+  g.previewTarget=raw;return raw;
+}
+function applyGripMutation(e,grip,target){
+  const dx=target.x-grip.point.x,dy=target.y-grip.point.y;
+  if(e.type==='LINE'){
+    if(grip.role==='p1'){e.p1.x=target.x;e.p1.y=target.y;}
+    else if(grip.role==='p2'){e.p2.x=target.x;e.p2.y=target.y;}
+    else translateEntity(e,dx,dy);
+  }else if(e.type==='POLYLINE'){
+    if(grip.role==='vertex'&&e.points[grip.index]){e.points[grip.index].x=target.x;e.points[grip.index].y=target.y;}
+    else if(grip.role==='segment'){
+      const a=e.points[grip.index],b=e.points[grip.nextIndex];if(a){a.x+=dx;a.y+=dy;}if(b){b.x+=dx;b.y+=dy;}
+    }
+  }else if(e.type==='CIRCLE'){
+    if(grip.role==='move')translateEntity(e,dx,dy);else e.radius=Math.max(1e-12,dist(e.center,target));
+  }else if(e.type==='ARC'){
+    if(grip.role==='move')translateEntity(e,dx,dy);
+    else if(grip.role==='arcStart')e.start=Math.atan2(target.y-e.center.y,target.x-e.center.x);
+    else if(grip.role==='arcEnd')e.end=Math.atan2(target.y-e.center.y,target.x-e.center.x);
+    else if(grip.role==='radius')e.radius=Math.max(1e-12,dist(e.center,target));
+  }else if(e.type==='POINT'||e.type==='TEXT')translateEntity(e,dx,dy);
+}
+function commitGripEdit(target){
+  const g=state.gripEdit;if(!g)return false;const entity=state.entities.find(e=>e.id===g.entityId);if(!entity){cancelGripEdit();return false;}
+  const finalTarget=target||g.previewTarget||g.base;if(dist(finalTarget,g.base)<1e-12){cancelGripEdit();return false;}
+  pushHistory();applyGripMutation(entity,g.grip,finalTarget);afterGeometryChange();syncSelectionUI();commandLog(`${entity.type} GRIP · ${fmt(finalTarget.x)}, ${fmt(finalTarget.y)}`);cancelGripEdit();return true;
+}
+function previewGripEntity(){
+  const g=state.gripEdit;if(!g)return null;const e=cloneEntity(g.original,false),target=gripTargetFromDynamic()||g.previewTarget||g.base;applyGripMutation(e,g.grip,target);return e;
+}
+function drawGripPreview(){
+  const g=state.gripEdit;if(!g)return;const e=previewGripEntity();if(!e)return;ctx.save();ctx.globalAlpha=.92;ctx.setLineDash([6,4]);drawEntity(e,'#7bc4ff',1.45);ctx.setLineDash([]);ctx.restore();
+}
 function drawMeasure(){
   if(!state.measure.length)return;const pts=[...state.measure];if(pts.length===1&&state.tool==='measure')pts.push(resolveDraftPoint(state.pointer.x,state.pointer.y));if(pts.length<2)return;const a=worldToScreen(pts[0]),b=worldToScreen(pts[1]);ctx.strokeStyle='#35d39a';ctx.fillStyle='#35d39a';ctx.lineWidth=1.5;ctx.setLineDash([6,4]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();ctx.setLineDash([]);for(const q of[a,b]){ctx.beginPath();ctx.arc(q.x,q.y,3.5,0,Math.PI*2);ctx.fill();}
 }
@@ -488,6 +623,23 @@ function pointerDown(ev){
   if(ev.button!==0)return;
   closeContextMenu();
 
+  // A hot grip uses the next click as its destination, matching CAD grip editing.
+  if(state.gripEdit&&!state.command){
+    const target=resolveGripPoint(ev.clientX,ev.clientY);
+    commitGripEdit(target);
+    return;
+  }
+
+  if(!state.command&&state.tool==='select'){
+    const grip=hitGrip(ev.clientX,ev.clientY);
+    if(grip){
+      ev.preventDefault();beginGripEdit(grip);
+      state.drag={mode:'grip',id:ev.pointerId,startX:ev.clientX,startY:ev.clientY,lastX:ev.clientX,lastY:ev.clientY,moved:false};
+      try{E.canvas.setPointerCapture(ev.pointerId)}catch{}
+      return;
+    }
+  }
+
   if(state.command?.selecting||(!state.command&&state.tool==='select')){
     state.drag={
       mode:'select-candidate',
@@ -511,6 +663,12 @@ function pointerMove(ev){
   if(d?.id===ev.pointerId){
     const dx=ev.clientX-(d.lastX??ev.clientX),dy=ev.clientY-(d.lastY??ev.clientY);
     const total=Math.hypot(ev.clientX-(d.startX??ev.clientX),ev.clientY-(d.startY??ev.clientY));
+
+    if(d.mode==='grip'){
+      if(total>3)d.moved=true;
+      if(state.gripEdit)state.gripEdit.previewTarget=resolveGripPoint(ev.clientX,ev.clientY);
+      return;
+    }
 
     if(d.mode==='pan'){
       if(total>2)d.moved=true;
@@ -536,8 +694,13 @@ function pointerMove(ev){
     if(total>3)d.moved=true;
   }
 
+  if(state.gripEdit&&!d&&!state.command){state.gripEdit.previewTarget=resolveGripPoint(ev.clientX,ev.clientY);return;}
+
+  if(!state.command&&state.tool==='select'&&!d){state.hoverGrip=hitGrip(ev.clientX,ev.clientY);}
+  else if(!state.gripEdit)state.hoverGrip=null;
+
   if((state.command?.selecting||(!state.command&&state.tool==='select'))&&(!d||d.mode==='select-candidate')){
-    const hit=hitTest(ev.clientX,ev.clientY);
+    const hit=state.hoverGrip?null:hitTest(ev.clientX,ev.clientY);
     state.hover=hit?.id||null;
   }
 }
@@ -548,6 +711,12 @@ function pointerUp(ev){
   state.drag=null;
   E.workspace.classList.remove('is-panning');
   try{E.canvas.releasePointerCapture(ev.pointerId)}catch{}
+
+  if(d.mode==='grip'){
+    if(d.moved&&state.gripEdit){const target=resolveGripPoint(ev.clientX,ev.clientY);commitGripEdit(target);}
+    // A click without drag leaves the grip hot; the next click sets its destination.
+    return;
+  }
 
   if(d.mode==='pan')return;
 
@@ -579,6 +748,7 @@ function pointerUp(ev){
     }else if(!ev.shiftKey){
       state.selected.clear();
     }
+    if(state.gripEdit&&!state.selected.has(state.gripEdit.entityId))cancelGripEdit();
     syncSelectionUI();
     return;
   }
@@ -715,7 +885,7 @@ function legacyEntitySnapPoints(e){
   if(e.type==='POINT'||e.type==='TEXT')return[{point:e.point,type:'point'}];return[];
 }
 
-function setTool(tool){state.tool=tool;state.hover=null;state.moveBase=null;if(tool!=='measure')clearMeasure();for(const [el,name] of [[E.select,'select'],[E.measure,'measure'],[E.move,'move']])el.classList.toggle('active',tool===name);E.workspace.classList.remove('tool-select','tool-measure','tool-move','tool-pan');E.workspace.classList.add(`tool-${tool}`);if(tool==='measure'){E.measureCard.hidden=false;E.measureHelp.textContent=T.firstPoint;}}
+function setTool(tool){if(tool!=='select')cancelGripEdit(false);state.tool=tool;state.hover=null;state.hoverGrip=null;state.moveBase=null;if(tool!=='measure')clearMeasure();for(const [el,name] of [[E.select,'select'],[E.measure,'measure'],[E.move,'move']])el.classList.toggle('active',tool===name);E.workspace.classList.remove('tool-select','tool-measure','tool-move','tool-pan');E.workspace.classList.add(`tool-${tool}`);if(tool==='measure'){E.measureCard.hidden=false;E.measureHelp.textContent=T.firstPoint;}}
 function clearMeasure(){state.measure=[];E.measureCard.hidden=true;E.measureMain.textContent='—';E.measureDx.textContent='—';E.measureDy.textContent='—';E.measureHelp.textContent=T.firstPoint;}
 function updateMeasureCard(){if(state.measure.length<2)return;const[a,b]=state.measure,dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy);E.measureMain.textContent=formatLength(d);E.measureDx.textContent=formatLength(dx);E.measureDy.textContent=formatLength(dy);E.measureHelp.textContent=`(${fmt(a.x)}, ${fmt(a.y)}) → (${fmt(b.x)}, ${fmt(b.y)})`;}
 function formatLength(v){return`${fmt(v)} ${state.unitLabel}`;}
@@ -836,9 +1006,9 @@ function renderLayerList(){
 }
 
 function pushHistory(){state.history.push(JSON.stringify(state.entities));if(state.history.length>30)state.history.shift();state.future=[];syncHistoryButtons();state.dirty=true;}
-function undo(){if(!state.history.length)return;state.future.push(JSON.stringify(state.entities));state.entities=JSON.parse(state.history.pop());state.selected.clear();rebuildLayers();recomputeBounds();renderLayerList();syncUI();}
-function redo(){if(!state.future.length)return;state.history.push(JSON.stringify(state.entities));state.entities=JSON.parse(state.future.pop());state.selected.clear();rebuildLayers();recomputeBounds();renderLayerList();syncUI();}
-function deleteSelected(){if(!state.selected.size)return;pushHistory();state.entities=state.entities.filter(e=>!state.selected.has(e.id));state.selected.clear();rebuildLayers();recomputeBounds();renderLayerList();syncUI();toast(T.deleted);}
+function undo(){cancelGripEdit(false);if(!state.history.length)return;state.future.push(JSON.stringify(state.entities));state.entities=JSON.parse(state.history.pop());state.selected.clear();rebuildLayers();recomputeBounds();renderLayerList();syncUI();}
+function redo(){cancelGripEdit(false);if(!state.future.length)return;state.history.push(JSON.stringify(state.entities));state.entities=JSON.parse(state.future.pop());state.selected.clear();rebuildLayers();recomputeBounds();renderLayerList();syncUI();}
+function deleteSelected(){cancelGripEdit(false);if(!state.selected.size)return;pushHistory();state.entities=state.entities.filter(e=>!state.selected.has(e.id));state.selected.clear();rebuildLayers();recomputeBounds();renderLayerList();syncUI();toast(T.deleted);}
 function translateSelected(dx,dy){for(const e of state.entities)if(state.selected.has(e.id))translateEntity(e,dx,dy);recomputeBounds();syncUI();}
 function translateEntity(e,dx,dy){const mv=q=>{q.x+=dx;q.y+=dy;};if(e.type==='LINE'){mv(e.p1);mv(e.p2);}else if(e.type==='POLYLINE'){for(const q of e.points)mv(q);}else if(e.type==='CIRCLE'||e.type==='ARC')mv(e.center);else if(e.type==='POINT'||e.type==='TEXT')mv(e.point);}
 
@@ -855,12 +1025,13 @@ function renderProperties(){
   recomputeBounds();E.propSize.textContent=state.bounds?`${fmt(state.bounds.width)} × ${fmt(state.bounds.height)} ${state.unitLabel}`:'—';syncSelectionUI();renderAnalysis();
 }
 function syncSelectionUI(){
+  if(state.gripEdit&&!state.selected.has(state.gripEdit.entityId))cancelGripEdit(false);
   E.del.disabled=!state.selected.size;E.move.disabled=!state.selected.size;const sel=state.entities.filter(e=>state.selected.has(e.id));if(!sel.length)E.selectionInfo.textContent=T.noSelection;else if(sel.length===1){const e=sel[0];let s=`${e.rawType||e.type}\nLayer: ${e.layer}`;if(e.type==='LINE')s+=`\nLength: ${formatLength(dist(e.p1,e.p2))}`;if(e.type==='CIRCLE')s+=`\nØ ${formatLength(e.radius*2)}`;if(e.type==='ARC')s+=`\nR ${formatLength(e.radius)}`;if(e.approx)s+=`\n≈ ${FR?'géométrie approximée':'approximated geometry'}`;E.selectionInfo.textContent=s;}else E.selectionInfo.textContent=`${sel.length} ${T.selected}`;
   syncLayerPicker();
 }
 function syncHistoryButtons(){E.undo.disabled=!state.history.length;E.redo.disabled=!state.future.length;}
 function syncUI(){const has=Boolean(state.file);for(const b of[E.select,E.measure,E.fit,E.grid,E.snap,E.layers,E.analyze,E.props,E.export,E.close,E.layerSelect].filter(Boolean))b.disabled=!has;E.statusFile.textContent=state.file?.name||T.noDxf;E.statusEntities.textContent=has?`${state.entities.length} ${T.entities}`:'—';E.statusUnits.textContent=has?state.unitLabel:'—';if(E.currentLayer)E.currentLayer.textContent=has?`Layer: ${state.activeLayer||'0'}`:'Layer: —';E.empty.hidden=has;syncHistoryButtons();renderProperties();syncDraftingUI();syncLayerPicker();updateCommandPrompt();}
-function clearFile(){cancelCommand(false);state.file=null;state.dxf=null;state.rawText='';state.entities=[];state.layers.clear();state.layerDefinitions.clear();state.unsupported=[];state.selected.clear();state.history=[];state.future=[];state.analysis=null;state.bounds=null;state.selectionBox=null;closeContextMenu();clearMeasure();syncUI();E.layerDrawer.hidden=true;E.propDrawer.hidden=true;}
+function clearFile(){cancelGripEdit(false);cancelCommand(false);state.file=null;state.dxf=null;state.rawText='';state.entities=[];state.layers.clear();state.layerDefinitions.clear();state.unsupported=[];state.selected.clear();state.history=[];state.future=[];state.analysis=null;state.bounds=null;state.selectionBox=null;closeContextMenu();clearMeasure();syncUI();E.layerDrawer.hidden=true;E.propDrawer.hidden=true;}
 function toggleDrawer(which,force){const el=which==='layers'?E.layerDrawer:E.propDrawer,other=which==='layers'?E.propDrawer:E.layerDrawer;const show=force??el.hidden;el.hidden=!show;if(show)other.hidden=true;if(which==='properties'&&show)renderProperties();}
 
 function exportDxf(){
@@ -1144,6 +1315,11 @@ function handleGlobalKeyDown(event){
   const target=event.target;
   const editing=target===E.commandInput||target?.matches?.('input,select,textarea,[contenteditable="true"]');
 
+  if(state.gripEdit&&event.key==='Tab'){event.preventDefault();cycleGripDynamicField(E.commandInput?.value||'');return;}
+  if(state.gripEdit&&event.key==='Escape'){event.preventDefault();cancelGripEdit(true);try{E.canvas.focus()}catch{}return;}
+  if(state.gripEdit&&(event.key==='Enter'||event.key===' ')){event.preventDefault();const raw=(E.commandInput?.value||'').trim();if(raw&&!commitGripDynamicField(raw))return;commitGripEdit(gripTargetFromDynamic());return;}
+  if(state.gripEdit&&!editing&&event.key.length===1&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&/[0-9.+\-]/.test(event.key)){event.preventDefault();E.commandInput.focus();E.commandInput.value=event.key;return;}
+
   if(event.key==='Tab'&&state.command&&commandNeedsPoint(state.command)){
     event.preventDefault();
     if(dynamicDimensionAvailable())cycleDynamicField('');
@@ -1198,6 +1374,11 @@ function handleGlobalKeyDown(event){
 }
 
 function handleCommandInputKeyDown(event){
+  if(state.gripEdit){
+    if(event.key==='Tab'){event.preventDefault();cycleGripDynamicField(E.commandInput.value);return;}
+    if(event.key==='Escape'){event.preventDefault();E.commandInput.value='';cancelGripEdit(true);E.canvas.focus();return;}
+    if(event.key==='Enter'||event.key===' '){event.preventDefault();const raw=E.commandInput.value.trim();E.commandInput.value='';if(raw&&!commitGripDynamicField(raw)){commandError(CMDT.valueInvalid);return;}commitGripEdit(gripTargetFromDynamic());E.canvas.focus();return;}
+  }
   if(event.key==='Tab'&&state.command&&commandNeedsPoint(state.command)){
     event.preventDefault();
     if(dynamicDimensionAvailable())cycleDynamicField(E.commandInput.value);
@@ -1223,6 +1404,7 @@ function handleCommandInputKeyDown(event){
 function submitCommandInput(){
   const raw=E.commandInput.value.trim();
   E.commandInput.value='';
+  if(state.gripEdit){if(raw&&!commitGripDynamicField(raw)){commandError(CMDT.valueInvalid);return;}commitGripEdit(gripTargetFromDynamic());return;}
   if(state.command){
     if(!raw){commandEnter();return;}
     if(state.dynEditing&&dynamicDimensionAvailable()&&submitDynamicValue(raw))return;
@@ -1822,7 +2004,13 @@ function drawDraftingGuides(){
   const p=state.cursorPoint||resolveDraftPoint(state.pointer.x,state.pointer.y),ref=commandReferencePoint(),r=E.canvas.getBoundingClientRect();
   const x=state.pointer.x-r.left+18,y=state.pointer.y-r.top+20;
   ctx.save();ctx.font='800 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
-  if(ref&&dynamicDimensionAvailable()){
+  if(state.gripEdit){
+    const g=state.gripEdit,target=gripTargetFromDynamic()||g.previewTarget||g.base,dx=target.x-g.base.x,dy=target.y-g.base.y,input=(E.commandInput?.value||'').trim();
+    let dText=Number.isFinite(g.dynDistance)?fmt(g.dynDistance):fmt(Math.hypot(dx,dy)),aText=Number.isFinite(g.dynAngle)?fmt(g.dynAngle):fmt(radToDeg(Math.atan2(dy,dx)));
+    if(input){if(g.dynField==='distance')dText=input;else aText=input;}
+    const fields=[{key:'distance',text:`D ${dText}`},{key:'angle',text:`A ${aText}°`}];let ox=x;
+    for(const field of fields){const active=g.dynField===field.key,w=ctx.measureText(field.text).width+16;ctx.fillStyle=active?'rgba(255,59,48,.28)':'rgba(5,10,14,.96)';ctx.strokeStyle=active?'rgba(255,120,110,.95)':'rgba(0,109,255,.5)';ctx.fillRect(ox,y,w,24);ctx.strokeRect(ox+.5,y+.5,w-1,23);ctx.fillStyle='#fff';ctx.fillText(field.text,ox+8,y+16);ox+=w+5;}
+  }else if(ref&&dynamicDimensionAvailable()){
     const dx=p.x-ref.x,dy=p.y-ref.y,input=(E.commandInput?.value||'').trim();
     let dText=Number.isFinite(state.dynDistance)?fmt(state.dynDistance):fmt(Math.hypot(dx,dy));
     let aText=Number.isFinite(state.dynAngle)?fmt(state.dynAngle):fmt(radToDeg(Math.atan2(dy,dx)));
