@@ -59,20 +59,7 @@
           <button class="n2-tool" type="button" data-command="CHAMFER" title="Chamfer · CHA"><span class="n2-icon">◿</span><span>Chamfer</span></button>
           <button class="n2-tool" type="button" data-command="OFFSET" title="Offset · O"><span class="n2-icon">⇆</span><span>Offset</span></button>
           <button class="n2-tool" type="button" data-command="STRETCH" title="Stretch · S"><span class="n2-icon">⇱</span><span>Stretch</span></button>
-          <details class="n2-ribbon-menu">
-            <summary class="n2-tool"><span class="n2-icon">⋯</span><span>More</span></summary>
-            <div class="n2-ribbon-menu-pop">
-              <button type="button" data-command="ARRAYRECT"><b>AR</b><span>Rectangular array</span></button>
-              <button type="button" data-command="ARRAYPOLAR"><b>AR</b><span>Polar array</span></button>
-              <button type="button" data-command="BREAK"><b>BR</b><span>Break</span></button>
-              <button type="button" data-command="BREAKATPOINT"><b>BR</b><span>Break at point</span></button>
-              <button type="button" data-command="LENGTHEN"><b>LEN</b><span>Lengthen</span></button>
-              <button type="button" data-command="PEDIT"><b>PE</b><span>Edit polyline</span></button>
-              <button type="button" data-command="JOIN"><b>J</b><span>Join</span></button>
-              <button type="button" data-command="EXPLODE"><b>X</b><span>Explode</span></button>
-              <button type="button" data-command="SCALE"><b>SC</b><span>Scale</span></button>
-            </div>
-          </details>
+          <button id="n2-more-toggle" class="n2-tool" type="button"><span class="n2-icon">⋯</span><span>More</span></button>
         </div>
         <small>MODIFY</small>
       </section>
@@ -113,6 +100,18 @@
         </div>
         <small>VUE</small>
       </section>
+    </div>
+
+    <div id="n2-more-menu" class="n2-ribbon-menu-pop n2-ribbon-menu-portal" hidden>
+      <button type="button" data-command="ARRAYRECT"><b>AR</b><span>Rectangular array</span></button>
+              <button type="button" data-command="ARRAYPOLAR"><b>AR</b><span>Polar array</span></button>
+              <button type="button" data-command="BREAK"><b>BR</b><span>Break</span></button>
+              <button type="button" data-command="BREAKATPOINT"><b>BR</b><span>Break at point</span></button>
+              <button type="button" data-command="LENGTHEN"><b>LEN</b><span>Lengthen</span></button>
+              <button type="button" data-command="PEDIT"><b>PE</b><span>Edit polyline</span></button>
+              <button type="button" data-command="JOIN"><b>J</b><span>Join</span></button>
+              <button type="button" data-command="EXPLODE"><b>X</b><span>Explode</span></button>
+              <button type="button" data-command="SCALE"><b>SC</b><span>Scale</span></button>
     </div>
 
     <div id="n2-empty" class="n2-empty">

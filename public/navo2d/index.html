@@ -59,20 +59,7 @@
           <button class="n2-tool" type="button" data-command="CHAMFER" title="Chanfrein · CHA"><span class="n2-icon">◿</span><span>Chanfrein</span></button>
           <button class="n2-tool" type="button" data-command="OFFSET" title="Décalage · O"><span class="n2-icon">⇆</span><span>Décalage</span></button>
           <button class="n2-tool" type="button" data-command="STRETCH" title="Étirer · S"><span class="n2-icon">⇱</span><span>Étirer</span></button>
-          <details class="n2-ribbon-menu">
-            <summary class="n2-tool"><span class="n2-icon">⋯</span><span>Plus</span></summary>
-            <div class="n2-ribbon-menu-pop">
-              <button type="button" data-command="ARRAYRECT"><b>AR</b><span>Réseau rectangulaire</span></button>
-              <button type="button" data-command="ARRAYPOLAR"><b>AR</b><span>Réseau polaire</span></button>
-              <button type="button" data-command="BREAK"><b>BR</b><span>Couper / Break</span></button>
-              <button type="button" data-command="BREAKATPOINT"><b>BR</b><span>Couper au point</span></button>
-              <button type="button" data-command="LENGTHEN"><b>LEN</b><span>Modifier longueur</span></button>
-              <button type="button" data-command="PEDIT"><b>PE</b><span>Éditer polyligne</span></button>
-              <button type="button" data-command="JOIN"><b>J</b><span>Joindre</span></button>
-              <button type="button" data-command="EXPLODE"><b>X</b><span>Décomposer</span></button>
-              <button type="button" data-command="SCALE"><b>SC</b><span>Échelle</span></button>
-            </div>
-          </details>
+          <button id="n2-more-toggle" class="n2-tool" type="button"><span class="n2-icon">⋯</span><span>Plus</span></button>
         </div>
         <small>MODIFIER</small>
       </section>
@@ -113,6 +100,18 @@
         </div>
         <small>VUE</small>
       </section>
+    </div>
+
+    <div id="n2-more-menu" class="n2-ribbon-menu-pop n2-ribbon-menu-portal" hidden>
+      <button type="button" data-command="ARRAYRECT"><b>AR</b><span>Réseau rectangulaire</span></button>
+              <button type="button" data-command="ARRAYPOLAR"><b>AR</b><span>Réseau polaire</span></button>
+              <button type="button" data-command="BREAK"><b>BR</b><span>Couper / Break</span></button>
+              <button type="button" data-command="BREAKATPOINT"><b>BR</b><span>Couper au point</span></button>
+              <button type="button" data-command="LENGTHEN"><b>LEN</b><span>Modifier longueur</span></button>
+              <button type="button" data-command="PEDIT"><b>PE</b><span>Éditer polyligne</span></button>
+              <button type="button" data-command="JOIN"><b>J</b><span>Joindre</span></button>
+              <button type="button" data-command="EXPLODE"><b>X</b><span>Décomposer</span></button>
+              <button type="button" data-command="SCALE"><b>SC</b><span>Échelle</span></button>
     </div>
 
     <div id="n2-empty" class="n2-empty">

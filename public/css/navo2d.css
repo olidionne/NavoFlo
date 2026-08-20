@@ -189,3 +189,23 @@ body.n2-focus-mode{overflow:hidden}
 .n2-workspace.is-fullscreen .n2-toolbar{top:5px;left:5px;right:5px}.n2-workspace.is-fullscreen .n2-drawer{top:99px}
 @media(max-width:1500px){.n2-ribbon .n2-tool span:not(.n2-icon){display:none}.n2-ribbon .n2-tool{min-width:34px;padding:4px 6px}.n2-group-layer{min-width:190px}}
 @media(max-width:1000px){.n2-toolbar.n2-ribbon{min-height:70px}.n2-ribbon-group{padding-bottom:13px}.n2-ribbon-group>small{font-size:6px}.n2-empty{inset:86px 0 34px}.n2-drawer{top:88px}}
+
+
+/* V6.1 — CAD interaction polish */
+#n2-canvas{cursor:none}
+.n2-workspace.is-panning #n2-canvas{cursor:grabbing}
+.n2-ribbon-menu-portal{
+  position:fixed!important;
+  z-index:900!important;
+  top:auto;
+  right:auto;
+  width:240px;
+  max-height:min(70vh,520px);
+  overflow-y:auto;
+  overflow-x:hidden;
+  scrollbar-width:thin;
+  background:#0b1218;
+  box-shadow:0 22px 60px rgba(0,0,0,.58);
+}
+.n2-ribbon-menu-portal[hidden]{display:none!important}
+.n2-ribbon-menu-portal button{position:relative;z-index:1}

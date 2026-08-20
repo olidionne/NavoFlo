@@ -64,7 +64,7 @@ const E={
   osnapPanel:$('n2-osnap-panel'),osnapClose:$('n2-osnap-close'),
   statusGrid:$('n2-status-grid'),statusGridSnap:$('n2-status-gridsnap'),statusOrtho:$('n2-status-ortho'),statusPolar:$('n2-status-polar'),
   statusOsnap:$('n2-status-osnap'),statusOtrack:$('n2-status-otrack'),statusDyn:$('n2-status-dyn'),polarAngle:$('n2-polar-angle'),
-  layerSelect:$('n2-layer-select'),layerSwatch:$('n2-layer-swatch')
+  layerSelect:$('n2-layer-select'),layerSwatch:$('n2-layer-swatch'),moreToggle:$('n2-more-toggle'),moreMenu:$('n2-more-menu')
 };
 
 const ctx=E.canvas.getContext('2d',{alpha:false});
@@ -79,7 +79,7 @@ const state={
   osnapModes:new Set(['end','mid','center','quad','intersection','nearest','node']),snapOverride:null,
   trackingPoint:null,trackingSince:0,lastSnap:null,snapCycle:0,snapCandidateKey:'',
   dynEditing:false,dynField:'distance',dynDistance:null,dynAngle:null,focusMode:false,filletRadius:0,chamferA:0,chamferB:0,trimExtendQuick:true,
-  gripEdit:null,hoverGrip:null,gripLimit:100
+  gripEdit:null,hoverGrip:null,gripLimit:100,trimBrush:null,lastCrossingRect:null,pickboxSize:9
 };
 
 const UNIT_LABELS={0:'u',1:'in',2:'ft',3:'mi',4:'mm',5:'cm',6:'m',7:'km',8:'µin',9:'mil',10:'yd',11:'Å',12:'nm',13:'µm',14:'dm'};
@@ -123,7 +123,19 @@ function bindUI(){
   document.querySelectorAll('[data-close-drawer]').forEach(b=>b.addEventListener('click',()=>toggleDrawer(b.dataset.closeDrawer,false)));
   document.querySelectorAll('[data-assign-layer]').forEach(b=>b.addEventListener('click',()=>assignSelectedLayer(b.dataset.assignLayer)));
 
-  document.querySelectorAll('[data-command]').forEach(b=>b.addEventListener('click',()=>{startCommand(b.dataset.command);b.closest('details')?.removeAttribute('open');}));
+  document.querySelectorAll('[data-command]').forEach(b=>b.addEventListener('click',()=>{
+    startCommand(b.dataset.command);
+    hideMoreMenu();
+  }));
+  E.moreToggle?.addEventListener('click',event=>{
+    event.stopPropagation();
+    if(E.moreMenu?.hidden)showMoreMenu();else hideMoreMenu();
+  });
+  addEventListener('pointerdown',event=>{
+    if(!E.moreMenu||E.moreMenu.hidden)return;
+    if(E.moreMenu.contains(event.target)||E.moreToggle?.contains(event.target))return;
+    hideMoreMenu();
+  });
   E.commandInput.addEventListener('keydown',handleCommandInputKeyDown);
   E.commandInput.addEventListener('input',()=>{E.commandInput.value=E.commandInput.value;});
   E.osnapClose?.addEventListener('click',()=>E.osnapPanel.hidden=true);
@@ -395,7 +407,9 @@ function draw(){
   drawDraftingGuides();
   drawSnapMarker();
   drawSelectionBox();
+  drawTrimBrush();
   drawGrips();
+  drawCadCursor();
   ctx.restore();
 }
 function worldToScreen(q){const r=E.canvas.getBoundingClientRect();return{x:(q.x-state.view.cx)*state.view.scale+r.width/2,y:(state.view.cy-q.y)*state.view.scale+r.height/2};}
@@ -605,6 +619,82 @@ function drawSelectionBox(){
   ctx.restore();
 }
 
+function drawCadCursor(){
+  if(!state.file)return;
+  const r=E.canvas.getBoundingClientRect(),x=state.pointer.x-r.left,y=state.pointer.y-r.top;
+  if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>r.width||y>r.height)return;
+  const selecting=Boolean(
+    state.command?.selecting ||
+    (!state.command&&state.tool==='select') ||
+    (state.command&&['TRIM','EXTEND','FILLET','CHAMFER','BREAK','BREAKATPOINT','LENGTHEN','OFFSET'].includes(state.command.name))
+  );
+  ctx.save();
+  ctx.strokeStyle='rgba(230,239,244,.94)';
+  ctx.lineWidth=1;
+  const arm=18;
+  ctx.beginPath();ctx.moveTo(x-arm,y+.5);ctx.lineTo(x+arm,y+.5);ctx.moveTo(x+.5,y-arm);ctx.lineTo(x+.5,y+arm);ctx.stroke();
+  if(selecting){
+    const s=Math.max(6,state.pickboxSize||9);
+    ctx.strokeStyle=state.hover?'#7bc4ff':'rgba(230,239,244,.96)';
+    ctx.strokeRect(Math.round(x-s/2)+.5,Math.round(y-s/2)+.5,s,s);
+  }
+  ctx.restore();
+}
+function drawTrimBrush(){
+  const brush=state.trimBrush;
+  if(!brush?.points?.length)return;
+  ctx.save();
+  ctx.strokeStyle=brush.mode==='EXTEND'?'rgba(78,226,151,.96)':'rgba(255,111,105,.96)';
+  ctx.lineWidth=2;
+  ctx.setLineDash([5,4]);
+  ctx.beginPath();
+  brush.points.forEach((p,i)=>{const s=worldToScreen(p);if(i)ctx.lineTo(s.x,s.y);else ctx.moveTo(s.x,s.y);});
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+function strokeEntityIntersection(entity,a,b){
+  let best=null,bestT=Infinity;
+  const vx=b.x-a.x,vy=b.y-a.y,l2=vx*vx+vy*vy;
+  const consider=p=>{
+    if(!p)return;
+    const t=l2>1e-20?((p.x-a.x)*vx+(p.y-a.y)*vy)/l2:0;
+    if(t>=-1e-8&&t<=1+1e-8&&t<bestT){bestT=t;best=p;}
+  };
+  if(entity.type==='CIRCLE'||entity.type==='ARC'){
+    for(const p of lineCircleIntersections(a,b,entity.center,entity.radius))if(pointOnArcIfNeeded(p,entity))consider(p);
+  }else{
+    const samples=selectionSamples(entity);
+    for(const [p1,p2] of selectionSegments(entity,samples))consider(lineLineIntersectionPoint(a,b,p1,p2));
+  }
+  return best;
+}
+function processTrimBrushSegment(a,b,drag,shiftKey=false){
+  if(!state.command||!['TRIM','EXTEND'].includes(state.command.name))return;
+  const effective=shiftKey?(state.command.name==='TRIM'?'EXTEND':'TRIM'):state.command.name;
+  const snapshot=[...state.entities];
+  for(const entity of snapshot){
+    if(!layerVisible(entity.layer)||drag.processed.has(entity.id))continue;
+    const pick=strokeEntityIntersection(entity,a,b);
+    if(!pick)continue;
+    let supported=effective==='TRIM'?['LINE','CIRCLE','ARC'].includes(entity.type):['LINE','POLYLINE'].includes(entity.type);
+    if(!supported)continue;
+    if(!drag.historyPushed){pushHistory();drag.historyPushed=true;}
+    const ok=effective==='TRIM'
+      ?performTrimAtPoint(entity,pick,{history:false,silent:true,quiet:true})
+      :performExtendAtPoint(entity,pick,{history:false,silent:true,quiet:true});
+    if(ok)drag.processed.add(entity.id);
+  }
+}
+function showMoreMenu(){
+  if(!E.moreMenu||!E.moreToggle)return;
+  const r=E.moreToggle.getBoundingClientRect();
+  E.moreMenu.hidden=false;
+  E.moreMenu.style.left=`${Math.max(8,Math.min(r.left,innerWidth-E.moreMenu.offsetWidth-8))}px`;
+  E.moreMenu.style.top=`${Math.min(r.bottom+4,innerHeight-E.moreMenu.offsetHeight-8)}px`;
+}
+function hideMoreMenu(){if(E.moreMenu)E.moreMenu.hidden=true;}
+
 function pointerDown(ev){
   if(!state.file)return;
   state.pointer={x:ev.clientX,y:ev.clientY};
@@ -622,6 +712,14 @@ function pointerDown(ev){
 
   if(ev.button!==0)return;
   closeContextMenu();
+
+  if(state.command&&['TRIM','EXTEND'].includes(state.command.name)&&state.command.step==='pick'){
+    const raw=screenToWorld(ev.clientX,ev.clientY);
+    state.drag={mode:'trim-brush-candidate',id:ev.pointerId,startX:ev.clientX,startY:ev.clientY,lastX:ev.clientX,lastY:ev.clientY,moved:false,points:[raw],processed:new Set(),historyPushed:false,shift:Boolean(ev.shiftKey)};
+    state.trimBrush={mode:state.command.name,points:[raw]};
+    try{E.canvas.setPointerCapture(ev.pointerId)}catch{}
+    return;
+  }
 
   // A hot grip uses the next click as its destination, matching CAD grip editing.
   if(state.gripEdit&&!state.command){
@@ -663,6 +761,18 @@ function pointerMove(ev){
   if(d?.id===ev.pointerId){
     const dx=ev.clientX-(d.lastX??ev.clientX),dy=ev.clientY-(d.lastY??ev.clientY);
     const total=Math.hypot(ev.clientX-(d.startX??ev.clientX),ev.clientY-(d.startY??ev.clientY));
+
+    if(d.mode==='trim-brush-candidate'||d.mode==='trim-brush'){
+      if(total>3){d.moved=true;d.mode='trim-brush';}
+      const next=screenToWorld(ev.clientX,ev.clientY),prev=d.points[d.points.length-1];
+      if(d.mode==='trim-brush'&&dist(prev,next)>=2/state.view.scale){
+        processTrimBrushSegment(prev,next,d,Boolean(ev.shiftKey)||d.shift);
+        d.points.push(next);
+        if(state.trimBrush)state.trimBrush.points=[...d.points];
+      }
+      d.lastX=ev.clientX;d.lastY=ev.clientY;
+      return;
+    }
 
     if(d.mode==='grip'){
       if(total>3)d.moved=true;
@@ -711,6 +821,17 @@ function pointerUp(ev){
   state.drag=null;
   E.workspace.classList.remove('is-panning');
   try{E.canvas.releasePointerCapture(ev.pointerId)}catch{}
+
+  if(d.mode==='trim-brush'||d.mode==='trim-brush-candidate'){
+    state.trimBrush=null;
+    if(d.mode==='trim-brush'){
+      if(d.historyPushed){afterGeometryChange();commandLog(`${state.command?.name||'TRIM'} · ${d.processed.size} ${FR?'objet(s) traité(s)':'object(s) processed'}`);}
+      return;
+    }
+    const raw=screenToWorld(ev.clientX,ev.clientY);
+    commandPoint(raw,ev);
+    return;
+  }
 
   if(d.mode==='grip'){
     if(d.moved&&state.gripEdit){const target=resolveGripPoint(ev.clientX,ev.clientY);commitGripEdit(target);}
@@ -777,6 +898,7 @@ function selectByBox(box,subtract=false){
   const a=screenToWorld(box.x1,box.y1),b=screenToWorld(box.x2,box.y2);
   const rect={minX:Math.min(a.x,b.x),maxX:Math.max(a.x,b.x),minY:Math.min(a.y,b.y),maxY:Math.max(a.y,b.y)};
   const matches=[];
+  if(crossing)state.lastCrossingRect={...rect};
   if(state.command?.name==='STRETCH'&&crossing)state.command.data.stretchRect={...rect};
 
   for(const entity of state.entities){
@@ -908,22 +1030,22 @@ function uniqueNumbers(values,tol=1e-8){const a=[...values].filter(Number.isFini
 function copyEntityProps(source,type){const e=cloneEntity(source,true);e.type=type;e.rawType=type;delete e.p1;delete e.p2;delete e.points;delete e.center;delete e.radius;delete e.start;delete e.end;delete e.text;delete e.point;return e;}
 function replaceEntityWith(id,replacements){state.entities=state.entities.filter(e=>e.id!==id);state.entities.push(...replacements);state.selected.delete(id);}
 function intersectionsWithEntity(target){const out=[];for(const other of state.entities){if(other.id===target.id||!layerVisible(other.layer))continue;for(const p of entityIntersections(target,other))out.push(p);}return out;}
-function performTrimAtPoint(entity,pick){
+function performTrimAtPoint(entity,pick,opts={}){
   if(!entity)return false;
   if(entity.type==='LINE'){
-    const ts=uniqueNumbers(intersectionsWithEntity(entity).map(p=>lineParam(p,entity.p1,entity.p2)).filter(t=>t>1e-8&&t<1-1e-8));if(!ts.length)return commandError(FR?'Aucune arête de coupe intersectée.':'No cutting edge intersects this object.');
+    const ts=uniqueNumbers(intersectionsWithEntity(entity).map(p=>lineParam(p,entity.p1,entity.p2)).filter(t=>t>1e-8&&t<1-1e-8));if(!ts.length)return opts.quiet?false:commandError(FR?'Aucune arête de coupe intersectée.':'No cutting edge intersects this object.');
     const tc=Math.max(0,Math.min(1,lineParam(projectPointToLine(pick,entity.p1,entity.p2,true),entity.p1,entity.p2))),cuts=[0,...ts,1];let k=0;for(let i=0;i<cuts.length-1;i++)if(tc>=cuts[i]-1e-9&&tc<=cuts[i+1]+1e-9){k=i;break;}const lo=cuts[k],hi=cuts[k+1],v={x:entity.p2.x-entity.p1.x,y:entity.p2.y-entity.p1.y},pt=t=>({x:entity.p1.x+v.x*t,y:entity.p1.y+v.y*t}),repl=[];
-    if(lo>1e-8){const n=copyEntityProps(entity,'LINE');n.p1=copyPoint(entity.p1);n.p2=pt(lo);repl.push(n);}if(hi<1-1e-8){const n=copyEntityProps(entity,'LINE');n.p1=pt(hi);n.p2=copyPoint(entity.p2);repl.push(n);}pushHistory();replaceEntityWith(entity.id,repl);afterGeometryChange();toast(FR?'Objet ajusté.':'Object trimmed.');return true;
+    if(lo>1e-8){const n=copyEntityProps(entity,'LINE');n.p1=copyPoint(entity.p1);n.p2=pt(lo);repl.push(n);}if(hi<1-1e-8){const n=copyEntityProps(entity,'LINE');n.p1=pt(hi);n.p2=copyPoint(entity.p2);repl.push(n);}if(opts.history!==false)pushHistory();replaceEntityWith(entity.id,repl);afterGeometryChange();if(!opts.silent)toast(FR?'Objet ajusté.':'Object trimmed.');return true;
   }
   if(entity.type==='CIRCLE'){
-    const angles=uniqueNumbers(intersectionsWithEntity(entity).map(p=>{let a=Math.atan2(p.y-entity.center.y,p.x-entity.center.x);while(a<0)a+=Math.PI*2;return a;}));if(angles.length<2)return commandError(FR?'Deux intersections sont requises pour couper ce cercle.':'Two intersections are required to trim this circle.');
-    let ac=Math.atan2(pick.y-entity.center.y,pick.x-entity.center.x);while(ac<0)ac+=Math.PI*2;let start=0,end=0;for(let i=0;i<angles.length;i++){const a=angles[i],b=i===angles.length-1?angles[0]+Math.PI*2:angles[i+1],x=ac<a?ac+Math.PI*2:ac;if(x>=a&&x<=b){start=a;end=b;break;}}const keepStart=end%(Math.PI*2),keepEnd=start%(Math.PI*2),n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=keepStart;n.end=keepEnd;pushHistory();replaceEntityWith(entity.id,[n]);afterGeometryChange();toast(FR?'Cercle ajusté en arc.':'Circle trimmed to arc.');return true;
+    const angles=uniqueNumbers(intersectionsWithEntity(entity).map(p=>{let a=Math.atan2(p.y-entity.center.y,p.x-entity.center.x);while(a<0)a+=Math.PI*2;return a;}));if(angles.length<2)return opts.quiet?false:commandError(FR?'Deux intersections sont requises pour couper ce cercle.':'Two intersections are required to trim this circle.');
+    let ac=Math.atan2(pick.y-entity.center.y,pick.x-entity.center.x);while(ac<0)ac+=Math.PI*2;let start=0,end=0;for(let i=0;i<angles.length;i++){const a=angles[i],b=i===angles.length-1?angles[0]+Math.PI*2:angles[i+1],x=ac<a?ac+Math.PI*2:ac;if(x>=a&&x<=b){start=a;end=b;break;}}const keepStart=end%(Math.PI*2),keepEnd=start%(Math.PI*2),n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=keepStart;n.end=keepEnd;if(opts.history!==false)pushHistory();replaceEntityWith(entity.id,[n]);afterGeometryChange();if(!opts.silent)toast(FR?'Cercle ajusté en arc.':'Circle trimmed to arc.');return true;
   }
   if(entity.type==='ARC'){
-    const span=positiveSpan(entity.start,entity.end),rels=uniqueNumbers(intersectionsWithEntity(entity).map(p=>{let a=Math.atan2(p.y-entity.center.y,p.x-entity.center.x),r=a-entity.start;while(r<0)r+=Math.PI*2;return r;}).filter(r=>r>1e-8&&r<span-1e-8));if(!rels.length)return commandError(FR?'Aucune arête de coupe intersectée.':'No cutting edge intersects this arc.');
-    let ap=Math.atan2(pick.y-entity.center.y,pick.x-entity.center.x)-entity.start;while(ap<0)ap+=Math.PI*2;ap=Math.min(span,ap);const cuts=[0,...rels,span];let k=0;for(let i=0;i<cuts.length-1;i++)if(ap>=cuts[i]-1e-9&&ap<=cuts[i+1]+1e-9){k=i;break;}const lo=cuts[k],hi=cuts[k+1],repl=[];if(lo>1e-8){const n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=entity.start;n.end=entity.start+lo;repl.push(n);}if(hi<span-1e-8){const n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=entity.start+hi;n.end=entity.end;repl.push(n);}pushHistory();replaceEntityWith(entity.id,repl);afterGeometryChange();toast(FR?'Arc ajusté.':'Arc trimmed.');return true;
+    const span=positiveSpan(entity.start,entity.end),rels=uniqueNumbers(intersectionsWithEntity(entity).map(p=>{let a=Math.atan2(p.y-entity.center.y,p.x-entity.center.x),r=a-entity.start;while(r<0)r+=Math.PI*2;return r;}).filter(r=>r>1e-8&&r<span-1e-8));if(!rels.length)return opts.quiet?false:commandError(FR?'Aucune arête de coupe intersectée.':'No cutting edge intersects this arc.');
+    let ap=Math.atan2(pick.y-entity.center.y,pick.x-entity.center.x)-entity.start;while(ap<0)ap+=Math.PI*2;ap=Math.min(span,ap);const cuts=[0,...rels,span];let k=0;for(let i=0;i<cuts.length-1;i++)if(ap>=cuts[i]-1e-9&&ap<=cuts[i+1]+1e-9){k=i;break;}const lo=cuts[k],hi=cuts[k+1],repl=[];if(lo>1e-8){const n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=entity.start;n.end=entity.start+lo;repl.push(n);}if(hi<span-1e-8){const n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=entity.start+hi;n.end=entity.end;repl.push(n);}if(opts.history!==false)pushHistory();replaceEntityWith(entity.id,repl);afterGeometryChange();if(!opts.silent)toast(FR?'Arc ajusté.':'Arc trimmed.');return true;
   }
-  return commandError(FR?'TRIM supporte actuellement lignes, cercles et arcs exacts.':'TRIM currently supports exact lines, circles and arcs.');
+  return opts.quiet?false:commandError(FR?'TRIM supporte actuellement lignes, cercles et arcs exacts.':'TRIM currently supports exact lines, circles and arcs.');
 }
 function rayIntersectionsWithEntity(origin,dir,other){
   const out=[],add=p=>{const t=(p.x-origin.x)*dir.x+(p.y-origin.y)*dir.y,side=Math.abs((p.x-origin.x)*dir.y-(p.y-origin.y)*dir.x);if(t>1e-8&&side<1e-6*Math.max(1,t))out.push({p,t});};
@@ -934,12 +1056,12 @@ function rayIntersectionsWithEntity(origin,dir,other){
   return out;
 }
 function infiniteLineCircleIntersections(origin,dir,c,r){const fx=origin.x-c.x,fy=origin.y-c.y,B=2*(fx*dir.x+fy*dir.y),C=fx*fx+fy*fy-r*r,disc=B*B-4*C;if(disc<-1e-12)return[];const d=Math.sqrt(Math.max(0,disc));return[(-B-d)/2,(-B+d)/2].map(t=>({t,p:{x:origin.x+t*dir.x,y:origin.y+t*dir.y}}));}
-function performExtendAtPoint(entity,pick){
+function performExtendAtPoint(entity,pick,opts={}){
   if(entity.type==='LINE'){
-    const d1=dist(pick,entity.p1),d2=dist(pick,entity.p2),moveP1=d1<d2,origin=moveP1?entity.p2:entity.p1,current=moveP1?entity.p1:entity.p2,v={x:current.x-origin.x,y:current.y-origin.y},L=Math.hypot(v.x,v.y);if(L<1e-12)return false;const dir={x:v.x/L,y:v.y/L},hits=[];for(const o of state.entities)if(o.id!==entity.id&&layerVisible(o.layer))hits.push(...rayIntersectionsWithEntity(origin,dir,o).filter(h=>h.t>L+1e-8));if(!hits.length)return commandError(FR?'Aucune limite trouvée dans cette direction.':'No boundary found in that direction.');hits.sort((a,b)=>a.t-b.t);pushHistory();if(moveP1)entity.p1=hits[0].p;else entity.p2=hits[0].p;afterGeometryChange();toast(FR?'Objet prolongé.':'Object extended.');return true;
+    const d1=dist(pick,entity.p1),d2=dist(pick,entity.p2),moveP1=d1<d2,origin=moveP1?entity.p2:entity.p1,current=moveP1?entity.p1:entity.p2,v={x:current.x-origin.x,y:current.y-origin.y},L=Math.hypot(v.x,v.y);if(L<1e-12)return false;const dir={x:v.x/L,y:v.y/L},hits=[];for(const o of state.entities)if(o.id!==entity.id&&layerVisible(o.layer))hits.push(...rayIntersectionsWithEntity(origin,dir,o).filter(h=>h.t>L+1e-8));if(!hits.length)return opts.quiet?false:commandError(FR?'Aucune limite trouvée dans cette direction.':'No boundary found in that direction.');hits.sort((a,b)=>a.t-b.t);if(opts.history!==false)pushHistory();if(moveP1)entity.p1=hits[0].p;else entity.p2=hits[0].p;afterGeometryChange();if(!opts.silent)toast(FR?'Objet prolongé.':'Object extended.');return true;
   }
-  if(entity.type==='POLYLINE'&&!entity.closed&&entity.points.length>=2){const first=entity.points[0],last=entity.points[entity.points.length-1],moveFirst=dist(pick,first)<dist(pick,last),origin=moveFirst?entity.points[1]:entity.points[entity.points.length-2],current=moveFirst?first:last,v={x:current.x-origin.x,y:current.y-origin.y},L=Math.hypot(v.x,v.y);if(L<1e-12)return false;const dir={x:v.x/L,y:v.y/L},hits=[];for(const o of state.entities)if(o.id!==entity.id&&layerVisible(o.layer))hits.push(...rayIntersectionsWithEntity(origin,dir,o).filter(h=>h.t>L+1e-8));if(!hits.length)return commandError(FR?'Aucune limite trouvée.':'No boundary found.');hits.sort((a,b)=>a.t-b.t);pushHistory();if(moveFirst){entity.points[0].x=hits[0].p.x;entity.points[0].y=hits[0].p.y;}else{last.x=hits[0].p.x;last.y=hits[0].p.y;}afterGeometryChange();toast(FR?'Polyligne prolongée.':'Polyline extended.');return true;}
-  return commandError(FR?'EXTEND supporte lignes et extrémités de polylignes ouvertes.':'EXTEND supports lines and open polyline endpoints.');
+  if(entity.type==='POLYLINE'&&!entity.closed&&entity.points.length>=2){const first=entity.points[0],last=entity.points[entity.points.length-1],moveFirst=dist(pick,first)<dist(pick,last),origin=moveFirst?entity.points[1]:entity.points[entity.points.length-2],current=moveFirst?first:last,v={x:current.x-origin.x,y:current.y-origin.y},L=Math.hypot(v.x,v.y);if(L<1e-12)return false;const dir={x:v.x/L,y:v.y/L},hits=[];for(const o of state.entities)if(o.id!==entity.id&&layerVisible(o.layer))hits.push(...rayIntersectionsWithEntity(origin,dir,o).filter(h=>h.t>L+1e-8));if(!hits.length)return opts.quiet?false:commandError(FR?'Aucune limite trouvée.':'No boundary found.');hits.sort((a,b)=>a.t-b.t);if(opts.history!==false)pushHistory();if(moveFirst){entity.points[0].x=hits[0].p.x;entity.points[0].y=hits[0].p.y;}else{last.x=hits[0].p.x;last.y=hits[0].p.y;}afterGeometryChange();if(!opts.silent)toast(FR?'Polyligne prolongée.':'Polyline extended.');return true;}
+  return opts.quiet?false:commandError(FR?'EXTEND supporte lignes et extrémités de polylignes ouvertes.':'EXTEND supports lines and open polyline endpoints.');
 }
 function branchDirection(line,intersection,pick){const a={x:line.p1.x-intersection.x,y:line.p1.y-intersection.y},b={x:line.p2.x-intersection.x,y:line.p2.y-intersection.y},q={x:pick.x-intersection.x,y:pick.y-intersection.y};const da=a.x*q.x+a.y*q.y,db=b.x*q.x+b.y*q.y,v=da>=db?a:b,L=Math.hypot(v.x,v.y);return L<1e-12?null:{x:v.x/L,y:v.y/L};}
 function trimLineToPoint(line,I,dir,p){const aDot=(line.p1.x-I.x)*dir.x+(line.p1.y-I.y)*dir.y,bDot=(line.p2.x-I.x)*dir.x+(line.p2.y-I.y)*dir.y;if(aDot>=bDot)line.p2=copyPoint(p);else line.p1=copyPoint(p);}
@@ -947,7 +1069,28 @@ function performFillet(a,b,pickA,pickB,r){
   if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'FILLET V6 supporte les lignes exactes; polylignes à venir.':'V6 FILLET supports exact lines; polyline fillet is next.');const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);if(!I)return commandError(FR?'Les lignes sont parallèles.':'Lines are parallel.');const d1=branchDirection(a,I,pickA),d2=branchDirection(b,I,pickB);if(!d1||!d2)return false;let dot=Math.max(-1,Math.min(1,d1.x*d2.x+d1.y*d2.y)),theta=Math.acos(dot);if(theta<1e-5||Math.abs(Math.PI-theta)<1e-5)return commandError(FR?'Angle invalide pour un congé.':'Invalid fillet angle.');pushHistory();if(!(r>1e-12)){trimLineToPoint(a,I,d1,I);trimLineToPoint(b,I,d2,I);afterGeometryChange();toast(FR?'Coin fermé (R0).':'Sharp corner (R0).');return true;}const t=r/Math.tan(theta/2),p1={x:I.x+d1.x*t,y:I.y+d1.y*t},p2={x:I.x+d2.x*t,y:I.y+d2.y*t},bis={x:d1.x+d2.x,y:d1.y+d2.y},bl=Math.hypot(bis.x,bis.y);if(bl<1e-12)return false;bis.x/=bl;bis.y/=bl;const cDist=r/Math.sin(theta/2),center={x:I.x+bis.x*cDist,y:I.y+bis.y*cDist};trimLineToPoint(a,I,d1,p1);trimLineToPoint(b,I,d2,p2);const arc=copyEntityProps(a,'ARC');arc.layer=a.layer===b.layer?a.layer:state.activeLayer;arc.center=center;arc.radius=r;let sA=Math.atan2(p1.y-center.y,p1.x-center.x),sB=Math.atan2(p2.y-center.y,p2.x-center.x);const cross=d1.x*d2.y-d1.y*d2.x;if(cross<0){const t0=sA;sA=sB;sB=t0;}arc.start=sA;arc.end=sB;state.entities.push(arc);afterGeometryChange();toast(FR?`Congé R${fmt(r)} créé.`:`Fillet R${fmt(r)} created.`);return true;
 }
 function performChamfer(a,b,pickA,pickB,dA,dB){if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'CHAMFER V6 supporte les lignes exactes.':'V6 CHAMFER supports exact lines.');const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);if(!I)return commandError(FR?'Les lignes sont parallèles.':'Lines are parallel.');const u=branchDirection(a,I,pickA),v=branchDirection(b,I,pickB);if(!u||!v)return false;const p1={x:I.x+u.x*dA,y:I.y+u.y*dA},p2={x:I.x+v.x*dB,y:I.y+v.y*dB};pushHistory();trimLineToPoint(a,I,u,p1);trimLineToPoint(b,I,v,p2);const n=copyEntityProps(a,'LINE');n.layer=a.layer===b.layer?a.layer:state.activeLayer;n.p1=p1;n.p2=p2;state.entities.push(n);afterGeometryChange();toast(FR?'Chanfrein créé.':'Chamfer created.');return true;}
-function performStretch(dx,dy,rect){if(!state.selected.size)return false;pushHistory();for(const e of selectedEntities()){if(!rect||entityInsideRect(e,rect)){translateEntity(e,dx,dy);continue;}const inside=p=>pointInRect(p,rect);if(e.type==='LINE'){if(inside(e.p1)){e.p1.x+=dx;e.p1.y+=dy;}if(inside(e.p2)){e.p2.x+=dx;e.p2.y+=dy;}}else if(e.type==='POLYLINE'){for(const p of e.points)if(inside(p)){p.x+=dx;p.y+=dy;}}else if((e.type==='POINT'||e.type==='TEXT')&&inside(e.point)){e.point.x+=dx;e.point.y+=dy;}}afterGeometryChange();toast(FR?'Étirage terminé.':'Stretch complete.');return true;}
+function applyStretchMutation(e,dx,dy,rect){
+  if(!rect||entityInsideRect(e,rect)){translateEntity(e,dx,dy);return;}
+  const inside=p=>pointInRect(p,rect);
+  if(e.type==='LINE'){
+    if(inside(e.p1)){e.p1.x+=dx;e.p1.y+=dy;}
+    if(inside(e.p2)){e.p2.x+=dx;e.p2.y+=dy;}
+  }else if(e.type==='POLYLINE'){
+    for(const p of e.points)if(inside(p)){p.x+=dx;p.y+=dy;}
+  }else if((e.type==='POINT'||e.type==='TEXT')&&inside(e.point)){
+    e.point.x+=dx;e.point.y+=dy;
+  }else if(e.type==='CIRCLE'&&inside(e.center)){
+    e.center.x+=dx;e.center.y+=dy;
+  }else if(e.type==='ARC'&&inside(e.center)){
+    e.center.x+=dx;e.center.y+=dy;
+  }
+}
+function performStretch(dx,dy,rect){
+  if(!state.selected.size)return false;
+  pushHistory();
+  for(const e of selectedEntities())applyStretchMutation(e,dx,dy,rect);
+  afterGeometryChange();toast(FR?'Étirage terminé.':'Stretch complete.');return true;
+}
 function performRectArray(c){const cols=Math.max(1,c.data.columns||2),rows=Math.max(1,c.data.rows||2),sx=c.data.colSpacing||0,sy=c.data.rowSpacing||0,src=selectedEntities();if(!src.length)return false;pushHistory();const added=[];for(let r=0;r<rows;r++)for(let col=0;col<cols;col++){if(r===0&&col===0)continue;for(const e of src){const n=cloneEntity(e,true);translateEntity(n,col*sx,r*sy);state.entities.push(n);added.push(n.id);}}state.selected=new Set(added);afterGeometryChange();toast(FR?`Réseau ${rows}×${cols} créé.`:`${rows}×${cols} array created.`);return true;}
 function performPolarArray(c){const items=Math.max(2,c.data.items||4),fill=(c.data.fillAngle??360)*Math.PI/180,center=c.data.center,src=selectedEntities();if(!center||!src.length)return false;pushHistory();const added=[];const full=Math.abs(Math.abs(fill)-Math.PI*2)<1e-8,step=full?fill/items:fill/(items-1);for(let i=1;i<items;i++)for(const e of src){const n=cloneEntity(e,true);transformEntityPoints(n,p=>rotatePoint(p,center,step*i));state.entities.push(n);added.push(n.id);}state.selected=new Set(added);afterGeometryChange();toast(FR?`Réseau polaire ${items} éléments.`:`Polar array ${items} items.`);return true;}
 function performBreak(id,p1,p2,atPoint=false){const e=state.entities.find(x=>x.id===id);if(!e)return false;if(e.type==='LINE'){const q1=projectPointToLine(p1,e.p1,e.p2,true),q2=projectPointToLine(p2,e.p1,e.p2,true),t1=lineParam(q1,e.p1,e.p2),t2=lineParam(q2,e.p1,e.p2),lo=Math.min(t1,t2),hi=Math.max(t1,t2),repl=[];if(atPoint||Math.abs(hi-lo)<1e-8){const a=copyEntityProps(e,'LINE');a.p1=copyPoint(e.p1);a.p2=q1;const b=copyEntityProps(e,'LINE');b.p1=q1;b.p2=copyPoint(e.p2);if(dist(a.p1,a.p2)>1e-9)repl.push(a);if(dist(b.p1,b.p2)>1e-9)repl.push(b);}else{if(lo>1e-8){const a=copyEntityProps(e,'LINE');a.p1=copyPoint(e.p1);a.p2={x:e.p1.x+(e.p2.x-e.p1.x)*lo,y:e.p1.y+(e.p2.y-e.p1.y)*lo};repl.push(a);}if(hi<1-1e-8){const b=copyEntityProps(e,'LINE');b.p1={x:e.p1.x+(e.p2.x-e.p1.x)*hi,y:e.p1.y+(e.p2.y-e.p1.y)*hi};b.p2=copyPoint(e.p2);repl.push(b);}}pushHistory();replaceEntityWith(e.id,repl);afterGeometryChange();toast(FR?'Objet coupé.':'Object broken.');return true;}return commandError(FR?'BREAK V6 supporte les lignes exactes.':'V6 BREAK supports exact lines.');}
@@ -1529,7 +1672,7 @@ function startCommand(rawName){
   else if(name==='ARC'){state.command.step='first';setCommandPrompt(`${name} ${CMDT.specifyFirst}:`);}
   else if(name==='RECTANG'){state.command.step='first';setCommandPrompt(`${name} ${CMDT.specifyFirst}:`);}
   else if(['MOVE','COPY','ROTATE','MIRROR','SCALE','ERASE','EXPLODE','JOIN','STRETCH','ARRAY','ARRAYRECT','ARRAYPOLAR','PEDIT'].includes(name)){beginSelectionCommand(name);}
-  else if(name==='OFFSET'){state.command.step='distance';setCommandPrompt(`${name} ${CMDT.offsetDistance}:`);}
+  else if(name==='OFFSET'){state.command.step='distance';setCommandPrompt(FR?`${name} Distance de décalage ou [ÀTravers]:`:`${name} Offset distance or [Through]:`);}
   else if(name==='TRIM'){state.command.step='pick';setCommandPrompt(FR?'TRIM Sélectionnez la portion à supprimer <Entrée pour terminer>:':'TRIM Select portion to remove <Enter to finish>:');}
   else if(name==='EXTEND'){state.command.step='pick';setCommandPrompt(FR?'EXTEND Sélectionnez l’objet à prolonger <Entrée pour terminer>:':'EXTEND Select object to extend <Enter to finish>:');}
   else if(name==='FILLET'){state.command.step='first';state.command.data.radius=state.filletRadius;setCommandPrompt(FR?`FILLET Sélectionnez le premier objet ou [Rayon] <${fmt(state.filletRadius)}>`:`FILLET Select first object or [Radius] <${fmt(state.filletRadius)}>`);}
@@ -1560,6 +1703,7 @@ function afterSelectionConfirmed(name){
   if(name==='JOIN'){joinSelected();finishCommand();return;}
   if(name==='PEDIT'){peditSelection();finishCommand();return;}
   if(name==='MOVE'||name==='COPY'||name==='ROTATE'||name==='SCALE'||name==='STRETCH'){
+    if(name==='STRETCH'&&!state.command.data.stretchRect&&state.lastCrossingRect)state.command.data.stretchRect={...state.lastCrossingRect};
     state.command.step='base';setCommandPrompt(`${name} ${CMDT.basePoint}:`);return;
   }
   if(name==='MIRROR'){
@@ -1583,7 +1727,7 @@ function commandEnter(){
   if(c.name==='MIRROR'&&c.step==='eraseSource'){
     performMirror(false);finishCommand();return;
   }
-  if(c.name==='TRIM'||c.name==='EXTEND'){finishCommand();return;}
+  if(c.name==='TRIM'||c.name==='EXTEND'||c.name==='OFFSET'){finishCommand();return;}
   if(c.name==='FILLET'||c.name==='CHAMFER'){finishCommand();return;}
   if(c.name==='ARRAY'&&c.step==='arrayType'){c.name='ARRAYRECT';c.step='columns';setCommandPrompt(FR?'ARRAYRECT Nombre de colonnes <2>:' :'ARRAYRECT Number of columns <2>:');return;}
   if(c.name==='ARRAYRECT'&&c.step==='columns'){c.data.columns=2;c.step='rows';setCommandPrompt(FR?'Nombre de rangées <2>:':'Number of rows <2>:');return;}
@@ -1624,8 +1768,9 @@ function commandText(raw){
   }
 
   if(c.name==='OFFSET'&&c.step==='distance'){
+    if(['T','THROUGH','A','ÀTRAVERS'].includes(u)){c.data.through=true;c.step='selectEntity';setCommandPrompt(`${c.name} ${CMDT.offsetObject}:`);return;}
     const n=parseNumber(raw);if(!(n>0))return commandError(CMDT.valueInvalid);
-    c.data.distance=n;c.step='selectEntity';setCommandPrompt(`${c.name} ${CMDT.offsetObject}:`);return;
+    c.data.distance=n;c.data.through=false;c.step='selectEntity';setCommandPrompt(`${c.name} ${CMDT.offsetObject}:`);return;
   }
   if(c.name==='ROTATE'&&c.step==='angle'){
     const n=parseNumber(raw);if(!Number.isFinite(n))return commandError(CMDT.valueInvalid);
@@ -1771,13 +1916,18 @@ function commandPoint(point,event,fromKeyboard=false){
     if(c.step==='selectEntity'){
       const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
       if(!hit)return;
-      if(!['LINE','CIRCLE','ARC'].includes(hit.type))return commandError(CMDT.unsupportedSelection);
-      c.data.entityId=hit.id;c.step='side';setCommandPrompt(`${c.name} ${CMDT.offsetSide}:`);return;
+      if(!['LINE','CIRCLE','ARC','POLYLINE'].includes(hit.type))return commandError(CMDT.unsupportedSelection);
+      c.data.entityId=hit.id;c.step='side';setCommandPrompt(FR?`${c.name} Spécifiez le côté / point de passage:`:`${c.name} Specify side / through point:`);return;
     }
     if(c.step==='side'){
       const entity=state.entities.find(e=>e.id===c.data.entityId);if(!entity)return cancelCommand(true);
-      const offset=offsetEntity(entity,c.data.distance,point);if(!offset)return commandError(CMDT.unsupportedSelection);
-      addEntity(offset);toast(CMDT.offsetDone);finishCommand();return;
+      const d=c.data.through?offsetDistanceThrough(entity,point):c.data.distance;
+      const offset=offsetEntity(entity,d,point);if(!offset)return commandError(CMDT.unsupportedSelection);
+      pushHistory();state.entities.push(offset);afterGeometryChange();
+      if(offset.approximated)toast(FR?'Décalage créé · courbes de polyligne approximées.':'Offset created · curved polyline approximated.');
+      else toast(CMDT.offsetDone);
+      c.data.entityId=null;c.step='selectEntity';setCommandPrompt(FR?`${c.name} Sélectionnez un autre objet <Entrée pour terminer>:`:`${c.name} Select another object <Enter to finish>:`);
+      return;
     }
   }
 }
@@ -1931,8 +2081,54 @@ function mirrorEntity(e,a,b){
   transformEntityPoints(e,q=>mirrorPoint(q,a,b));
 }
 
+function offsetDistanceThrough(e,sidePoint){
+  if(e.type==='LINE')return distanceToEntity(sidePoint,e);
+  if(e.type==='CIRCLE'||e.type==='ARC')return Math.abs(dist(e.center,sidePoint)-e.radius);
+  if(e.type==='POLYLINE')return distanceToEntity(sidePoint,e);
+  return 0;
+}
+function offsetPolyline(e,distance,sidePoint){
+  const original=e.points||[];if(original.length<2)return null;
+  const hasCurves=original.some(p=>Math.abs(p.bulge||0)>1e-10);
+  const pts=(hasCurves?polylineSamples(e):original.map(copyPoint)).map(p=>({x:p.x,y:p.y}));
+  if(pts.length<2)return null;
+  if(e.closed&&dist(pts[0],pts[pts.length-1])<1e-9)pts.pop();
+  const count=pts.length,segCount=e.closed?count:count-1;if(segCount<1)return null;
+  let closest={index:0,d:Infinity,side:1};
+  for(let i=0;i<segCount;i++){
+    const a=pts[i],b=pts[(i+1)%count],proj=projectPointToLine(sidePoint,a,b,true),dd=dist(sidePoint,proj);
+    if(dd<closest.d){const cross=(b.x-a.x)*(sidePoint.y-a.y)-(b.y-a.y)*(sidePoint.x-a.x);closest={index:i,d:dd,side:cross>=0?1:-1};}
+  }
+  const sign=closest.side;
+  const shifted=[];
+  for(let i=0;i<segCount;i++){
+    const a=pts[i],b=pts[(i+1)%count],dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy);if(L<1e-12){shifted.push(null);continue;}
+    const nx=-dy/L*distance*sign,ny=dx/L*distance*sign;
+    shifted.push({a:{x:a.x+nx,y:a.y+ny},b:{x:b.x+nx,y:b.y+ny}});
+  }
+  const out=[];
+  if(!e.closed){
+    out.push(shifted[0]?.a||copyPoint(pts[0]));
+    for(let i=1;i<count-1;i++){
+      const prev=shifted[i-1],next=shifted[i];
+      let q=prev&&next?infiniteLineIntersection(prev.a,prev.b,next.a,next.b):null;
+      if(!q)q=next?.a||prev?.b||copyPoint(pts[i]);
+      out.push(q);
+    }
+    out.push(shifted[shifted.length-1]?.b||copyPoint(pts[count-1]));
+  }else{
+    for(let i=0;i<count;i++){
+      const prev=shifted[(i-1+segCount)%segCount],next=shifted[i%segCount];
+      let q=prev&&next?infiniteLineIntersection(prev.a,prev.b,next.a,next.b):null;
+      if(!q)q=next?.a||prev?.b||copyPoint(pts[i]);
+      out.push(q);
+    }
+  }
+  return {...newEntityBase('POLYLINE'),layer:e.layer,colorMode:e.colorMode,colorIndex:e.colorIndex,trueColor:e.trueColor,points:out.map(p=>({...p,bulge:0})),closed:Boolean(e.closed),approximated:Boolean(hasCurves)};
+}
 function offsetEntity(e,distance,sidePoint){
   const base={...newEntityBase(e.type),layer:e.layer,colorMode:e.colorMode,colorIndex:e.colorIndex,trueColor:e.trueColor};
+  if(!(distance>1e-12))return null;
   if(e.type==='LINE'){
     const dx=e.p2.x-e.p1.x,dy=e.p2.y-e.p1.y,len=Math.hypot(dx,dy);if(len<1e-12)return null;
     const nx=-dy/len,ny=dx/len,cross=dx*(sidePoint.y-e.p1.y)-dy*(sidePoint.x-e.p1.x),sgn=cross>=0?1:-1;
@@ -1942,9 +2138,9 @@ function offsetEntity(e,distance,sidePoint){
     const outward=dist(e.center,sidePoint)>=e.radius;const r=e.radius+(outward?distance:-distance);if(r<=1e-9)return null;
     return e.type==='CIRCLE'?{...base,center:copyPoint(e.center),radius:r}:{...base,center:copyPoint(e.center),radius:r,start:e.start,end:e.end};
   }
+  if(e.type==='POLYLINE')return offsetPolyline(e,distance,sidePoint);
   return null;
 }
-
 function explodeSelected(){
   const targets=selectedEntities();if(!targets.length)return;pushHistory();const remove=new Set(),created=[];
   for(const e of targets){
@@ -2198,12 +2394,24 @@ function drawCommandPreview(){
   else if(c.name==='ARC'&&c.points.length===1)line(c.points[0],p);
   else if(c.name==='ARC'&&c.points.length===2){const arc=arcFrom3Points(c.points[0],c.points[1],p);if(arc)drawPreviewArc(arc);else line(c.points[1],p);}
   else if(['MOVE','COPY'].includes(c.name)&&c.step==='target'&&c.data.base){const dx=p.x-c.data.base.x,dy=p.y-c.data.base.y;drawSelectedPreview(e=>{const n=cloneEntity(e,false);translateEntity(n,dx,dy);return n;});}
+  else if(c.name==='STRETCH'&&c.step==='target'&&c.data.base){
+    const dx=p.x-c.data.base.x,dy=p.y-c.data.base.y;line(c.data.base,p);
+    drawSelectedPreview(e=>{const n=cloneEntity(e,false);applyStretchMutation(n,dx,dy,c.data.stretchRect);return n;},false);
+  }
+  else if(c.name==='OFFSET'&&c.step==='side'&&c.data.entityId){
+    const entity=state.entities.find(e=>e.id===c.data.entityId);
+    if(entity){
+      const d=c.data.through?offsetDistanceThrough(entity,p):c.data.distance;
+      const preview=offsetEntity(entity,d,p);
+      if(preview){ctx.setLineDash([4,3]);drawEntity(preview,'#7bc4ff',1.5);}
+    }
+  }
   else if(c.name==='ROTATE'&&c.step==='angle'&&c.data.base){const a=Math.atan2(p.y-c.data.base.y,p.x-c.data.base.x);drawSelectedPreview(e=>{const n=cloneEntity(e,false);transformEntityPoints(n,q=>rotatePoint(q,c.data.base,a));return n;});}
   else if(c.name==='MIRROR'&&c.step==='mirror2'&&c.data.p1){line(c.data.p1,p);drawSelectedPreview(e=>{const n=cloneEntity(e,false);mirrorEntity(n,c.data.p1,p);return n;});}
   ctx.restore();
 }
 function drawPreviewArc(e){const c=worldToScreen(e.center);ctx.save();ctx.translate(c.x,c.y);ctx.scale(1,-1);ctx.beginPath();ctx.arc(0,0,e.radius*state.view.scale,e.start,e.start+positiveSpan(e.start,e.end));ctx.stroke();ctx.restore();}
-function drawSelectedPreview(transform){ctx.save();ctx.globalAlpha=.68;ctx.setLineDash([6,4]);for(const e of selectedEntities())drawEntity(transform(e),'#7bc4ff',1.2);ctx.restore();}
+function drawSelectedPreview(transform,dashed=true){ctx.save();ctx.globalAlpha=.78;ctx.setLineDash(dashed?[6,4]:[]);for(const e of selectedEntities())drawEntity(transform(e),'#7bc4ff',1.35);ctx.restore();}
 
 function openOsnapQuickMenu(clientX,clientY){
   closeContextMenu();const menu=document.createElement('div');menu.className='n2-context-menu';
