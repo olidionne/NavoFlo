@@ -313,3 +313,27 @@ body.n2-focus-mode{overflow:hidden}
 .n2-text-editor-actions{display:flex;justify-content:flex-end;gap:7px;padding:9px 10px;border-top:1px solid rgba(255,255,255,.07)}
 .n2-text-editor-actions button{height:30px;padding:0 11px;border:1px solid rgba(255,255,255,.11);border-radius:5px;background:rgba(255,255,255,.035);color:#aebbc3;font:800 9.5px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;cursor:pointer}
 .n2-text-editor-actions button.primary{border-color:rgba(0,109,255,.42);background:rgba(0,109,255,.18);color:#9ac7ff}
+
+
+/* V6.9 — AutoCAD-like compact stacked ribbon */
+.n2-toolbar.n2-ribbon{min-height:88px;align-items:stretch;gap:2px;padding:4px 5px;overflow-x:auto;overflow-y:visible}
+.n2-ribbon-group{min-width:0;padding:3px 5px 16px}
+.n2-ribbon-layout{display:flex;align-items:stretch;gap:3px;min-height:62px}
+.n2-ribbon-stack{display:flex;flex-direction:column;justify-content:flex-start;gap:1px;min-width:82px}
+.n2-ribbon-stack-icons{min-width:32px}
+.n2-ribbon .n2-tool.n2-tool-small{height:20px;min-width:0;width:100%;padding:0 5px;flex-direction:row;justify-content:flex-start;gap:5px;border-radius:3px;font-size:8.5px}
+.n2-ribbon .n2-tool.n2-tool-small .n2-icon{flex:0 0 15px;width:15px;font-size:11px;text-align:center}
+.n2-ribbon .n2-tool.n2-tool-large{height:62px;min-width:52px;max-width:70px;padding:5px 7px;flex-direction:column;justify-content:center;gap:5px;font-size:8.5px}
+.n2-ribbon .n2-tool.n2-tool-large .n2-icon{font-size:21px}
+.n2-file-layout .n2-tool-large{min-width:56px}
+.n2-modify-group{max-width:none}.n2-modify-group .n2-ribbon-layout{min-width:348px}.n2-modify-group .n2-ribbon-stack{min-width:84px}
+.n2-group-draw .n2-ribbon-stack{min-width:78px}.n2-group-dimension .n2-ribbon-stack{min-width:76px}
+.n2-group-layer .n2-ribbon-layout{align-items:center}.n2-group-layer{min-width:205px}.n2-group-layer .n2-layer-picker{min-width:135px;max-width:160px}
+.n2-group-select .n2-ribbon-stack{min-width:76px}.n2-group-select .n2-ribbon-stack-icons{min-width:32px}
+.n2-group-inspect .n2-ribbon-stack{min-width:88px}.n2-group-inspect .n2-ribbon-stack-icons{min-width:32px}
+@media(max-width:1500px){.n2-ribbon .n2-tool.n2-tool-small span:not(.n2-icon){display:inline}.n2-ribbon .n2-tool.n2-tool-large span:not(.n2-icon){display:none}.n2-ribbon-stack{min-width:34px}.n2-modify-group .n2-ribbon-stack{min-width:36px}.n2-modify-group .n2-ribbon-layout{min-width:150px}.n2-group-draw .n2-ribbon-stack,.n2-group-dimension .n2-ribbon-stack{min-width:36px}.n2-ribbon .n2-tool.n2-tool-small{width:34px;justify-content:center;padding:0}.n2-ribbon .n2-tool.n2-tool-small .n2-icon{flex:0 0 auto;width:auto}.n2-ribbon .n2-tool.n2-tool-small span:not(.n2-icon){display:none}.n2-group-layer{min-width:180px}}
+@media(max-width:1050px){.n2-group-layer .n2-layer-picker{min-width:110px;max-width:125px}.n2-ribbon-group>small{font-size:6px}}
+
+/* Dimension properties palette */
+.n2-dim-editor{position:fixed;z-index:980;width:330px;padding:0 10px 10px;border:1px solid rgba(255,255,255,.14);border-radius:8px;background:rgba(8,14,19,.985);box-shadow:0 22px 60px rgba(0,0,0,.55);color:#c9d5db;font:700 10px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+.n2-dim-editor select,.n2-dim-editor input{width:100%;height:29px;border:1px solid rgba(255,255,255,.1);border-radius:5px;background:#091117;color:#d6e0e5;padding:0 7px}

@@ -16,7 +16,7 @@
     <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
     <strong>NavoFlo</strong><i>/</i><b>Navo2D</b>
   </a>
-  <nav class="suite-switch" aria-label="Suite NavoFlo"><a class="active" href="/navo2d/">Navo2D</a><a href="/navo3d/">Navo3D</a></nav>
+  <nav class="suite-switch" aria-label="NavoFlo Suite"><a class="active" href="/en/navo2d/">Navo2D</a><a href="/en/navo3d/">Navo3D</a></nav>
   <span class="n2-app-local"><i></i> LOCAL</span>
   <div class="n2-appbar-spacer"></div>
   <a class="n2-site-link" href="/en/">Main site</a>
@@ -29,92 +29,37 @@
 
     <div class="n2-toolbar n2-ribbon" role="toolbar" aria-label="Outils Navo2D">
       <section class="n2-ribbon-group n2-group-file">
-        <div class="n2-ribbon-row">
-          <label class="n2-tool n2-open"><input id="n2-file" type="file" accept=".dxf" hidden><span class="n2-icon">＋</span><span>Open</span></label>
-          <button id="n2-export" class="n2-tool primary" type="button" disabled><span class="n2-icon">⇩</span><span>DXF</span></button>
-        </div>
-        <small>FILE</small>
+        <div class="n2-ribbon-layout n2-file-layout">
+          <label class="n2-tool n2-tool-large n2-open"><input id="n2-file" type="file" accept=".dxf" hidden><span class="n2-icon">＋</span><span>Open</span></label>
+          <button id="n2-export" class="n2-tool n2-tool-large primary" type="button" disabled><span class="n2-icon">⇩</span><span>DXF</span></button>
+        </div><small>FILE</small>
       </section>
-
-      <section class="n2-ribbon-group">
-        <div class="n2-ribbon-row n2-ribbon-draw">
-          <button class="n2-tool n2-cmd-button" type="button" data-command="LINE" title="Line · L"><span class="n2-icon">╱</span><span>Line</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="PLINE" title="Polyline · PL"><span class="n2-icon">⌁</span><span>Polyline</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="CIRCLE" title="Circle · C"><span class="n2-icon">○</span><span>Circle</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="ARC" title="Arc · A"><span class="n2-icon">⌒</span><span>Arc</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="RECTANG" title="Rectangle · REC"><span class="n2-icon">▭</span><span>Rectangle</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="TEXT" title="Text · T"><span class="n2-icon">T</span><span>Text</span></button>
-        </div>
-        <small>DRAW</small>
+      <section class="n2-ribbon-group n2-group-draw">
+        <div class="n2-ribbon-layout">
+          <button class="n2-tool n2-tool-large n2-cmd-button" type="button" data-command="LINE" title="Line · L"><span class="n2-icon">╱</span><span>Line</span></button>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="PLINE"><span class="n2-icon">⌁</span><span>Polyline</span></button><button class="n2-tool n2-tool-small" type="button" data-command="CIRCLE"><span class="n2-icon">○</span><span>Circle</span></button><button class="n2-tool n2-tool-small" type="button" data-command="ARC"><span class="n2-icon">⌒</span><span>Arc</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="RECTANG"><span class="n2-icon">▭</span><span>Rectangle</span></button><button class="n2-tool n2-tool-small" type="button" data-command="TEXT"><span class="n2-icon">T</span><span>Text</span></button></div>
+        </div><small>DRAW</small>
       </section>
-
       <section class="n2-ribbon-group n2-group-dimension">
-        <div class="n2-ribbon-row">
-          <button class="n2-tool n2-cmd-button primary" type="button" data-command="DIM" title="Smart dimension · DIM"><span class="n2-icon">D</span><span>Smart</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMLINEAR" title="Linear dimension · DLI"><span class="n2-icon">↔</span><span>Linear</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMALIGNED" title="Aligned dimension · DAL"><span class="n2-icon">╱</span><span>Aligned</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMANGULAR" title="Angular dimension · DAN"><span class="n2-icon">∠</span><span>Angle</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMRADIUS" title="Radius dimension · DRA"><span class="n2-icon">R</span><span>Radius</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMDIAMETER" title="Diameter dimension · DDI"><span class="n2-icon">Ø</span><span>Diameter</span></button>
-        </div>
-        <small>DIMENSION</small>
+        <div class="n2-ribbon-layout">
+          <button class="n2-tool n2-tool-large primary" type="button" data-command="DIM"><span class="n2-icon">D</span><span>Smart Dim</span></button>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="DIMLINEAR"><span class="n2-icon">↔</span><span>Linear</span></button><button class="n2-tool n2-tool-small" type="button" data-command="DIMALIGNED"><span class="n2-icon">╱</span><span>Aligned</span></button><button class="n2-tool n2-tool-small" type="button" data-command="DIMANGULAR"><span class="n2-icon">∠</span><span>Angle</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="DIMRADIUS"><span class="n2-icon">R</span><span>Radius</span></button><button class="n2-tool n2-tool-small" type="button" data-command="DIMDIAMETER"><span class="n2-icon">Ø</span><span>Diameter</span></button></div>
+        </div><small>DIMENSION</small>
       </section>
-
       <section class="n2-ribbon-group n2-modify-group">
-        <div class="n2-ribbon-row">
-          <button id="n2-move" class="n2-tool" type="button" disabled title="Move · M"><span class="n2-icon">✥</span><span>Move</span></button>
-          <button class="n2-tool" type="button" data-command="COPY" title="Copy · CO"><span class="n2-icon">⧉</span><span>Copy</span></button>
-          <button class="n2-tool" type="button" data-command="ROTATE" title="Rotate · RO"><span class="n2-icon">↻</span><span>Rotate</span></button>
-          <button class="n2-tool" type="button" data-command="MIRROR" title="Mirror · MI"><span class="n2-icon">◫</span><span>Mirror</span></button>
-          <button class="n2-tool" type="button" data-command="TRIM" title="Trim · TR"><span class="n2-icon">✂</span><span>Trim</span></button>
-          <button class="n2-tool" type="button" data-command="EXTEND" title="Extend · EX"><span class="n2-icon">⇥</span><span>Extend</span></button>
-          <button class="n2-tool" type="button" data-command="FILLET" title="Fillet · F"><span class="n2-icon">⌜</span><span>Fillet</span></button>
-          <button class="n2-tool" type="button" data-command="CHAMFER" title="Chamfer · CHA"><span class="n2-icon">◿</span><span>Chamfer</span></button>
-          <button class="n2-tool" type="button" data-command="OFFSET" title="Offset · O"><span class="n2-icon">⇆</span><span>Offset</span></button>
-          <button class="n2-tool" type="button" data-command="STRETCH" title="Stretch · S"><span class="n2-icon">⇱</span><span>Stretch</span></button>
-          <button id="n2-more-toggle" class="n2-tool" type="button"><span class="n2-icon">⋯</span><span>More</span></button>
-        </div>
-        <small>MODIFIER</small>
+        <div class="n2-ribbon-layout">
+          <div class="n2-ribbon-stack"><button id="n2-move" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">✥</span><span>Move</span></button><button class="n2-tool n2-tool-small" type="button" data-command="COPY"><span class="n2-icon">⧉</span><span>Copy</span></button><button class="n2-tool n2-tool-small" type="button" data-command="ROTATE"><span class="n2-icon">↻</span><span>Rotate</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="MIRROR"><span class="n2-icon">◫</span><span>Mirror</span></button><button class="n2-tool n2-tool-small" type="button" data-command="TRIM"><span class="n2-icon">✂</span><span>Trim</span></button><button class="n2-tool n2-tool-small" type="button" data-command="EXTEND"><span class="n2-icon">⇥</span><span>Extend</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="FILLET"><span class="n2-icon">⌜</span><span>Fillet</span></button><button class="n2-tool n2-tool-small" type="button" data-command="CHAMFER"><span class="n2-icon">◿</span><span>Chamfer</span></button><button class="n2-tool n2-tool-small" type="button" data-command="OFFSET"><span class="n2-icon">⇆</span><span>Offset</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="STRETCH"><span class="n2-icon">⇱</span><span>Stretch</span></button><button id="n2-more-toggle" class="n2-tool n2-tool-small" type="button"><span class="n2-icon">⋯</span><span>More</span></button></div>
+        </div><small>MODIFY</small>
       </section>
-
-      <section class="n2-ribbon-group n2-group-select">
-        <div class="n2-ribbon-row">
-          <button id="n2-select" class="n2-tool active" type="button" disabled><span class="n2-icon">↖</span><span>Selection</span></button>
-          <button id="n2-delete" class="n2-tool" type="button" disabled><span class="n2-icon">⌫</span><span>Delete</span></button>
-          <button id="n2-undo" class="n2-tool compact" type="button" disabled title="Undo">↶</button>
-          <button id="n2-redo" class="n2-tool compact" type="button" disabled title="Redo">↷</button>
-        </div>
-        <small>EDIT</small>
-      </section>
-
-      <section class="n2-ribbon-group n2-group-layer">
-        <div class="n2-ribbon-row">
-          <div class="n2-layer-picker" title="Current / selected layer"><span id="n2-layer-swatch" class="n2-layer-swatch" aria-hidden="true"></span><select id="n2-layer-select" class="n2-layer-select" disabled aria-label="Current layer"></select></div>
-          <button id="n2-layers" class="n2-tool" type="button" disabled><span class="n2-icon">▤</span><span>Layers</span></button>
-        </div>
-        <small>LAYERS</small>
-      </section>
-
-      <section class="n2-ribbon-group n2-group-inspect">
-        <div class="n2-ribbon-row">
-          <button id="n2-measure" class="n2-tool" type="button" disabled><span class="n2-icon">↔</span><span>Measure</span></button>
-          <button id="n2-analyze" class="n2-tool" type="button" disabled><span class="n2-icon">✓</span><span>Analyze</span></button>
-          <button id="n2-properties" class="n2-tool" type="button" disabled><span class="n2-icon">ⓘ</span><span>Properties</span></button>
-          <button id="n2-fit" class="n2-tool compact" type="button" disabled title="Fit view">⌖</button>
-        </div>
-        <small>INSPECT</small>
-      </section>
-
-      <div class="n2-spacer"></div>
-      <section class="n2-ribbon-group n2-group-window">
-        <div class="n2-ribbon-row">
-          <button id="n2-fullscreen" class="n2-tool compact" type="button" title="CAD fullscreen">⛶</button>
-          <button id="n2-close" class="n2-tool compact danger" type="button" disabled title="Close">×</button>
-        </div>
-        <small>VIEW</small>
-      </section>
+      <section class="n2-ribbon-group n2-group-select"><div class="n2-ribbon-layout"><div class="n2-ribbon-stack"><button id="n2-select" class="n2-tool n2-tool-small active" type="button" disabled><span class="n2-icon">↖</span><span>Selection</span></button><button id="n2-delete" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">⌫</span><span>Delete</span></button></div><div class="n2-ribbon-stack n2-ribbon-stack-icons"><button id="n2-undo" class="n2-tool compact" type="button" disabled>↶</button><button id="n2-redo" class="n2-tool compact" type="button" disabled>↷</button></div></div><small>EDIT</small></section>
+      <section class="n2-ribbon-group n2-group-layer"><div class="n2-ribbon-layout"><div class="n2-layer-picker" title="Current / selected layer"><span id="n2-layer-swatch" class="n2-layer-swatch"></span><select id="n2-layer-select" class="n2-layer-select" disabled></select></div><button id="n2-layers" class="n2-tool n2-tool-large" type="button" disabled><span class="n2-icon">▤</span><span>Layers</span></button></div><small>LAYERS</small></section>
+      <section class="n2-ribbon-group n2-group-inspect"><div class="n2-ribbon-layout"><div class="n2-ribbon-stack"><button id="n2-measure" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">↔</span><span>Measure</span></button><button id="n2-analyze" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">✓</span><span>Analyze</span></button><button id="n2-properties" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">ⓘ</span><span>Properties</span></button></div><div class="n2-ribbon-stack n2-ribbon-stack-icons"><button id="n2-fit" class="n2-tool compact" type="button" disabled>⌖</button><button id="n2-fullscreen" class="n2-tool compact" type="button">⛶</button><button id="n2-close" class="n2-tool compact danger" type="button" disabled>×</button></div></div><small>INSPECT</small></section>
     </div>
-
     <div id="n2-more-menu" class="n2-ribbon-menu-pop n2-ribbon-menu-portal" hidden>
       <button type="button" data-command="ARRAYRECT"><b>AR</b><span>Rectangular array</span></button>
               <button type="button" data-command="ARRAYPOLAR"><b>AR</b><span>Polar array</span></button>
@@ -126,6 +71,7 @@
               <button type="button" data-command="EXPLODE"><b>X</b><span>Explode</span></button>
               <button type="button" data-command="SCALE"><b>SC</b><span>Scale</span></button>
               <button type="button" data-command="TEXTEDIT"><b>ED</b><span>Edit text</span></button>
+              <button type="button" data-command="DIMSTYLE"><b>D</b><span>Dimension style</span></button>
     </div>
 
     <div id="n2-empty" class="n2-empty">
@@ -133,7 +79,7 @@
     </div>
 
     <aside id="n2-layer-drawer" class="n2-drawer n2-left" hidden>
-      <div class="n2-drawer-head"><span>DXF LAYERS</span><button data-close-drawer="layers">×</button></div>
+      <div class="n2-drawer-head"><span>LAYERS DXF</span><button data-close-drawer="layers">×</button></div>
       <div class="n2-layer-note">DXF / ACI colors · Unused layers are preserved.</div>
       <div class="n2-drawer-actions"><button id="n2-layers-all">Show all</button><button id="n2-layers-none">Hide all</button></div>
       <div id="n2-layer-list" class="n2-layer-list"></div>
@@ -172,7 +118,7 @@
         <label><input type="checkbox" data-osnap="perp"><span>Perpendicular</span></label>
         <label><input type="checkbox" data-osnap="tangent"><span>Tangent</span></label>
         <label><input type="checkbox" data-osnap="nearest" checked><span>Nearest</span></label>
-                <label><input type="checkbox" data-osnap="gcenter"><span>Center géométrique</span></label>
+                <label><input type="checkbox" data-osnap="gcenter"><span>Geometric Center</span></label>
         <label><input type="checkbox" data-osnap="insert"><span>Insertion</span></label>
 <label><input type="checkbox" data-osnap="node" checked><span>Node</span></label>
         <label><input type="checkbox" data-osnap="extension"><span>Extension</span></label>
@@ -183,7 +129,7 @@
 
     <div class="n2-commandline">
       <div id="n2-command-history" class="n2-command-history">Navo2D ready. Commands: L, PL, C, A, REC, T · DIM, DLI, DAL, DAN, DRA, DDI · TR, EX, F, CHA, S, AR...</div>
-      <div class="n2-command-entry"><span id="n2-command-prompt">Command:</span><input id="n2-command-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command"></div>
+      <div class="n2-command-entry"><span id="n2-command-prompt">Command:</span><input id="n2-command-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Commande"></div>
     </div>
 
     <div id="n2-toast" class="n2-toast" hidden></div>

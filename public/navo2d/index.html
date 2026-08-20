@@ -29,92 +29,37 @@
 
     <div class="n2-toolbar n2-ribbon" role="toolbar" aria-label="Outils Navo2D">
       <section class="n2-ribbon-group n2-group-file">
-        <div class="n2-ribbon-row">
-          <label class="n2-tool n2-open"><input id="n2-file" type="file" accept=".dxf" hidden><span class="n2-icon">＋</span><span>Ouvrir</span></label>
-          <button id="n2-export" class="n2-tool primary" type="button" disabled><span class="n2-icon">⇩</span><span>DXF</span></button>
-        </div>
-        <small>FICHIER</small>
+        <div class="n2-ribbon-layout n2-file-layout">
+          <label class="n2-tool n2-tool-large n2-open"><input id="n2-file" type="file" accept=".dxf" hidden><span class="n2-icon">＋</span><span>Ouvrir</span></label>
+          <button id="n2-export" class="n2-tool n2-tool-large primary" type="button" disabled><span class="n2-icon">⇩</span><span>DXF</span></button>
+        </div><small>FICHIER</small>
       </section>
-
-      <section class="n2-ribbon-group">
-        <div class="n2-ribbon-row n2-ribbon-draw">
-          <button class="n2-tool n2-cmd-button" type="button" data-command="LINE" title="Ligne · L"><span class="n2-icon">╱</span><span>Ligne</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="PLINE" title="Polyligne · PL"><span class="n2-icon">⌁</span><span>Polyligne</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="CIRCLE" title="Cercle · C"><span class="n2-icon">○</span><span>Cercle</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="ARC" title="Arc · A"><span class="n2-icon">⌒</span><span>Arc</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="RECTANG" title="Rectangle · REC"><span class="n2-icon">▭</span><span>Rectangle</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="TEXT" title="Texte · T"><span class="n2-icon">T</span><span>Texte</span></button>
-        </div>
-        <small>DESSINER</small>
+      <section class="n2-ribbon-group n2-group-draw">
+        <div class="n2-ribbon-layout">
+          <button class="n2-tool n2-tool-large n2-cmd-button" type="button" data-command="LINE" title="Ligne · L"><span class="n2-icon">╱</span><span>Ligne</span></button>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="PLINE"><span class="n2-icon">⌁</span><span>Polyligne</span></button><button class="n2-tool n2-tool-small" type="button" data-command="CIRCLE"><span class="n2-icon">○</span><span>Cercle</span></button><button class="n2-tool n2-tool-small" type="button" data-command="ARC"><span class="n2-icon">⌒</span><span>Arc</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="RECTANG"><span class="n2-icon">▭</span><span>Rectangle</span></button><button class="n2-tool n2-tool-small" type="button" data-command="TEXT"><span class="n2-icon">T</span><span>Texte</span></button></div>
+        </div><small>DESSINER</small>
       </section>
-
       <section class="n2-ribbon-group n2-group-dimension">
-        <div class="n2-ribbon-row">
-          <button class="n2-tool n2-cmd-button primary" type="button" data-command="DIM" title="Cote intelligente · DIM"><span class="n2-icon">D</span><span>Cote auto</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMLINEAR" title="Cote linéaire · DLI"><span class="n2-icon">↔</span><span>Linéaire</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMALIGNED" title="Cote alignée · DAL"><span class="n2-icon">╱</span><span>Alignée</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMANGULAR" title="Cote angulaire · DAN"><span class="n2-icon">∠</span><span>Angle</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMRADIUS" title="Cote rayon · DRA"><span class="n2-icon">R</span><span>Rayon</span></button>
-          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMDIAMETER" title="Cote diamètre · DDI"><span class="n2-icon">Ø</span><span>Diamètre</span></button>
-        </div>
-        <small>COTATION</small>
+        <div class="n2-ribbon-layout">
+          <button class="n2-tool n2-tool-large primary" type="button" data-command="DIM"><span class="n2-icon">D</span><span>Cote auto</span></button>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="DIMLINEAR"><span class="n2-icon">↔</span><span>Linéaire</span></button><button class="n2-tool n2-tool-small" type="button" data-command="DIMALIGNED"><span class="n2-icon">╱</span><span>Alignée</span></button><button class="n2-tool n2-tool-small" type="button" data-command="DIMANGULAR"><span class="n2-icon">∠</span><span>Angle</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="DIMRADIUS"><span class="n2-icon">R</span><span>Rayon</span></button><button class="n2-tool n2-tool-small" type="button" data-command="DIMDIAMETER"><span class="n2-icon">Ø</span><span>Diamètre</span></button></div>
+        </div><small>COTATION</small>
       </section>
-
       <section class="n2-ribbon-group n2-modify-group">
-        <div class="n2-ribbon-row">
-          <button id="n2-move" class="n2-tool" type="button" disabled title="Déplacer · M"><span class="n2-icon">✥</span><span>Déplacer</span></button>
-          <button class="n2-tool" type="button" data-command="COPY" title="Copier · CO"><span class="n2-icon">⧉</span><span>Copier</span></button>
-          <button class="n2-tool" type="button" data-command="ROTATE" title="Rotation · RO"><span class="n2-icon">↻</span><span>Rotation</span></button>
-          <button class="n2-tool" type="button" data-command="MIRROR" title="Miroir · MI"><span class="n2-icon">◫</span><span>Miroir</span></button>
-          <button class="n2-tool" type="button" data-command="TRIM" title="Ajuster · TR"><span class="n2-icon">✂</span><span>Ajuster</span></button>
-          <button class="n2-tool" type="button" data-command="EXTEND" title="Prolonger · EX"><span class="n2-icon">⇥</span><span>Prolonger</span></button>
-          <button class="n2-tool" type="button" data-command="FILLET" title="Congé · F"><span class="n2-icon">⌜</span><span>Congé</span></button>
-          <button class="n2-tool" type="button" data-command="CHAMFER" title="Chanfrein · CHA"><span class="n2-icon">◿</span><span>Chanfrein</span></button>
-          <button class="n2-tool" type="button" data-command="OFFSET" title="Décalage · O"><span class="n2-icon">⇆</span><span>Décalage</span></button>
-          <button class="n2-tool" type="button" data-command="STRETCH" title="Étirer · S"><span class="n2-icon">⇱</span><span>Étirer</span></button>
-          <button id="n2-more-toggle" class="n2-tool" type="button"><span class="n2-icon">⋯</span><span>Plus</span></button>
-        </div>
-        <small>MODIFIER</small>
+        <div class="n2-ribbon-layout">
+          <div class="n2-ribbon-stack"><button id="n2-move" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">✥</span><span>Déplacer</span></button><button class="n2-tool n2-tool-small" type="button" data-command="COPY"><span class="n2-icon">⧉</span><span>Copier</span></button><button class="n2-tool n2-tool-small" type="button" data-command="ROTATE"><span class="n2-icon">↻</span><span>Rotation</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="MIRROR"><span class="n2-icon">◫</span><span>Miroir</span></button><button class="n2-tool n2-tool-small" type="button" data-command="TRIM"><span class="n2-icon">✂</span><span>Ajuster</span></button><button class="n2-tool n2-tool-small" type="button" data-command="EXTEND"><span class="n2-icon">⇥</span><span>Prolonger</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="FILLET"><span class="n2-icon">⌜</span><span>Congé</span></button><button class="n2-tool n2-tool-small" type="button" data-command="CHAMFER"><span class="n2-icon">◿</span><span>Chanfrein</span></button><button class="n2-tool n2-tool-small" type="button" data-command="OFFSET"><span class="n2-icon">⇆</span><span>Décalage</span></button></div>
+          <div class="n2-ribbon-stack"><button class="n2-tool n2-tool-small" type="button" data-command="STRETCH"><span class="n2-icon">⇱</span><span>Étirer</span></button><button id="n2-more-toggle" class="n2-tool n2-tool-small" type="button"><span class="n2-icon">⋯</span><span>Plus</span></button></div>
+        </div><small>MODIFIER</small>
       </section>
-
-      <section class="n2-ribbon-group n2-group-select">
-        <div class="n2-ribbon-row">
-          <button id="n2-select" class="n2-tool active" type="button" disabled><span class="n2-icon">↖</span><span>Sélection</span></button>
-          <button id="n2-delete" class="n2-tool" type="button" disabled><span class="n2-icon">⌫</span><span>Supprimer</span></button>
-          <button id="n2-undo" class="n2-tool compact" type="button" disabled title="Annuler">↶</button>
-          <button id="n2-redo" class="n2-tool compact" type="button" disabled title="Rétablir">↷</button>
-        </div>
-        <small>ÉDITION</small>
-      </section>
-
-      <section class="n2-ribbon-group n2-group-layer">
-        <div class="n2-ribbon-row">
-          <div class="n2-layer-picker" title="Layer courant / layer de la sélection"><span id="n2-layer-swatch" class="n2-layer-swatch" aria-hidden="true"></span><select id="n2-layer-select" class="n2-layer-select" disabled aria-label="Layer courant"></select></div>
-          <button id="n2-layers" class="n2-tool" type="button" disabled><span class="n2-icon">▤</span><span>Layers</span></button>
-        </div>
-        <small>LAYERS</small>
-      </section>
-
-      <section class="n2-ribbon-group n2-group-inspect">
-        <div class="n2-ribbon-row">
-          <button id="n2-measure" class="n2-tool" type="button" disabled><span class="n2-icon">↔</span><span>Mesure</span></button>
-          <button id="n2-analyze" class="n2-tool" type="button" disabled><span class="n2-icon">✓</span><span>Analyser</span></button>
-          <button id="n2-properties" class="n2-tool" type="button" disabled><span class="n2-icon">ⓘ</span><span>Propriétés</span></button>
-          <button id="n2-fit" class="n2-tool compact" type="button" disabled title="Ajuster la vue">⌖</button>
-        </div>
-        <small>INSPECTER</small>
-      </section>
-
-      <div class="n2-spacer"></div>
-      <section class="n2-ribbon-group n2-group-window">
-        <div class="n2-ribbon-row">
-          <button id="n2-fullscreen" class="n2-tool compact" type="button" title="Mode CAD plein écran">⛶</button>
-          <button id="n2-close" class="n2-tool compact danger" type="button" disabled title="Fermer">×</button>
-        </div>
-        <small>VUE</small>
-      </section>
+      <section class="n2-ribbon-group n2-group-select"><div class="n2-ribbon-layout"><div class="n2-ribbon-stack"><button id="n2-select" class="n2-tool n2-tool-small active" type="button" disabled><span class="n2-icon">↖</span><span>Sélection</span></button><button id="n2-delete" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">⌫</span><span>Supprimer</span></button></div><div class="n2-ribbon-stack n2-ribbon-stack-icons"><button id="n2-undo" class="n2-tool compact" type="button" disabled>↶</button><button id="n2-redo" class="n2-tool compact" type="button" disabled>↷</button></div></div><small>ÉDITION</small></section>
+      <section class="n2-ribbon-group n2-group-layer"><div class="n2-ribbon-layout"><div class="n2-layer-picker" title="Layer courant / sélection"><span id="n2-layer-swatch" class="n2-layer-swatch"></span><select id="n2-layer-select" class="n2-layer-select" disabled></select></div><button id="n2-layers" class="n2-tool n2-tool-large" type="button" disabled><span class="n2-icon">▤</span><span>Layers</span></button></div><small>LAYERS</small></section>
+      <section class="n2-ribbon-group n2-group-inspect"><div class="n2-ribbon-layout"><div class="n2-ribbon-stack"><button id="n2-measure" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">↔</span><span>Mesure</span></button><button id="n2-analyze" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">✓</span><span>Analyser</span></button><button id="n2-properties" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">ⓘ</span><span>Propriétés</span></button></div><div class="n2-ribbon-stack n2-ribbon-stack-icons"><button id="n2-fit" class="n2-tool compact" type="button" disabled>⌖</button><button id="n2-fullscreen" class="n2-tool compact" type="button">⛶</button><button id="n2-close" class="n2-tool compact danger" type="button" disabled>×</button></div></div><small>INSPECTER</small></section>
     </div>
-
     <div id="n2-more-menu" class="n2-ribbon-menu-pop n2-ribbon-menu-portal" hidden>
       <button type="button" data-command="ARRAYRECT"><b>AR</b><span>Réseau rectangulaire</span></button>
               <button type="button" data-command="ARRAYPOLAR"><b>AR</b><span>Réseau polaire</span></button>
@@ -126,6 +71,7 @@
               <button type="button" data-command="EXPLODE"><b>X</b><span>Décomposer</span></button>
               <button type="button" data-command="SCALE"><b>SC</b><span>Échelle</span></button>
               <button type="button" data-command="TEXTEDIT"><b>ED</b><span>Éditer texte</span></button>
+              <button type="button" data-command="DIMSTYLE"><b>D</b><span>Style de cote</span></button>
     </div>
 
     <div id="n2-empty" class="n2-empty">
