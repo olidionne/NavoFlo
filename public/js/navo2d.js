@@ -82,6 +82,8 @@ const state={
   filletRadius:0,filletTrim:true,
   chamferA:0,chamferB:0,chamferTrim:true,chamferMethod:'distance',chamferAngleDistance:0,chamferAngle:45,
   textHeight:2.5,textRotation:0,textEditorDraft:null,
+  rotationAngle:0,
+  dimTextRatio:0.020,dimArrowFactor:0.85,dimPrecision:4,
   trimExtendQuick:true,
   gripEdit:null,hoverGrip:null,gripLimit:100,trimBrush:null,lastCrossingRect:null,pickboxSize:9
 };
@@ -354,7 +356,8 @@ function ensureLayerDefinition(name){
   const defaults={
     CUT:{colorIndex:1},
     PLIS_UP:{colorIndex:3},
-    PLIS_DOWN:{colorIndex:4}
+    PLIS_DOWN:{colorIndex:4},
+    DIMENSIONS:{colorIndex:2}
   }[name]||{colorIndex:7};
   const def={name,colorIndex:defaults.colorIndex,trueColor:null,color:aciColorToHex(defaults.colorIndex),visible:true,frozen:false,flags:0,linetype:'CONTINUOUS',lineweight:null,plot:true};
   state.layerDefinitions.set(name,def);
@@ -1947,6 +1950,8 @@ const COMMAND_ALIASES=new Map(Object.entries({
   TR:'TRIM',TRIM:'TRIM',EX:'EXTEND',EXTEND:'EXTEND',F:'FILLET',FILLET:'FILLET',CHA:'CHAMFER',CHAMFER:'CHAMFER',
   S:'STRETCH',STRETCH:'STRETCH',AR:'ARRAY',ARRAY:'ARRAY',ARRAYRECT:'ARRAYRECT',ARRAYPOLAR:'ARRAYPOLAR',
   BR:'BREAK',BREAK:'BREAK',BREAKATPOINT:'BREAKATPOINT',LEN:'LENGTHEN',LENGTHEN:'LENGTHEN',PE:'PEDIT',PEDIT:'PEDIT',
+  DIM:'DIM',DLI:'DIMLINEAR',DIMLINEAR:'DIMLINEAR',DAL:'DIMALIGNED',DIMALIGNED:'DIMALIGNED',
+  DRA:'DIMRADIUS',DIMRADIUS:'DIMRADIUS',DDI:'DIMDIAMETER',DIMDIAMETER:'DIMDIAMETER',DAN:'DIMANGULAR',DIMANGULAR:'DIMANGULAR',
   DI:'DIST',DIST:'DIST',DISTANCE:'DIST',ID:'ID',
   Z:'ZOOM',ZOOM:'ZOOM',ZE:'ZOOMEXTENTS',LA:'LAYER',LAYER:'LAYER',
   U:'UNDO',UNDO:'UNDO',REDO:'REDO',
@@ -1956,7 +1961,7 @@ const COMMAND_ALIASES=new Map(Object.entries({
 }));
 
 const KNOWN_UNIMPLEMENTED=new Set([
-  'H','HATCH','BHATCH','MT','MTEXT','D','DIM','DIMLINEAR','DIMALIGNED',
+  'H','HATCH','BHATCH','MT','MTEXT',
   'ARRAYPATH','B','BLOCK','I','INSERT','WBLOCK','PURGE','PU','XL','XLINE','RAY',
   'EL','ELLIPSE','SPL','SPLINE','ML','MLINE','REG','REGION','BO','BOUNDARY','MA','MATCHPROP',
   'ST','STYLE','LT','LINETYPE','LTSCALE','UN','UNITS','AUDIT','OVERKILL'
@@ -1972,6 +1977,8 @@ const SNAP_OVERRIDE_NAMES={
 function dynamicDimensionAvailable(c=state.command){
   if(!state.dyn||!c||c.selecting||!commandNeedsPoint(c))return false;
   if(['TRIM','EXTEND'].includes(c.name))return false;
+  if(c.name.startsWith('DIM'))return false;
+  if(c.name==='ROTATE'&&['referenceAngle','newAnglePoint1'].includes(c.step))return false;
   if(['FILLET','CHAMFER'].includes(c.name)&&['first','second','distanceA','distancePickSecond','polyline'].includes(c.step))return false;
   if(['BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name)&&c.step==='selectEntity')return false;
   const ref=commandReferencePoint();
@@ -2189,6 +2196,7 @@ function startCommand(rawName){
   state.command={name,step:'',points:[],data:{},selecting:false,createdIds:[]};
   state.lastCommand=name;
   E.workspace.classList.add('command-active');
+  if(name==='ROTATE')commandLog(FR?'Angle positif courant dans le SCU : sens antihoraire · ANGBASE=0':'Current positive angle in UCS: counterclockwise · ANGBASE=0');
 
   if(name==='LINE'){state.command.step='first';setCommandPrompt(`${name} ${CMDT.specifyFirst}:`);}
   else if(name==='PLINE'){state.command.step='first';setCommandPrompt(`${name} ${CMDT.specifyFirst}:`);}
@@ -2215,6 +2223,23 @@ function startCommand(rawName){
     });
     logChamferSettings(state.command);
     setCommandPrompt(chamferPrimaryPrompt(state.command));
+  }
+  else if(name==='DIM'){
+    state.command.step='smartFirst';
+    setCommandPrompt(FR?'DIM Sélectionnez un objet ou spécifiez le premier point:':'DIM Select object or specify first point:');
+  }
+  else if(name==='DIMLINEAR'){
+    state.command.step='first';setCommandPrompt(FR?'DIMLINEAR Spécifiez le premier point d’attache:':'DIMLINEAR Specify first extension line origin:');
+  }
+  else if(name==='DIMALIGNED'){
+    state.command.step='first';setCommandPrompt(FR?'DIMALIGNED Spécifiez le premier point d’attache:':'DIMALIGNED Specify first extension line origin:');
+  }
+  else if(name==='DIMRADIUS'||name==='DIMDIAMETER'){
+    state.command.step='selectEntity';
+    setCommandPrompt(FR?`${name} Sélectionnez un cercle ou un arc:`:`${name} Select circle or arc:`);
+  }
+  else if(name==='DIMANGULAR'){
+    state.command.step='firstLine';setCommandPrompt(FR?'DIMANGULAR Sélectionnez la première ligne:':'DIMANGULAR Select first line:');
   }
   else if(name==='BREAK'||name==='BREAKATPOINT'){state.command.step='selectEntity';setCommandPrompt(FR?`${name} Sélectionnez l’objet`:`${name} Select object`);}
   else if(name==='LENGTHEN'){state.command.step='delta';setCommandPrompt(FR?'LENGTHEN Entrez le delta de longueur:':'LENGTHEN Enter length delta:');}
@@ -2243,6 +2268,7 @@ function afterSelectionConfirmed(name){
   if(name==='PEDIT'){peditSelection();finishCommand();return;}
   if(name==='MOVE'||name==='COPY'||name==='ROTATE'||name==='SCALE'||name==='STRETCH'){
     if(name==='STRETCH'&&!state.command.data.stretchRect&&state.lastCrossingRect)state.command.data.stretchRect={...state.lastCrossingRect};
+    if(name==='ROTATE')Object.assign(state.command.data,{copy:false,referenceAngle:null,refP1:null,newAngleP1:null});
     state.command.step='base';setCommandPrompt(`${name} ${CMDT.basePoint}:`);return;
   }
   if(name==='MIRROR'){
@@ -2267,6 +2293,20 @@ function commandEnter(){
     if(c.step==='height'){c.data.height=state.textHeight;c.step='rotation';setCommandPrompt(FR?`TEXT Angle de rotation <${fmt(state.textRotation)}°>:`:`TEXT Rotation angle <${fmt(state.textRotation)}°>:`);return;}
     if(c.step==='rotation'){c.data.rotation=state.textRotation;c.step='content';setCommandPrompt(FR?'TEXT Entrez le texte:':'TEXT Enter text:');return;}
     if(c.step==='content'){cancelCommand(false);return;}
+  }
+  if(c.name==='ROTATE'){
+    if(c.step==='angle'){
+      const a=(Number(state.rotationAngle)||0)*Math.PI/180;
+      performRotate(a,c.data.copy===true);finishCommand();return;
+    }
+    if(c.step==='referenceAngle'){
+      c.data.referenceAngle=0;c.step='newAngle';
+      setCommandPrompt(rotateNewAnglePrompt(c));return;
+    }
+    if(c.step==='newAngle'){
+      const delta=normalizeAngle(0-(Number(c.data.referenceAngle)||0));
+      performRotate(delta,c.data.copy===true);finishCommand();return;
+    }
   }
   if(c.name==='MIRROR'&&c.step==='eraseSource'){
     performMirror(false);finishCommand();return;
@@ -2371,9 +2411,33 @@ function commandText(raw){
     const n=parseNumber(raw);if(!(n>0))return commandError(CMDT.valueInvalid);
     c.data.distance=n;c.data.through=false;c.step='selectEntity';setCommandPrompt(`${c.name} ${CMDT.offsetObject}:`);return;
   }
-  if(c.name==='ROTATE'&&c.step==='angle'){
-    const n=parseNumber(raw);if(!Number.isFinite(n))return commandError(CMDT.valueInvalid);
-    performRotate(n*Math.PI/180);finishCommand();return;
+  if(c.name==='ROTATE'){
+    if(c.step==='angle'){
+      if(u==='C'||u==='COPY'||u==='COPIE'){
+        c.data.copy=true;
+        commandLog(FR?'Rotation d’une copie des objets sélectionnés.':'Rotating a copy of the selected objects.');
+        setCommandPrompt(rotateAnglePrompt(c));return;
+      }
+      if(u==='R'||u==='REFERENCE'||u==='RÉFÉRENCE'||u==='REFERENCE'){
+        c.step='referenceAngle';c.data.referenceAngle=null;c.data.refP1=null;
+        setCommandPrompt(FR?'ROTATE Spécifiez l’angle de référence <0>:':'ROTATE Specify the reference angle <0>:');return;
+      }
+      const n=parseNumber(raw);if(!Number.isFinite(n))return commandError(CMDT.valueInvalid);
+      state.rotationAngle=n;performRotate(n*Math.PI/180,c.data.copy===true);finishCommand();return;
+    }
+    if(c.step==='referenceAngle'){
+      const n=parseNumber(raw);if(!Number.isFinite(n))return commandError(CMDT.valueInvalid);
+      c.data.referenceAngle=n*Math.PI/180;c.step='newAngle';setCommandPrompt(rotateNewAnglePrompt(c));return;
+    }
+    if(c.step==='newAngle'){
+      if(u==='P'||u==='POINTS'){
+        c.step='newAnglePoint1';c.data.newAngleP1=null;
+        setCommandPrompt(FR?'ROTATE Spécifiez le premier point du nouvel angle:':'ROTATE Specify first point for the new angle:');return;
+      }
+      const n=parseNumber(raw);if(!Number.isFinite(n))return commandError(CMDT.valueInvalid);
+      const delta=normalizeAngle(n*Math.PI/180-(Number(c.data.referenceAngle)||0));
+      state.rotationAngle=delta*180/Math.PI;performRotate(delta,c.data.copy===true);finishCommand();return;
+    }
   }
   if(c.name==='SCALE'&&c.step==='factor'){
     const n=parseNumber(raw);if(!(n>0))return commandError(CMDT.valueInvalid);
@@ -2498,6 +2562,82 @@ function commandPoint(point,event,fromKeyboard=false){
     const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
     if(!hit)return;if(hit.type!=='TEXT')return commandError(FR?'Sélectionnez une entité texte.':'Select a text entity.');
     state.selected=new Set([hit.id]);syncSelectionUI();openTextEditor(hit,event?.clientX,event?.clientY);finishCommand(false);return;
+  }
+
+  if(c.name==='DIM'){
+    if(c.step==='smartFirst'){
+      const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+      if(hit?.type==='LINE'){
+        c.data.p1=copyPoint(hit.p1);c.data.p2=copyPoint(hit.p2);
+        const dx=Math.abs(hit.p2.x-hit.p1.x),dy=Math.abs(hit.p2.y-hit.p1.y),L=Math.hypot(dx,dy);
+        c.data.dimType=(Math.min(dx,dy)<=L*Math.sin(5*Math.PI/180))?'linear':'aligned';c.step='place';
+        setCommandPrompt(FR?'DIM Spécifiez la position de la ligne de cote:':'DIM Specify dimension line location:');return;
+      }
+      if(hit?.type==='CIRCLE'||hit?.type==='ARC'){
+        c.data.entityId=hit.id;c.data.dimType=hit.type==='CIRCLE'?'diameter':'radius';c.step='curvePlace';
+        setCommandPrompt(FR?'DIM Spécifiez la position de la cote:':'DIM Specify dimension location:');return;
+      }
+      c.data.p1=copyPoint(point);c.step='smartSecond';
+      setCommandPrompt(FR?'DIM Spécifiez le deuxième point:':'DIM Specify second point:');return;
+    }
+    if(c.step==='smartSecond'){
+      if(!c.data.p1||dist(c.data.p1,point)<1e-12)return commandError(CMDT.pointInvalid);
+      c.data.p2=copyPoint(point);
+      const dx=Math.abs(point.x-c.data.p1.x),dy=Math.abs(point.y-c.data.p1.y),L=Math.hypot(dx,dy);
+      c.data.dimType=(Math.min(dx,dy)<=L*Math.sin(5*Math.PI/180))?'linear':'aligned';
+      c.step='place';setCommandPrompt(FR?'DIM Spécifiez la position de la ligne de cote:':'DIM Specify dimension line location:');return;
+    }
+    if(c.step==='place'){
+      const items=c.data.dimType==='linear'?buildLinearDimension(c.data.p1,c.data.p2,point,'auto'):buildAlignedDimension(c.data.p1,c.data.p2,point);
+      if(commitDimension(items)){finishCommand();}return;
+    }
+    if(c.step==='curvePlace'){
+      const e=state.entities.find(x=>x.id===c.data.entityId);if(!e)return cancelCommand(true);
+      const items=c.data.dimType==='diameter'?buildDiameterDimension(e,point):buildRadiusDimension(e,point);
+      if(commitDimension(items)){finishCommand();}return;
+    }
+  }
+  if(c.name==='DIMLINEAR'||c.name==='DIMALIGNED'){
+    if(c.step==='first'){c.data.p1=copyPoint(point);c.step='second';setCommandPrompt(FR?`${c.name} Spécifiez le deuxième point d’attache:`:`${c.name} Specify second extension line origin:`);return;}
+    if(c.step==='second'){
+      if(!c.data.p1||dist(c.data.p1,point)<1e-12)return commandError(CMDT.pointInvalid);
+      c.data.p2=copyPoint(point);c.step='place';setCommandPrompt(FR?`${c.name} Spécifiez la position de la ligne de cote:`:`${c.name} Specify dimension line location:`);return;
+    }
+    if(c.step==='place'){
+      const items=c.name==='DIMLINEAR'?buildLinearDimension(c.data.p1,c.data.p2,point,'auto'):buildAlignedDimension(c.data.p1,c.data.p2,point);
+      if(commitDimension(items)){finishCommand();}return;
+    }
+  }
+  if(c.name==='DIMRADIUS'||c.name==='DIMDIAMETER'){
+    if(c.step==='selectEntity'){
+      const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+      if(!hit||!['CIRCLE','ARC'].includes(hit.type))return commandError(FR?'Sélectionnez un cercle ou un arc.':'Select a circle or arc.');
+      c.data.entityId=hit.id;c.step='place';setCommandPrompt(FR?`${c.name} Spécifiez la position de la cote:`:`${c.name} Specify dimension location:`);return;
+    }
+    if(c.step==='place'){
+      const e=state.entities.find(x=>x.id===c.data.entityId);if(!e)return cancelCommand(true);
+      const items=c.name==='DIMRADIUS'?buildRadiusDimension(e,point):buildDiameterDimension(e,point);
+      if(commitDimension(items)){finishCommand();}return;
+    }
+  }
+  if(c.name==='DIMANGULAR'){
+    if(c.step==='firstLine'){
+      const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+      if(!hit||hit.type!=='LINE')return commandError(FR?'Sélectionnez une ligne.':'Select a line.');
+      c.data.firstId=hit.id;c.data.firstPick=copyPoint(point);c.step='secondLine';
+      setCommandPrompt(FR?'DIMANGULAR Sélectionnez la deuxième ligne:':'DIMANGULAR Select second line:');return;
+    }
+    if(c.step==='secondLine'){
+      const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y),first=state.entities.find(x=>x.id===c.data.firstId);
+      if(!hit||hit.type!=='LINE'||!first||hit.id===first.id)return commandError(FR?'Sélectionnez une autre ligne.':'Select another line.');
+      c.data.secondId=hit.id;c.data.secondPick=copyPoint(point);c.step='place';
+      setCommandPrompt(FR?'DIMANGULAR Spécifiez la position de l’arc de cote:':'DIMANGULAR Specify dimension arc line location:');return;
+    }
+    if(c.step==='place'){
+      const a=state.entities.find(x=>x.id===c.data.firstId),b=state.entities.find(x=>x.id===c.data.secondId);
+      const items=buildAngularDimension(a,b,c.data.firstPick,c.data.secondPick,point);
+      if(commitDimension(items)){finishCommand();}return;
+    }
   }
 
   if(c.name==='LINE'){
@@ -2643,16 +2783,50 @@ function commandPoint(point,event,fromKeyboard=false){
   if(c.name==='ID'){
     commandLog(`X = ${fmt(point.x)}, Y = ${fmt(point.y)} ${state.unitLabel}`);toast(`X ${fmt(point.x)}  Y ${fmt(point.y)}`);finishCommand(false);return;
   }
+  if(c.name==='ROTATE'){
+    if(c.step==='referenceAngle'){
+      c.data.refP1=copyPoint(point);c.step='referenceSecond';
+      setCommandPrompt(FR?'ROTATE Spécifiez le deuxième point de l’angle de référence:':'ROTATE Specify second point for the reference angle:');return;
+    }
+    if(c.step==='referenceSecond'){
+      if(!c.data.refP1||dist(c.data.refP1,point)<1e-12)return commandError(CMDT.pointInvalid);
+      c.data.referenceAngle=Math.atan2(point.y-c.data.refP1.y,point.x-c.data.refP1.x);
+      c.step='newAngle';setCommandPrompt(rotateNewAnglePrompt(c));return;
+    }
+    if(c.step==='newAngle'){
+      const target=Math.atan2(point.y-c.data.base.y,point.x-c.data.base.x);
+      const delta=normalizeAngle(target-(Number(c.data.referenceAngle)||0));
+      state.rotationAngle=delta*180/Math.PI;performRotate(delta,c.data.copy===true);finishCommand();return;
+    }
+    if(c.step==='newAnglePoint1'){
+      c.data.newAngleP1=copyPoint(point);c.step='newAnglePointSecond';
+      setCommandPrompt(FR?'ROTATE Spécifiez le deuxième point du nouvel angle:':'ROTATE Specify second point for the new angle:');return;
+    }
+    if(c.step==='newAnglePointSecond'){
+      if(!c.data.newAngleP1||dist(c.data.newAngleP1,point)<1e-12)return commandError(CMDT.pointInvalid);
+      const target=Math.atan2(point.y-c.data.newAngleP1.y,point.x-c.data.newAngleP1.x);
+      const delta=normalizeAngle(target-(Number(c.data.referenceAngle)||0));
+      state.rotationAngle=delta*180/Math.PI;performRotate(delta,c.data.copy===true);finishCommand();return;
+    }
+  }
+
   if(c.name==='MOVE'||c.name==='COPY'||c.name==='ROTATE'||c.name==='SCALE'){
-    if(c.step==='base'){c.data.base=copyPoint(point);resetDynamicInput();c.step=c.name==='ROTATE'?'angle':c.name==='SCALE'?'factor':'target';setCommandPrompt(`${c.name} ${c.name==='ROTATE'?CMDT.rotationAngle:c.name==='SCALE'?CMDT.scaleFactor:CMDT.secondPoint}:`);return;}
+    if(c.step==='base'){
+      c.data.base=copyPoint(point);resetDynamicInput();
+      c.step=c.name==='ROTATE'?'angle':c.name==='SCALE'?'factor':'target';
+      if(c.name==='ROTATE')setCommandPrompt(rotateAnglePrompt(c));
+      else setCommandPrompt(`${c.name} ${c.name==='SCALE'?CMDT.scaleFactor:CMDT.secondPoint}:`);
+      return;
+    }
     if(c.step==='target'){
       const dx=point.x-c.data.base.x,dy=point.y-c.data.base.y;
       if(c.name==='MOVE'){pushHistory();translateSelected(dx,dy);toast(T.moved);}
       else{performCopy(dx,dy);toast(CMDT.copied);}
       finishCommand();return;
     }
-    if(c.step==='angle'){
-      const ang=Math.atan2(point.y-c.data.base.y,point.x-c.data.base.x);performRotate(ang);finishCommand();return;
+    if(c.name==='ROTATE'&&c.step==='angle'){
+      const ang=Math.atan2(point.y-c.data.base.y,point.x-c.data.base.x);
+      state.rotationAngle=ang*180/Math.PI;performRotate(ang,c.data.copy===true);finishCommand();return;
     }
     if(c.step==='factor'){
       const factor=dist(c.data.base,point);
@@ -2689,11 +2863,16 @@ function commandPoint(point,event,fromKeyboard=false){
 function commandNeedsPoint(c){
   if(!c||c.selecting)return false;
   if(['LINE','PLINE','ARC','RECTANG','DIST','ID'].includes(c.name))return true;
+  if(c.name==='DIM')return ['smartFirst','smartSecond','place','curvePlace'].includes(c.step);
+  if(c.name==='DIMLINEAR'||c.name==='DIMALIGNED')return ['first','second','place'].includes(c.step);
+  if(c.name==='DIMRADIUS'||c.name==='DIMDIAMETER')return ['selectEntity','place'].includes(c.step);
+  if(c.name==='DIMANGULAR')return ['firstLine','secondLine','place'].includes(c.step);
   if(c.name==='TEXT')return c.step==='insertion';
   if(c.name==='TEXTEDIT')return c.step==='selectEntity';
   if(c.name==='CIRCLE')return c.step==='center'||c.step==='radius';
   if(['MOVE','COPY','STRETCH'].includes(c.name))return c.step==='base'||c.step==='target';
-  if(['ROTATE','SCALE'].includes(c.name))return c.step==='base'||c.step==='angle'||c.step==='factor';
+  if(c.name==='ROTATE')return ['base','angle','referenceAngle','referenceSecond','newAngle','newAnglePoint1','newAnglePointSecond'].includes(c.step);
+  if(c.name==='SCALE')return c.step==='base'||c.step==='factor';
   if(c.name==='MIRROR')return c.step==='mirror1'||c.step==='mirror2';
   if(c.name==='OFFSET')return c.step==='selectEntity'||c.step==='side';
   if(['TRIM','EXTEND','FILLET','CHAMFER','BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name))return ['pick','first','second','distanceA','distancePickSecond','polyline','selectEntity'].includes(c.step);
@@ -2710,7 +2889,12 @@ function commandReferencePoint(){
   if(c.name==='RECTANG'&&c.points.length)return c.points[0];
   if(c.name==='DIST'&&c.points.length)return c.points[0];
   if(c.name==='TEXT'&&c.data.point)return c.data.point;
-  if(['MOVE','COPY','ROTATE','SCALE','STRETCH'].includes(c.name)&&c.data.base)return c.data.base;
+  if(c.name==='ROTATE'){
+    if(c.step==='referenceSecond'&&c.data.refP1)return c.data.refP1;
+    if(c.step==='newAnglePointSecond'&&c.data.newAngleP1)return c.data.newAngleP1;
+    if(c.data.base)return c.data.base;
+  }
+  if(['MOVE','COPY','SCALE','STRETCH'].includes(c.name)&&c.data.base)return c.data.base;
   if(c.name==='ARRAYPOLAR'&&c.data.center)return c.data.center;
   if(c.name==='MIRROR'&&c.data.p1)return c.data.p1;
   return null;
@@ -2735,6 +2919,18 @@ function cancelCommand(log=true){
   state.command=null;state.snapOverride=null;state.trackingPoint=null;state.selectionBox=null;E.workspace.classList.remove('command-active');
   if(log&&had)commandLog(CMDT.canceled);
   updateCommandPrompt();
+}
+
+// V6.8 — AutoCAD-style ROTATE workflow: Copy + Reference + Points.
+function rotateAnglePrompt(c=state.command){
+  const def=fmt(Number(state.rotationAngle)||0);
+  if(FR)return `ROTATE Spécifiez l’angle de rotation ou [${c?.data?.copy?'Référence':'Copie/Référence'}] <${def}>:`;
+  return `ROTATE Specify rotation angle or [${c?.data?.copy?'Reference':'Copy/Reference'}] <${def}>:`;
+}
+function rotateNewAnglePrompt(c=state.command){
+  const ref=((Number(c?.data?.referenceAngle)||0)*180/Math.PI);
+  if(FR)return `ROTATE Spécifiez le nouvel angle ou [Points] <${fmt(ref)}>:`;
+  return `ROTATE Specify the new angle or [Points] <${fmt(ref)}>:`;
 }
 
 // V6.6 — AutoCAD-style rich command options.
@@ -2889,11 +3085,161 @@ function arcFrom3Points(a,b,c){
   return{center,radius,start,end};
 }
 
+
+// V6.8 — Navo2D adaptive dimension engine.
+// Dimensions are exported as standard LINE / ARC / TEXT primitives on a
+// dedicated DIMENSIONS layer, keeping R12/CAM compatibility while remaining
+// visually consistent at any drawing scale.
+function dimensionSourceBounds(){
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for(const e of state.entities){
+    if(e.dimGenerated||e.layer==='DIMENSIONS'||!layerVisible(e.layer))continue;
+    for(const q of entitySamples(e)){
+      if(!Number.isFinite(q?.x)||!Number.isFinite(q?.y))continue;
+      minX=Math.min(minX,q.x);minY=Math.min(minY,q.y);maxX=Math.max(maxX,q.x);maxY=Math.max(maxY,q.y);
+    }
+  }
+  if(!Number.isFinite(minX))return state.bounds;
+  return{minX,minY,maxX,maxY,width:Math.max(maxX-minX,1e-9),height:Math.max(maxY-minY,1e-9)};
+}
+function dimensionStyle(){
+  const b=dimensionSourceBounds(),diag=b?Math.hypot(b.width,b.height):100;
+  const scale=Math.max(diag,1e-6),textHeight=Math.max(scale*(Number(state.dimTextRatio)||.02),1e-6);
+  return{textHeight,arrow:textHeight*(Number(state.dimArrowFactor)||.85),gap:textHeight*.38,extGap:textHeight*.20,extBeyond:textHeight*.55};
+}
+function dimensionBase(type,groupId='preview'){
+  return{id:`dim-${groupId}`,type,rawType:type,layer:'DIMENSIONS',colorMode:'bylayer',colorIndex:256,trueColor:null,approx:false,dimGenerated:true,dimGroupId:groupId};
+}
+function dimLine(a,b,groupId='preview'){
+  if(!a||!b||dist(a,b)<1e-12)return null;
+  return{...dimensionBase('LINE',groupId),p1:copyPoint(a),p2:copyPoint(b)};
+}
+function dimArc(center,radius,start,end,groupId='preview'){
+  if(!(radius>1e-12))return null;
+  return{...dimensionBase('ARC',groupId),center:copyPoint(center),radius,start,end};
+}
+function dimText(text,center,rotationRad,style,groupId='preview'){
+  const value=String(text),h=style.textHeight,a=readableDimensionAngle(rotationRad),ux={x:Math.cos(a),y:Math.sin(a)},uy={x:-Math.sin(a),y:Math.cos(a)},w=Math.max(h*.4,value.length*h*.62);
+  const point={x:center.x-ux.x*w/2+uy.x*h*.62,y:center.y-ux.y*w/2+uy.y*h*.62};
+  return{...dimensionBase('TEXT',groupId),point,text:value,height:h,rotation:a*180/Math.PI};
+}
+function readableDimensionAngle(a){
+  a=normalizeAngle(a);
+  if(a>Math.PI/2||a<-Math.PI/2)a=normalizeAngle(a+Math.PI);
+  return a;
+}
+function dimArrow(items,tip,pointingDir,size,groupId='preview'){
+  const L=Math.hypot(pointingDir.x,pointingDir.y);if(L<1e-12)return;
+  const u={x:pointingDir.x/L,y:pointingDir.y/L},n={x:-u.y,y:u.x},back={x:tip.x-u.x*size,y:tip.y-u.y*size},wing=size*.34;
+  const a={x:back.x+n.x*wing,y:back.y+n.y*wing},b={x:back.x-n.x*wing,y:back.y-n.y*wing};
+  const l1=dimLine(tip,a,groupId),l2=dimLine(tip,b,groupId);if(l1)items.push(l1);if(l2)items.push(l2);
+}
+function dimExtension(items,origin,dimPoint,dir,style,groupId='preview'){
+  const L=Math.hypot(dir.x,dir.y);if(L<1e-12)return;const u={x:dir.x/L,y:dir.y/L};
+  const a={x:origin.x+u.x*style.extGap,y:origin.y+u.y*style.extGap},b={x:dimPoint.x+u.x*style.extBeyond,y:dimPoint.y+u.y*style.extBeyond};
+  const l=dimLine(a,b,groupId);if(l)items.push(l);
+}
+function dimensionNumber(v){
+  const n=Math.abs(Number(v)||0),p=Math.max(0,Math.min(8,Number(state.dimPrecision)||4));
+  return new Intl.NumberFormat(FR?'fr-CA':'en-CA',{maximumFractionDigits:p}).format(n);
+}
+function buildLinearDimension(p1,p2,location,orientation='auto',groupId='preview'){
+  if(!p1||!p2||!location)return[];const style=dimensionStyle(),dx=p2.x-p1.x,dy=p2.y-p1.y,mid={x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2};
+  let horizontal=orientation==='horizontal'?true:orientation==='vertical'?false:Math.abs(location.y-mid.y)>=Math.abs(location.x-mid.x);
+  if(Math.abs(dx)<1e-12)horizontal=false;if(Math.abs(dy)<1e-12)horizontal=true;
+  let q1,q2,measure,rotation,extDir;
+  if(horizontal){q1={x:p1.x,y:location.y};q2={x:p2.x,y:location.y};measure=Math.abs(dx);rotation=0;extDir={x:0,y:Math.sign(location.y-mid.y)||1};}
+  else{q1={x:location.x,y:p1.y};q2={x:location.x,y:p2.y};measure=Math.abs(dy);rotation=Math.PI/2;extDir={x:Math.sign(location.x-mid.x)||1,y:0};}
+  const items=[],u0={x:q2.x-q1.x,y:q2.y-q1.y},L=Math.hypot(u0.x,u0.y);if(L<1e-12)return[];
+  const u={x:u0.x/L,y:u0.y/L};dimExtension(items,p1,q1,extDir,style,groupId);dimExtension(items,p2,q2,extDir,style,groupId);
+  const dl=dimLine(q1,q2,groupId);if(dl)items.push(dl);dimArrow(items,q1,u,style.arrow,groupId);dimArrow(items,q2,{x:-u.x,y:-u.y},style.arrow,groupId);
+  items.push(dimText(dimensionNumber(measure),{x:(q1.x+q2.x)/2,y:(q1.y+q2.y)/2},rotation,style,groupId));return items;
+}
+function buildAlignedDimension(p1,p2,location,groupId='preview'){
+  if(!p1||!p2||!location)return[];const style=dimensionStyle(),vx=p2.x-p1.x,vy=p2.y-p1.y,L=Math.hypot(vx,vy);if(L<1e-12)return[];
+  const u={x:vx/L,y:vy/L},n={x:-u.y,y:u.x},mid={x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2};
+  let off=(location.x-mid.x)*n.x+(location.y-mid.y)*n.y;if(Math.abs(off)<style.textHeight*.5)off=(off<0?-1:1)*style.textHeight*1.5;
+  const q1={x:p1.x+n.x*off,y:p1.y+n.y*off},q2={x:p2.x+n.x*off,y:p2.y+n.y*off},extDir={x:n.x*Math.sign(off),y:n.y*Math.sign(off)},items=[];
+  dimExtension(items,p1,q1,extDir,style,groupId);dimExtension(items,p2,q2,extDir,style,groupId);
+  const dl=dimLine(q1,q2,groupId);if(dl)items.push(dl);dimArrow(items,q1,u,style.arrow,groupId);dimArrow(items,q2,{x:-u.x,y:-u.y},style.arrow,groupId);
+  items.push(dimText(dimensionNumber(L),{x:(q1.x+q2.x)/2,y:(q1.y+q2.y)/2},Math.atan2(u.y,u.x),style,groupId));return items;
+}
+function buildRadiusDimension(e,location,groupId='preview'){
+  if(!e||!['CIRCLE','ARC'].includes(e.type)||!(e.radius>0))return[];const style=dimensionStyle(),c=e.center,raw={x:location.x-c.x,y:location.y-c.y},L=Math.hypot(raw.x,raw.y),u=L>1e-12?{x:raw.x/L,y:raw.y/L}:{x:1,y:0},tip={x:c.x+u.x*e.radius,y:c.y+u.y*e.radius};
+  let label=copyPoint(location);if(dist(label,tip)<style.textHeight*2)label={x:c.x+u.x*(e.radius+style.textHeight*2.4),y:c.y+u.y*(e.radius+style.textHeight*2.4)};
+  const items=[],leader=dimLine(tip,label,groupId);if(leader)items.push(leader);const towardTip={x:tip.x-label.x,y:tip.y-label.y};dimArrow(items,tip,towardTip,style.arrow,groupId);
+  items.push(dimText(`R${dimensionNumber(e.radius)}`,label,0,style,groupId));return items;
+}
+function buildDiameterDimension(e,location,groupId='preview'){
+  if(!e||!['CIRCLE','ARC'].includes(e.type)||!(e.radius>0))return[];const style=dimensionStyle(),c=e.center,raw={x:location.x-c.x,y:location.y-c.y},L=Math.hypot(raw.x,raw.y),u=L>1e-12?{x:raw.x/L,y:raw.y/L}:{x:1,y:0},q1={x:c.x-u.x*e.radius,y:c.y-u.y*e.radius},q2={x:c.x+u.x*e.radius,y:c.y+u.y*e.radius},items=[];
+  const dl=dimLine(q1,q2,groupId);if(dl)items.push(dl);dimArrow(items,q1,u,style.arrow,groupId);dimArrow(items,q2,{x:-u.x,y:-u.y},style.arrow,groupId);
+  const center={x:(q1.x+q2.x)/2,y:(q1.y+q2.y)/2};items.push(dimText(`Ø${dimensionNumber(e.radius*2)}`,center,Math.atan2(u.y,u.x),style,groupId));return items;
+}
+function buildAngularDimension(a,b,pickA,pickB,location,groupId='preview'){
+  if(a?.type!=='LINE'||b?.type!=='LINE')return[];const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);if(!I)return[];
+  const d1=branchDirection(a,I,pickA),d2=branchDirection(b,I,pickB);if(!d1||!d2)return[];const dot=Math.max(-1,Math.min(1,d1.x*d2.x+d1.y*d2.y)),theta=Math.acos(dot);if(theta<1e-7||Math.PI-theta<1e-7)return[];
+  const style=dimensionStyle(),minR=style.textHeight*3,r=Math.max(dist(I,location),minR),cross=d1.x*d2.y-d1.y*d2.x;
+  const sdir=cross>=0?d1:d2,edir=cross>=0?d2:d1,start=Math.atan2(sdir.y,sdir.x),end=Math.atan2(edir.y,edir.x),items=[];
+  const arc=dimArc(I,r,start,end,groupId);if(arc)items.push(arc);
+  const ps={x:I.x+sdir.x*r,y:I.y+sdir.y*r},pe={x:I.x+edir.x*r,y:I.y+edir.y*r},sign=1;
+  const ts={x:-sdir.y*sign,y:sdir.x*sign},te={x:-edir.y*sign,y:edir.x*sign};
+  dimArrow(items,ps,ts,style.arrow,groupId);dimArrow(items,pe,{x:-te.x,y:-te.y},style.arrow,groupId);
+  const es1=dimLine({x:I.x+sdir.x*(r-style.textHeight*.8),y:I.y+sdir.y*(r-style.textHeight*.8)},{x:I.x+sdir.x*(r+style.extBeyond),y:I.y+sdir.y*(r+style.extBeyond)},groupId);
+  const es2=dimLine({x:I.x+edir.x*(r-style.textHeight*.8),y:I.y+edir.y*(r-style.textHeight*.8)},{x:I.x+edir.x*(r+style.extBeyond),y:I.y+edir.y*(r+style.extBeyond)},groupId);if(es1)items.push(es1);if(es2)items.push(es2);
+  const midA=start+theta/2,tc={x:I.x+Math.cos(midA)*(r+style.textHeight*.65),y:I.y+Math.sin(midA)*(r+style.textHeight*.65)};
+  items.push(dimText(`${dimensionNumber(theta*180/Math.PI)}°`,tc,0,style,groupId));return items;
+}
+function commitDimension(items){
+  const valid=(items||[]).filter(Boolean);if(!valid.length)return commandError(FR?'Impossible de créer cette cote.':'Unable to create this dimension.');
+  pushHistory();ensureLayerDefinition('DIMENSIONS');const gid=`D${Date.now().toString(36)}-${state.entitySeq+1}`;
+  for(const src of valid){
+    const e=JSON.parse(JSON.stringify(src));e.id=nextEntityId();e.layer='DIMENSIONS';e.dimGenerated=true;e.dimGroupId=gid;state.entities.push(e);
+  }
+  state.selected.clear();afterGeometryChange();toast(FR?'Cote créée.':'Dimension created.');return true;
+}
+function dimensionPreviewForCommand(c,p){
+  if(!c||!p)return[];
+  if((c.name==='DIM'||c.name==='DIMLINEAR'||c.name==='DIMALIGNED')&&c.step==='place'){
+    if(c.name==='DIMLINEAR'||c.data.dimType==='linear')return buildLinearDimension(c.data.p1,c.data.p2,p,'auto');
+    return buildAlignedDimension(c.data.p1,c.data.p2,p);
+  }
+  if(c.name==='DIM'&&c.step==='curvePlace'){
+    const e=state.entities.find(x=>x.id===c.data.entityId);return c.data.dimType==='diameter'?buildDiameterDimension(e,p):buildRadiusDimension(e,p);
+  }
+  if((c.name==='DIMRADIUS'||c.name==='DIMDIAMETER')&&c.step==='place'){
+    const e=state.entities.find(x=>x.id===c.data.entityId);return c.name==='DIMRADIUS'?buildRadiusDimension(e,p):buildDiameterDimension(e,p);
+  }
+  if(c.name==='DIMANGULAR'&&c.step==='place'){
+    const a=state.entities.find(x=>x.id===c.data.firstId),b=state.entities.find(x=>x.id===c.data.secondId);
+    return buildAngularDimension(a,b,c.data.firstPick,c.data.secondPick,p);
+  }
+  return[];
+}
+
 function selectedEntities(){return state.entities.filter(e=>state.selected.has(e.id));}
 function cloneEntity(e,newId=true){const c=JSON.parse(JSON.stringify(e));if(newId)c.id=nextEntityId();return c;}
 function performCopy(dx,dy){pushHistory();const copies=selectedEntities().map(e=>{const c=cloneEntity(e,true);translateEntity(c,dx,dy);return c;});state.entities.push(...copies);state.selected=new Set(copies.map(e=>e.id));afterGeometryChange();}
-function performRotate(angle){
-  const c=state.command,base=c?.data?.base;if(!base)return;pushHistory();for(const e of selectedEntities()){transformEntityPoints(e,q=>rotatePoint(q,base,angle));if(e.type==='TEXT')e.rotation=(e.rotation||0)+angle*180/Math.PI;}afterGeometryChange();toast(CMDT.rotated);
+function performRotate(angle,copyMode=false){
+  const c=state.command,base=c?.data?.base;if(!base||!Number.isFinite(angle))return false;
+  pushHistory();
+  if(copyMode){
+    const copies=selectedEntities().map(e=>{
+      const n=cloneEntity(e,true);
+      transformEntityPoints(n,q=>rotatePoint(q,base,angle));
+      if(n.type==='TEXT')n.rotation=(n.rotation||0)+angle*180/Math.PI;
+      return n;
+    });
+    state.entities.push(...copies);
+    state.selected=new Set(copies.map(e=>e.id));
+  }else{
+    for(const e of selectedEntities()){
+      transformEntityPoints(e,q=>rotatePoint(q,base,angle));
+      if(e.type==='TEXT')e.rotation=(e.rotation||0)+angle*180/Math.PI;
+    }
+  }
+  afterGeometryChange();
+  toast(copyMode?(FR?'Copie tournée.':'Rotated copy created.'):CMDT.rotated);
+  return true;
 }
 function performScale(factor){
   const c=state.command,base=c?.data?.base;if(!base)return;pushHistory();for(const e of selectedEntities())scaleEntity(e,base,factor);afterGeometryChange();toast(CMDT.scaled);
@@ -3283,6 +3629,7 @@ function drawCommandPreview(){
   else if(c.name==='RECTANG'&&c.points[0]){const a=c.points[0],pts=[a,{x:p.x,y:a.y},p,{x:a.x,y:p.y},a];for(let i=0;i<4;i++)line(pts[i],pts[i+1]);}
   else if(c.name==='ARC'&&c.points.length===1)line(c.points[0],p);
   else if(c.name==='ARC'&&c.points.length===2){const arc=arcFrom3Points(c.points[0],c.points[1],p);if(arc)drawPreviewArc(arc);else line(c.points[1],p);}
+  else if(c.name.startsWith('DIM')){drawPreviewEntities(dimensionPreviewForCommand(c,p));}
   else if(['MOVE','COPY'].includes(c.name)&&c.step==='target'&&c.data.base){const dx=p.x-c.data.base.x,dy=p.y-c.data.base.y;drawSelectedPreview(e=>{const n=cloneEntity(e,false);translateEntity(n,dx,dy);return n;});}
   else if(c.name==='STRETCH'&&c.step==='target'&&c.data.base){
     const dx=p.x-c.data.base.x,dy=p.y-c.data.base.y;line(c.data.base,p);
@@ -3298,7 +3645,26 @@ function drawCommandPreview(){
       if(preview){ctx.setLineDash([4,3]);drawEntity(preview,'#7bc4ff',1.5);}
     }
   }
-  else if(c.name==='ROTATE'&&c.step==='angle'&&c.data.base){const typed=parseNumber(E.commandInput?.value||''),a=Number.isFinite(typed)?typed*Math.PI/180:Math.atan2(p.y-c.data.base.y,p.x-c.data.base.x);line(c.data.base,p);drawSelectedPreview(e=>{const n=cloneEntity(e,false);transformEntityPoints(n,q=>rotatePoint(q,c.data.base,a));if(n.type==='TEXT')n.rotation=(n.rotation||0)+a*180/Math.PI;return n;});}
+  else if(c.name==='ROTATE'&&c.step==='referenceSecond'&&c.data.refP1){line(c.data.refP1,p);}
+  else if(c.name==='ROTATE'&&c.data.base&&['angle','newAngle','newAnglePointSecond'].includes(c.step)){
+    let a=null,guideFrom=c.data.base;
+    if(c.step==='angle'){
+      const typed=parseNumber(E.commandInput?.value||'');
+      a=Number.isFinite(typed)?typed*Math.PI/180:Math.atan2(p.y-c.data.base.y,p.x-c.data.base.x);
+    }else if(c.step==='newAngle'){
+      const typed=parseNumber(E.commandInput?.value||'');
+      const target=Number.isFinite(typed)?typed*Math.PI/180:Math.atan2(p.y-c.data.base.y,p.x-c.data.base.x);
+      a=normalizeAngle(target-(Number(c.data.referenceAngle)||0));
+    }else if(c.step==='newAnglePointSecond'&&c.data.newAngleP1){
+      guideFrom=c.data.newAngleP1;
+      const target=Math.atan2(p.y-guideFrom.y,p.x-guideFrom.x);
+      a=normalizeAngle(target-(Number(c.data.referenceAngle)||0));
+    }
+    if(Number.isFinite(a)){
+      line(guideFrom,p);
+      drawSelectedPreview(e=>{const n=cloneEntity(e,false);transformEntityPoints(n,q=>rotatePoint(q,c.data.base,a));if(n.type==='TEXT')n.rotation=(n.rotation||0)+a*180/Math.PI;return n;},false);
+    }
+  }
   else if(c.name==='SCALE'&&c.step==='factor'&&c.data.base){const typed=parseNumber(E.commandInput?.value||''),factor=(typed>0)?typed:dist(c.data.base,p);if(factor>1e-9){line(c.data.base,p);drawSelectedPreview(e=>{const n=cloneEntity(e,false);scaleEntity(n,c.data.base,factor);return n;},false);}}
   else if(c.name==='MIRROR'&&c.step==='mirror2'&&c.data.p1){line(c.data.p1,p);drawSelectedPreview(e=>{const n=cloneEntity(e,false);mirrorEntity(n,c.data.p1,p);return n;});}
   else if(c.name==='TEXT'&&c.data.point){const draft={id:'preview-text',type:'TEXT',rawType:'TEXT',layer:state.activeLayer||'0',point:copyPoint(c.data.point),text:(c.step==='content'?(E.commandInput?.value||''):'Aa')||(FR?'Texte':'Text'),height:Number(c.data.height)||state.textHeight,rotation:Number(c.data.rotation)||state.textRotation};drawEntity(draft,'#7bc4ff',1.4);}

@@ -48,6 +48,18 @@
         <small>DRAW</small>
       </section>
 
+      <section class="n2-ribbon-group n2-group-dimension">
+        <div class="n2-ribbon-row">
+          <button class="n2-tool n2-cmd-button primary" type="button" data-command="DIM" title="Smart dimension · DIM"><span class="n2-icon">D</span><span>Smart</span></button>
+          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMLINEAR" title="Linear dimension · DLI"><span class="n2-icon">↔</span><span>Linear</span></button>
+          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMALIGNED" title="Aligned dimension · DAL"><span class="n2-icon">╱</span><span>Aligned</span></button>
+          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMANGULAR" title="Angular dimension · DAN"><span class="n2-icon">∠</span><span>Angle</span></button>
+          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMRADIUS" title="Radius dimension · DRA"><span class="n2-icon">R</span><span>Radius</span></button>
+          <button class="n2-tool n2-cmd-button" type="button" data-command="DIMDIAMETER" title="Diameter dimension · DDI"><span class="n2-icon">Ø</span><span>Diameter</span></button>
+        </div>
+        <small>DIMENSION</small>
+      </section>
+
       <section class="n2-ribbon-group n2-modify-group">
         <div class="n2-ribbon-row">
           <button id="n2-move" class="n2-tool" type="button" disabled title="Move · M"><span class="n2-icon">✥</span><span>Move</span></button>
@@ -170,7 +182,7 @@
     </div>
 
     <div class="n2-commandline">
-      <div id="n2-command-history" class="n2-command-history">Navo2D ready. Type a command (L, PL, C, A, REC · TR, EX, F, CHA, S, AR, BR, LEN, PE...)</div>
+      <div id="n2-command-history" class="n2-command-history">Navo2D ready. Commands: L, PL, C, A, REC, T · DIM, DLI, DAL, DAN, DRA, DDI · TR, EX, F, CHA, S, AR...</div>
       <div class="n2-command-entry"><span id="n2-command-prompt">Command:</span><input id="n2-command-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command"></div>
     </div>
 
