@@ -45,15 +45,17 @@
       <button id="n2-undo" class="n2-tool compact" type="button" disabled title="Undo">↶</button>
       <button id="n2-redo" class="n2-tool compact" type="button" disabled title="Redo">↷</button>
       <button id="n2-fit" class="n2-tool compact" type="button" disabled title="Fit">⌖</button>
-      <button id="n2-grid" class="n2-tool active" type="button" disabled><span class="n2-icon">#</span><span>Grid</span></button>
-      <button id="n2-snap" class="n2-tool active" type="button" disabled><span class="n2-icon">⊙</span><span>Snap</span></button>
       <div class="n2-divider"></div>
+      <div class="n2-layer-picker" title="Current layer">
+        <span id="n2-layer-swatch" class="n2-layer-swatch" aria-hidden="true"></span>
+        <select id="n2-layer-select" class="n2-layer-select" disabled aria-label="Current layer"></select>
+      </div>
       <button id="n2-layers" class="n2-tool" type="button" disabled><span class="n2-icon">▤</span><span>Layers</span></button>
       <button id="n2-analyze" class="n2-tool" type="button" disabled><span class="n2-icon">✓</span><span>Analyze</span></button>
       <button id="n2-properties" class="n2-tool" type="button" disabled><span class="n2-icon">ⓘ</span><span>Properties</span></button>
       <div class="n2-spacer"></div>
       <button id="n2-export" class="n2-tool primary" type="button" disabled><span class="n2-icon">⇩</span><span>Export DXF</span></button>
-      <button id="n2-fullscreen" class="n2-tool compact" type="button" title="Fullscreen">⛶</button>
+      <button id="n2-fullscreen" class="n2-tool compact" type="button" title="CAD focus mode">⛶</button>
       <button id="n2-close" class="n2-tool compact danger" type="button" disabled title="Close">×</button>
     </div>
 

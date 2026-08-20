@@ -55,7 +55,7 @@ const CMDT=FR?{
 const $=id=>document.getElementById(id);
 const E={
   workspace:$('n2-workspace'),canvas:$('n2-canvas'),file:$('n2-file'),empty:$('n2-empty'),fullscreen:$('n2-fullscreen'),
-  select:$('n2-select'),measure:$('n2-measure'),move:$('n2-move'),del:$('n2-delete'),undo:$('n2-undo'),redo:$('n2-redo'),fit:$('n2-fit'),grid:$('n2-grid'),snap:$('n2-snap'),layers:$('n2-layers'),analyze:$('n2-analyze'),props:$('n2-properties'),export:$('n2-export'),close:$('n2-close'),
+  select:$('n2-select'),measure:$('n2-measure'),move:$('n2-move'),del:$('n2-delete'),undo:$('n2-undo'),redo:$('n2-redo'),fit:$('n2-fit'),grid:null,snap:null,layers:$('n2-layers'),analyze:$('n2-analyze'),props:$('n2-properties'),export:$('n2-export'),close:$('n2-close'),
   layerDrawer:$('n2-layer-drawer'),propDrawer:$('n2-prop-drawer'),layerList:$('n2-layer-list'),layersAll:$('n2-layers-all'),layersNone:$('n2-layers-none'),
   propFile:$('n2-prop-file'),propUnits:$('n2-prop-units'),propEntities:$('n2-prop-entities'),propLayers:$('n2-prop-layers'),propSize:$('n2-prop-size'),selectionInfo:$('n2-selection-info'),analysisInfo:$('n2-analysis-info'),
   measureCard:$('n2-measure-card'),measureMain:$('n2-measure-main'),measureDx:$('n2-measure-dx'),measureDy:$('n2-measure-dy'),measureHelp:$('n2-measure-help'),measureClear:$('n2-measure-clear'),
@@ -63,7 +63,8 @@ const E={
   commandHistory:$('n2-command-history'),commandPrompt:$('n2-command-prompt'),commandInput:$('n2-command-input'),
   osnapPanel:$('n2-osnap-panel'),osnapClose:$('n2-osnap-close'),
   statusGrid:$('n2-status-grid'),statusGridSnap:$('n2-status-gridsnap'),statusOrtho:$('n2-status-ortho'),statusPolar:$('n2-status-polar'),
-  statusOsnap:$('n2-status-osnap'),statusOtrack:$('n2-status-otrack'),statusDyn:$('n2-status-dyn'),polarAngle:$('n2-polar-angle')
+  statusOsnap:$('n2-status-osnap'),statusOtrack:$('n2-status-otrack'),statusDyn:$('n2-status-dyn'),polarAngle:$('n2-polar-angle'),
+  layerSelect:$('n2-layer-select'),layerSwatch:$('n2-layer-swatch')
 };
 
 const ctx=E.canvas.getContext('2d',{alpha:false});
@@ -76,7 +77,8 @@ const state={
   command:null,lastCommand:'',commandLog:[],entitySeq:0,activeLayer:'0',
   ortho:false,polar:true,polarIncrement:45,gridSnap:false,gridSnapStep:1,otrack:true,dyn:true,
   osnapModes:new Set(['end','mid','center','quad','intersection','node']),snapOverride:null,
-  trackingPoint:null,trackingSince:0,lastSnap:null,snapCycle:0,snapCandidateKey:''
+  trackingPoint:null,trackingSince:0,lastSnap:null,snapCycle:0,snapCandidateKey:'',
+  dynEditing:false,dynField:'distance',dynDistance:null,dynAngle:null,focusMode:false
 };
 
 const UNIT_LABELS={0:'u',1:'in',2:'ft',3:'mi',4:'mm',5:'cm',6:'m',7:'km',8:'µin',9:'mil',10:'yd',11:'Å',12:'nm',13:'µm',14:'dm'};
@@ -102,15 +104,18 @@ function bindUI(){
   E.undo.addEventListener('click',undo);
   E.redo.addEventListener('click',redo);
   E.fit.addEventListener('click',fitView);
-  E.grid.addEventListener('click',()=>toggleDraftSetting('grid'));
-  E.snap.addEventListener('click',()=>toggleDraftSetting('osnap'));
+  E.grid?.addEventListener('click',()=>toggleDraftSetting('grid'));
+  E.snap?.addEventListener('click',()=>toggleDraftSetting('osnap'));
   E.layers.addEventListener('click',()=>toggleDrawer('layers'));
+  E.layerSelect?.addEventListener('change',()=>{
+    setActiveLayer(E.layerSelect.value);
+    try{E.canvas.focus()}catch{}
+  });
   E.props.addEventListener('click',()=>toggleDrawer('properties'));
   E.analyze.addEventListener('click',runAnalysis);
   E.export.addEventListener('click',exportDxf);
   E.close.addEventListener('click',clearFile);
   E.fullscreen?.addEventListener('click',toggleFullscreen);
-  document.addEventListener('fullscreenchange',()=>setTimeout(resize,30));
   E.layersAll.addEventListener('click',()=>setAllLayers(true));
   E.layersNone.addEventListener('click',()=>setAllLayers(false));
   E.measureClear.addEventListener('click',()=>clearMeasure());
@@ -127,7 +132,7 @@ function bindUI(){
       if(cb.checked)state.osnapModes.add(cb.dataset.osnap);else state.osnapModes.delete(cb.dataset.osnap);
     });
   });
-  E.snap.addEventListener('contextmenu',event=>{event.preventDefault();E.osnapPanel.hidden=!E.osnapPanel.hidden;});
+  E.snap?.addEventListener('contextmenu',event=>{event.preventDefault();E.osnapPanel.hidden=!E.osnapPanel.hidden;});
   E.statusOsnap?.addEventListener('contextmenu',event=>{event.preventDefault();E.osnapPanel.hidden=!E.osnapPanel.hidden;});
   E.statusGrid?.addEventListener('click',()=>toggleDraftSetting('grid'));
   E.statusGridSnap?.addEventListener('click',()=>toggleDraftSetting('gridSnap'));
@@ -356,6 +361,7 @@ function rebuildLayers(){
     next.get(e.layer).count++;
   }
   state.layers=next;
+  syncLayerPicker();
 }
 function recomputeBounds(){
   let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
@@ -708,6 +714,34 @@ function assignSelectedLayer(name){
   for(const e of state.entities)if(state.selected.has(e.id)){e.layer=name;e.colorMode='bylayer';e.colorIndex=256;e.trueColor=null;}
   rebuildLayers();renderLayerList();recomputeBounds();syncUI();toast(`Layer → ${name}`);
 }
+function setActiveLayer(name){
+  if(!name||!state.layers.has(name))return;
+  state.activeLayer=name;
+  syncLayerPicker();
+  renderLayerList();
+  if(E.currentLayer)E.currentLayer.textContent=`Layer: ${name}`;
+  commandLog(`Layer: ${name}`);
+}
+function syncLayerPicker(){
+  if(!E.layerSelect)return;
+  const layers=[...state.layers.values()].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
+  const current=state.activeLayer||'0';
+  const frag=document.createDocumentFragment();
+  for(const layer of layers){
+    const option=document.createElement('option');
+    option.value=layer.name;
+    const suffix=layer.count===0?(FR?' · inutilisé':' · unused'):'';
+    option.textContent=`■  ${layer.name}${suffix}`;
+    option.style.color=layer.color||aciColorToHex(layer.colorIndex||7);
+    frag.append(option);
+  }
+  E.layerSelect.replaceChildren(frag);
+  if(layers.some(x=>x.name===current))E.layerSelect.value=current;
+  else if(layers.length){state.activeLayer=layers[0].name;E.layerSelect.value=state.activeLayer;}
+  const layer=state.layers.get(state.activeLayer);
+  if(E.layerSwatch)E.layerSwatch.style.background=layer?.color||'#ffffff';
+  E.layerSelect.disabled=!state.file||layers.length===0;
+}
 function renderLayerList(){
   E.layerList.innerHTML='';
   for(const layer of [...state.layers.values()].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}))){
@@ -715,7 +749,7 @@ function renderLayerList(){
     if(layer.count===0)row.classList.add('is-unused');
     if(layer.name===state.activeLayer)row.classList.add('is-current');
     row.title=FR?'Double-cliquez pour rendre ce layer courant':'Double-click to make this layer current';
-    row.addEventListener('dblclick',()=>{state.activeLayer=layer.name;renderLayerList();syncUI();commandLog(`Layer: ${layer.name}`);});
+    row.addEventListener('dblclick',()=>setActiveLayer(layer.name));
 
     const cb=document.createElement('input');cb.type='checkbox';cb.className='n2-layer-visible';cb.checked=layer.visible;cb.title=FR?'Afficher / cacher':'Show / hide';
     cb.addEventListener('change',()=>{layer.visible=cb.checked;if(cb.checked)layer.frozen=false;syncLayerDefinition(layer);recomputeBounds();renderLayerList();});
@@ -725,6 +759,7 @@ function renderLayerList(){
       layer.color=color.value.toLowerCase();
       layer.trueColor=parseInt(layer.color.slice(1),16);
       syncLayerDefinition(layer);
+      syncLayerPicker();
     });
 
     const name=document.createElement('span');name.className='n2-layer-name';name.textContent=layer.name;
@@ -763,7 +798,7 @@ function renderProperties(){
 function syncSelectionUI(){
   E.del.disabled=!state.selected.size;E.move.disabled=!state.selected.size;const sel=state.entities.filter(e=>state.selected.has(e.id));if(!sel.length)E.selectionInfo.textContent=T.noSelection;else if(sel.length===1){const e=sel[0];let s=`${e.rawType||e.type}\nLayer: ${e.layer}`;if(e.type==='LINE')s+=`\nLength: ${formatLength(dist(e.p1,e.p2))}`;if(e.type==='CIRCLE')s+=`\nØ ${formatLength(e.radius*2)}`;if(e.type==='ARC')s+=`\nR ${formatLength(e.radius)}`;if(e.approx)s+=`\n≈ ${FR?'géométrie approximée':'approximated geometry'}`;E.selectionInfo.textContent=s;}else E.selectionInfo.textContent=`${sel.length} ${T.selected}`;}
 function syncHistoryButtons(){E.undo.disabled=!state.history.length;E.redo.disabled=!state.future.length;}
-function syncUI(){const has=Boolean(state.file);for(const b of[E.select,E.measure,E.fit,E.grid,E.snap,E.layers,E.analyze,E.props,E.export,E.close])b.disabled=!has;E.statusFile.textContent=state.file?.name||T.noDxf;E.statusEntities.textContent=has?`${state.entities.length} ${T.entities}`:'—';E.statusUnits.textContent=has?state.unitLabel:'—';if(E.currentLayer)E.currentLayer.textContent=has?`Layer: ${state.activeLayer||'0'}`:'Layer: —';E.empty.hidden=has;syncHistoryButtons();renderProperties();syncDraftingUI();updateCommandPrompt();}
+function syncUI(){const has=Boolean(state.file);for(const b of[E.select,E.measure,E.fit,E.grid,E.snap,E.layers,E.analyze,E.props,E.export,E.close,E.layerSelect].filter(Boolean))b.disabled=!has;E.statusFile.textContent=state.file?.name||T.noDxf;E.statusEntities.textContent=has?`${state.entities.length} ${T.entities}`:'—';E.statusUnits.textContent=has?state.unitLabel:'—';if(E.currentLayer)E.currentLayer.textContent=has?`Layer: ${state.activeLayer||'0'}`:'Layer: —';E.empty.hidden=has;syncHistoryButtons();renderProperties();syncDraftingUI();syncLayerPicker();updateCommandPrompt();}
 function clearFile(){cancelCommand(false);state.file=null;state.dxf=null;state.rawText='';state.entities=[];state.layers.clear();state.layerDefinitions.clear();state.unsupported=[];state.selected.clear();state.history=[];state.future=[];state.analysis=null;state.bounds=null;state.selectionBox=null;closeContextMenu();clearMeasure();syncUI();E.layerDrawer.hidden=true;E.propDrawer.hidden=true;}
 function toggleDrawer(which,force){const el=which==='layers'?E.layerDrawer:E.propDrawer,other=which==='layers'?E.propDrawer:E.layerDrawer;const show=force??el.hidden;el.hidden=!show;if(show)other.hidden=true;if(which==='properties'&&show)renderProperties();}
 
@@ -836,12 +871,16 @@ function openContextMenu(clientX,clientY){
 function closeContextMenu(){
   if(contextMenuEl){contextMenuEl.remove();contextMenuEl=null;}
 }
-async function toggleFullscreen(){
-  try{
-    if(document.fullscreenElement)await document.exitFullscreen();
-    else await E.workspace.requestFullscreen();
-    setTimeout(resize,40);
-  }catch(err){console.warn('Fullscreen unavailable',err);}
+function toggleFullscreen(){
+  state.focusMode=!state.focusMode;
+  document.body.classList.toggle('n2-focus-mode',state.focusMode);
+  E.workspace.classList.toggle('is-fullscreen',state.focusMode);
+  E.fullscreen?.classList.toggle('active',state.focusMode);
+  if(E.fullscreen){
+    E.fullscreen.textContent=state.focusMode?'🗗':'⛶';
+    E.fullscreen.title=state.focusMode?(FR?'Quitter le mode CAD plein écran':'Exit CAD focus mode'):(FR?'Mode CAD plein écran':'CAD focus mode');
+  }
+  requestAnimationFrame(()=>{resize();requestAnimationFrame(resize);});
 }
 
 function toast(msg){clearTimeout(toastTimer);E.toast.textContent=msg;E.toast.hidden=false;toastTimer=setTimeout(()=>E.toast.hidden=true,2300);}
@@ -878,13 +917,85 @@ const SNAP_OVERRIDE_NAMES={
   NEA:'nearest',NEAR:'nearest',NOD:'node',NODE:'node',GCEN:'gcenter',GCE:'gcenter',INS:'insert',INSERTION:'insert'
 };
 
+function dynamicDimensionAvailable(c=state.command){
+  if(!state.dyn||!c||c.selecting||!commandNeedsPoint(c))return false;
+  const ref=commandReferencePoint();
+  if(!ref)return false;
+  if(c.name==='CIRCLE'&&c.step==='radius')return false;
+  if(c.name==='OFFSET')return false;
+  return true;
+}
+function resetDynamicInput(){
+  state.dynEditing=false;
+  state.dynField='distance';
+  state.dynDistance=null;
+  state.dynAngle=null;
+}
+function dynamicCursorMetrics(base){
+  const raw=screenToWorld(state.pointer.x,state.pointer.y);
+  let dx=raw.x-base.x,dy=raw.y-base.y;
+  let distance=Math.hypot(dx,dy);
+  let angle=Math.atan2(dy,dx);
+  if(state.ortho){
+    angle=Math.abs(dx)>=Math.abs(dy)?(dx>=0?0:Math.PI):(dy>=0?Math.PI/2:-Math.PI/2);
+  }else if(state.polar&&distance>1e-12){
+    const inc=state.polarIncrement*Math.PI/180;
+    const snapped=Math.round(angle/inc)*inc;
+    if(Math.abs(normalizeAngle(angle-snapped))<=5*Math.PI/180)angle=snapped;
+  }
+  return{distance,angle};
+}
+function dynamicPoint(base){
+  const metrics=dynamicCursorMetrics(base);
+  const distance=Number.isFinite(state.dynDistance)?state.dynDistance:metrics.distance;
+  const angle=Number.isFinite(state.dynAngle)?state.dynAngle*Math.PI/180:metrics.angle;
+  return{x:base.x+distance*Math.cos(angle),y:base.y+distance*Math.sin(angle)};
+}
+function commitDynamicValue(raw){
+  const n=parseNumber(raw);
+  if(!Number.isFinite(n))return false;
+  state.dynEditing=true;
+  if(state.dynField==='distance'){
+    if(n<0)return false;
+    state.dynDistance=n;
+  }else{
+    state.dynAngle=n;
+  }
+  return true;
+}
+function cycleDynamicField(raw=''){
+  if(!dynamicDimensionAvailable())return false;
+  if(String(raw).trim()&&!commitDynamicValue(raw))return false;
+  state.dynEditing=true;
+  state.dynField=state.dynField==='distance'?'angle':'distance';
+  if(E.commandInput)E.commandInput.value='';
+  updateDynamicCommandPrompt();
+  return true;
+}
+function updateDynamicCommandPrompt(){
+  if(!state.command||!dynamicDimensionAvailable())return;
+  const label=state.dynField==='distance'?'Distance':'Angle';
+  setCommandPrompt(`${state.command.name} ${label}:`);
+}
+function submitDynamicValue(raw){
+  if(!dynamicDimensionAvailable())return false;
+  if(String(raw).trim()&&!commitDynamicValue(raw))return false;
+  const base=commandReferencePoint();
+  if(!base)return false;
+  commandPoint(dynamicPoint(base),null,true);
+  return true;
+}
+
 function handleGlobalKeyDown(event){
   if(event.defaultPrevented)return;
   const target=event.target;
   const editing=target===E.commandInput||target?.matches?.('input,select,textarea,[contenteditable="true"]');
 
   if(event.key==='Tab'&&state.command&&commandNeedsPoint(state.command)){
-    event.preventDefault();state.snapCycle=(state.snapCycle||0)+1;return;
+    event.preventDefault();
+    if(dynamicDimensionAvailable())cycleDynamicField('');
+    else state.snapCycle=(state.snapCycle||0)+1;
+    return;
   }
   if(/^F(?:3|7|8|9|10|11|12)$/.test(event.key)){
     event.preventDefault();
@@ -934,7 +1045,12 @@ function handleGlobalKeyDown(event){
 }
 
 function handleCommandInputKeyDown(event){
-  if(event.key==='Tab'&&state.command&&commandNeedsPoint(state.command)){event.preventDefault();state.snapCycle=(state.snapCycle||0)+1;return;}
+  if(event.key==='Tab'&&state.command&&commandNeedsPoint(state.command)){
+    event.preventDefault();
+    if(dynamicDimensionAvailable())cycleDynamicField(E.commandInput.value);
+    else state.snapCycle=(state.snapCycle||0)+1;
+    return;
+  }
   if(/^F(?:3|7|8|9|10|11|12)$/.test(event.key)){
     event.preventDefault();
     const map={F3:'osnap',F7:'grid',F8:'ortho',F9:'gridSnap',F10:'polar',F11:'otrack',F12:'dyn'};
@@ -956,6 +1072,7 @@ function submitCommandInput(){
   E.commandInput.value='';
   if(state.command){
     if(!raw){commandEnter();return;}
+    if(state.dynEditing&&dynamicDimensionAvailable()&&submitDynamicValue(raw))return;
     commandText(raw);return;
   }
   if(!raw){if(state.lastCommand)startCommand(state.lastCommand);return;}
@@ -968,6 +1085,7 @@ function resolveCommandName(raw){
 }
 
 function startCommand(rawName){
+  resetDynamicInput();
   const name=resolveCommandName(rawName);
   if(state.command)cancelCommand(false);
   closeContextMenu();clearMeasure();state.hover=null;state.selectionBox=null;state.snapOverride=null;
@@ -1117,13 +1235,13 @@ function commandPoint(point,event,fromKeyboard=false){
 
   if(c.name==='LINE'){
     if(c.step==='first'){
-      c.points=[copyPoint(point)];c.step='next';setCommandPrompt(`${c.name} ${CMDT.specifyNext} [${CMDT.close}/${CMDT.undo}]:`);return;
+      c.points=[copyPoint(point)];resetDynamicInput();c.step='next';setCommandPrompt(`${c.name} ${CMDT.specifyNext} [${CMDT.close}/${CMDT.undo}]:`);return;
     }
     const a=c.points[c.points.length-1],b=copyPoint(point);if(dist(a,b)<1e-12)return;
     const id=addLine(a,b);c.createdIds.push(id);c.points.push(b);setCommandPrompt(`${c.name} ${CMDT.specifyNext} [${CMDT.close}/${CMDT.undo}]:`);return;
   }
   if(c.name==='PLINE'){
-    c.points.push(copyPoint(point));c.step='next';setCommandPrompt(`${c.name} ${CMDT.specifyNext} [${CMDT.close}/${CMDT.undo}]:`);return;
+    c.points.push(copyPoint(point));resetDynamicInput();c.step='next';setCommandPrompt(`${c.name} ${CMDT.specifyNext} [${CMDT.close}/${CMDT.undo}]:`);return;
   }
   if(c.name==='CIRCLE'){
     if(c.step==='center'){c.points=[copyPoint(point)];c.step='radius';setCommandPrompt(`${c.name} ${CMDT.specifyRadius}:`);return;}
@@ -1131,20 +1249,20 @@ function commandPoint(point,event,fromKeyboard=false){
   }
   if(c.name==='ARC'){
     c.points.push(copyPoint(point));
-    if(c.points.length===1){c.step='second';setCommandPrompt(`${c.name} ${CMDT.specifySecond}:`);return;}
-    if(c.points.length===2){c.step='third';setCommandPrompt(`${c.name} ${CMDT.specifyThird}:`);return;}
+    if(c.points.length===1){resetDynamicInput();c.step='second';setCommandPrompt(`${c.name} ${CMDT.specifySecond}:`);return;}
+    if(c.points.length===2){resetDynamicInput();c.step='third';setCommandPrompt(`${c.name} ${CMDT.specifyThird}:`);return;}
     const arc=arcFrom3Points(c.points[0],c.points[1],c.points[2]);
     if(!arc)return commandError(FR?'Les trois points sont colinéaires.':'The three points are collinear.');
     addEntity({...newEntityBase('ARC'),...arc});finishCommand();return;
   }
   if(c.name==='RECTANG'){
-    if(c.step==='first'){c.points=[copyPoint(point)];c.step='second';setCommandPrompt(`${c.name} ${CMDT.specifyCorner}:`);return;}
+    if(c.step==='first'){c.points=[copyPoint(point)];resetDynamicInput();c.step='second';setCommandPrompt(`${c.name} ${CMDT.specifyCorner}:`);return;}
     const a=c.points[0],b=point;
     commitPolyline([{x:a.x,y:a.y},{x:b.x,y:a.y},{x:b.x,y:b.y},{x:a.x,y:b.y}],true);finishCommand();return;
   }
   if(c.name==='DIST'){
     c.points.push(copyPoint(point));
-    if(c.points.length===1){c.step='second';setCommandPrompt(`${c.name} ${CMDT.distanceSecond}:`);return;}
+    if(c.points.length===1){resetDynamicInput();c.step='second';setCommandPrompt(`${c.name} ${CMDT.distanceSecond}:`);return;}
     const a=c.points[0],b=c.points[1],dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),ang=radToDeg(Math.atan2(dy,dx));
     commandLog(`DIST = ${formatLength(d)}  ΔX = ${formatLength(dx)}  ΔY = ${formatLength(dy)}  ∠ ${fmt(ang)}°`);toast(`DIST ${formatLength(d)}`);finishCommand(false);return;
   }
@@ -1152,7 +1270,7 @@ function commandPoint(point,event,fromKeyboard=false){
     commandLog(`X = ${fmt(point.x)}, Y = ${fmt(point.y)} ${state.unitLabel}`);toast(`X ${fmt(point.x)}  Y ${fmt(point.y)}`);finishCommand(false);return;
   }
   if(c.name==='MOVE'||c.name==='COPY'||c.name==='ROTATE'||c.name==='SCALE'){
-    if(c.step==='base'){c.data.base=copyPoint(point);c.step=c.name==='ROTATE'?'angle':c.name==='SCALE'?'factor':'target';setCommandPrompt(`${c.name} ${c.name==='ROTATE'?CMDT.rotationAngle:c.name==='SCALE'?CMDT.scaleFactor:CMDT.secondPoint}:`);return;}
+    if(c.step==='base'){c.data.base=copyPoint(point);resetDynamicInput();c.step=c.name==='ROTATE'?'angle':c.name==='SCALE'?'factor':'target';setCommandPrompt(`${c.name} ${c.name==='ROTATE'?CMDT.rotationAngle:c.name==='SCALE'?CMDT.scaleFactor:CMDT.secondPoint}:`);return;}
     if(c.step==='target'){
       const dx=point.x-c.data.base.x,dy=point.y-c.data.base.y;
       if(c.name==='MOVE'){pushHistory();translateSelected(dx,dy);toast(T.moved);}
@@ -1168,7 +1286,7 @@ function commandPoint(point,event,fromKeyboard=false){
     }
   }
   if(c.name==='MIRROR'){
-    if(c.step==='mirror1'){c.data.p1=copyPoint(point);c.step='mirror2';setCommandPrompt(`${c.name} ${CMDT.mirrorSecond}:`);return;}
+    if(c.step==='mirror1'){c.data.p1=copyPoint(point);resetDynamicInput();c.step='mirror2';setCommandPrompt(`${c.name} ${CMDT.mirrorSecond}:`);return;}
     if(c.step==='mirror2'){
       if(dist(c.data.p1,point)<1e-12)return;
       c.data.p2=copyPoint(point);c.step='eraseSource';setCommandPrompt(`${c.name} ${CMDT.eraseSource}:`);return;
@@ -1217,6 +1335,7 @@ function commandReferenceDistance(base){
 }
 
 function finishCommand(log=true){
+  resetDynamicInput();
   const name=state.command?.name;
   state.command=null;state.snapOverride=null;state.trackingPoint=null;E.workspace.classList.remove('command-active');
   setTool('select');syncSelectionUI();updateCommandPrompt();
@@ -1225,6 +1344,7 @@ function finishCommand(log=true){
 }
 
 function cancelCommand(log=true){
+  resetDynamicInput();
   const had=state.command;
   state.command=null;state.snapOverride=null;state.trackingPoint=null;state.selectionBox=null;E.workspace.classList.remove('command-active');
   if(log&&had)commandLog(CMDT.canceled);
@@ -1409,6 +1529,12 @@ function resolveDraftPoint(clientX,clientY,ignoreSnap=false){
   let raw=screenToWorld(clientX,clientY);state.draftingGuide=null;
   if(state.gridSnap){const step=Math.max(1e-12,state.gridSnapStep);raw={x:Math.round(raw.x/step)*step,y:Math.round(raw.y/step)*step};}
   const ref=commandReferencePoint();
+  if(ref&&state.dynEditing&&dynamicDimensionAvailable()){
+    const p=dynamicPoint(ref);
+    state.lastSnap=null;
+    state.draftingGuide={from:ref,to:p,type:'dynamic'};
+    return p;
+  }
   if(!ignoreSnap&&state.snap){
     const snap=nearestSnap(clientX,clientY,ref);if(snap){state.lastSnap=snap;return copyPoint(snap.point);}state.lastSnap=null;
   }
@@ -1533,12 +1659,41 @@ function drawSnapMarker(){
 }
 
 function drawDraftingGuides(){
-  const guide=state.draftingGuide;if(guide){const a=worldToScreen(guide.from),b=worldToScreen(guide.to);ctx.save();ctx.strokeStyle=guide.type==='track'?'rgba(255,220,70,.66)':'rgba(90,160,255,.58)';ctx.lineWidth=1;ctx.setLineDash([7,5]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();ctx.restore();}
-  if(!state.dyn||!state.file)return;const p=state.cursorPoint||resolveDraftPoint(state.pointer.x,state.pointer.y),ref=commandReferencePoint(),r=E.canvas.getBoundingClientRect(),x=state.pointer.x-r.left+16,y=state.pointer.y-r.top+18;let text='';
-  if(ref){const dx=p.x-ref.x,dy=p.y-ref.y;text=`${fmt(Math.hypot(dx,dy))} < ${fmt(radToDeg(Math.atan2(dy,dx)))}°`;}
-  else text=`X ${fmt(p.x)}  Y ${fmt(p.y)}`;
-  if(state.lastSnap)text+=`  ${snapLabel(state.lastSnap.type)}`;
-  ctx.save();ctx.font='800 9px ui-monospace,SFMono-Regular,Menlo,monospace';const w=ctx.measureText(text).width+12;ctx.fillStyle='rgba(5,10,14,.94)';ctx.strokeStyle='rgba(0,109,255,.55)';ctx.lineWidth=1;ctx.fillRect(x,y,w,20);ctx.strokeRect(x+.5,y+.5,w-1,19);ctx.fillStyle='#d7e6ee';ctx.fillText(text,x+6,y+13);ctx.restore();
+  const guide=state.draftingGuide;
+  if(guide){
+    const a=worldToScreen(guide.from),b=worldToScreen(guide.to);
+    ctx.save();ctx.strokeStyle=guide.type==='track'?'rgba(255,220,70,.66)':'rgba(90,160,255,.64)';
+    ctx.lineWidth=1;ctx.setLineDash([7,5]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();ctx.restore();
+  }
+  if(!state.dyn||!state.file)return;
+  const p=state.cursorPoint||resolveDraftPoint(state.pointer.x,state.pointer.y),ref=commandReferencePoint(),r=E.canvas.getBoundingClientRect();
+  const x=state.pointer.x-r.left+18,y=state.pointer.y-r.top+20;
+  ctx.save();ctx.font='800 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+  if(ref&&dynamicDimensionAvailable()){
+    const dx=p.x-ref.x,dy=p.y-ref.y,input=(E.commandInput?.value||'').trim();
+    let dText=Number.isFinite(state.dynDistance)?fmt(state.dynDistance):fmt(Math.hypot(dx,dy));
+    let aText=Number.isFinite(state.dynAngle)?fmt(state.dynAngle):fmt(radToDeg(Math.atan2(dy,dx)));
+    if(state.dynEditing&&input){if(state.dynField==='distance')dText=input;else aText=input;}
+    const fields=[{key:'distance',text:`D ${dText}`},{key:'angle',text:`A ${aText}°`}];
+    let ox=x;
+    for(const field of fields){
+      const active=state.dynEditing&&state.dynField===field.key,w=ctx.measureText(field.text).width+16;
+      ctx.fillStyle=active?'rgba(0,109,255,.28)':'rgba(5,10,14,.96)';
+      ctx.strokeStyle=active?'rgba(86,164,255,.95)':'rgba(0,109,255,.5)';
+      ctx.lineWidth=1;ctx.fillRect(ox,y,w,24);ctx.strokeRect(ox+.5,y+.5,w-1,23);
+      ctx.fillStyle=active?'#ffffff':'#d7e6ee';ctx.fillText(field.text,ox+8,y+16);ox+=w+5;
+    }
+    if(state.lastSnap){
+      const s=snapLabel(state.lastSnap.type),w=ctx.measureText(s).width+12;
+      ctx.fillStyle='rgba(5,10,14,.96)';ctx.strokeStyle='rgba(255,228,92,.55)';
+      ctx.fillRect(ox,y,w,24);ctx.strokeRect(ox+.5,y+.5,w-1,23);ctx.fillStyle='#ffe45c';ctx.fillText(s,ox+6,y+16);
+    }
+  }else{
+    let text=`X ${fmt(p.x)}  Y ${fmt(p.y)}`;if(state.lastSnap)text+=`  ${snapLabel(state.lastSnap.type)}`;
+    const w=ctx.measureText(text).width+14;ctx.fillStyle='rgba(5,10,14,.96)';ctx.strokeStyle='rgba(0,109,255,.55)';
+    ctx.fillRect(x,y,w,24);ctx.strokeRect(x+.5,y+.5,w-1,23);ctx.fillStyle='#d7e6ee';ctx.fillText(text,x+7,y+16);
+  }
+  ctx.restore();
 }
 function snapLabel(type){return({end:'END',mid:'MID',center:'CEN',quad:'QUA',intersection:'INT',perp:'PER',tangent:'TAN',nearest:'NEA',node:'NOD',gcenter:'GCEN',insert:'INS'})[type]||type.toUpperCase();}
 

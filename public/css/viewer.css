@@ -970,3 +970,17 @@
 .suite-switch a:hover{color:#35d39a;background:rgba(53,211,154,.06)}
 .suite-switch a.active{color:#35d39a;background:rgba(53,211,154,.11)}
 @media(max-width:760px){.suite-switch{display:none}}
+
+/* V4 — application fullscreen: Escape remains a CAD key */
+body.navo3d-focus-mode{overflow:hidden!important}
+body.navo3d-focus-mode .viewer-site-header,body.navo3d-focus-mode .viewer-v2-intro{display:none!important}
+body.navo3d-focus-mode .cad-shell-section{padding:0!important}
+body.navo3d-focus-mode .viewer-wide{max-width:none!important;width:100%!important}
+body.navo3d-focus-mode .cad-workspace.is-fullscreen{position:fixed!important;z-index:9999!important;inset:0!important;width:100vw!important;height:100vh!important;min-height:100vh!important;max-height:none!important;margin:0!important;border:0!important;border-radius:0!important;box-shadow:none!important}
+.cad-workspace.is-fullscreen .properties-drawer{width:380px}
+.cad-workspace.is-fullscreen .drawer-head{font-size:10.5px}
+.cad-workspace.is-fullscreen .drawer-stats dt,.cad-workspace.is-fullscreen .drawer-stats dd{font-size:10.5px;line-height:1.45}
+.cad-workspace.is-fullscreen .drawer-section-title{font-size:9.5px}
+.cad-workspace.is-fullscreen .step-tree{font-size:10px;line-height:1.65}
+.cad-workspace.is-fullscreen .selection-summary{font-size:10.5px}
+.cad-workspace.is-fullscreen .measure-details dt,.cad-workspace.is-fullscreen .measure-details dd{font-size:10px}

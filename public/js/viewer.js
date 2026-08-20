@@ -348,8 +348,6 @@ function bindUI() {
   initSheetMetalUI();
 
   E.fullscreen.addEventListener('click', toggleFullscreen);
-  document.addEventListener('fullscreenchange', syncFullscreenState);
-  document.addEventListener('webkitfullscreenchange', syncFullscreenState);
 
   // CAD mouse navigation. One state machine = no fighting mouse handlers.
   // LMB select | MMB rotate | Ctrl+MMB pan | Shift+MMB zoom
@@ -801,47 +799,23 @@ function syncPropertiesState() {
   requestAnimationFrame(resize);
 }
 
-async function toggleFullscreen() {
-  try {
-    const active = document.fullscreenElement || document.webkitFullscreenElement;
-
-    if (!active) {
-      if (E.workspace.requestFullscreen) {
-        await E.workspace.requestFullscreen();
-      } else if (E.workspace.webkitRequestFullscreen) {
-        E.workspace.webkitRequestFullscreen();
-      } else {
-        throw new Error('Fullscreen API unavailable.');
-      }
-    } else {
-      if (document.exitFullscreen) {
-        await document.exitFullscreen();
-      } else if (document.webkitExitFullscreen) {
-        document.webkitExitFullscreen();
-      }
-    }
-  } catch (error) {
-    console.warn('[NavoFlo CAD Viewer fullscreen]', error);
-  }
+function toggleFullscreen() {
+  const active=!E.workspace.classList.contains('is-fullscreen');
+  E.workspace.classList.toggle('is-fullscreen',active);
+  document.body.classList.toggle('navo3d-focus-mode',active);
+  E.fullscreen.classList.toggle('active',active);
+  E.fullscreen.title=active?T.exitFullscreen:T.fullscreen;
+  const label=E.fullscreen.querySelector('span:last-child');
+  if(label)label.textContent=active?T.exitFullscreen:T.fullscreen;
+  const icon=E.fullscreen.querySelector('.fullscreen-icon');
+  if(icon)icon.textContent=active?'🗗':'⛶';
+  requestAnimationFrame(()=>{resize();requestAnimationFrame(resize);});
 }
 
 function syncFullscreenState() {
-  const active = (document.fullscreenElement || document.webkitFullscreenElement) === E.workspace;
-
-  E.workspace.classList.toggle('is-fullscreen', active);
-  E.fullscreen.classList.toggle('active', active);
-  E.fullscreen.title = active ? T.exitFullscreen : T.fullscreen;
-
-  const label = E.fullscreen.querySelector('span:last-child');
-  if (label) label.textContent = active ? T.exitFullscreen : T.fullscreen;
-
-  const icon = E.fullscreen.querySelector('.fullscreen-icon');
-  if (icon) icon.textContent = active ? '🗗' : '⛶';
-
-  requestAnimationFrame(() => {
-    resize();
-    requestAnimationFrame(resize);
-  });
+  const active=E.workspace.classList.contains('is-fullscreen');
+  E.fullscreen.classList.toggle('active',active);
+  requestAnimationFrame(resize);
 }
 
 

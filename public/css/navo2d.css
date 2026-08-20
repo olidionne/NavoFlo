@@ -25,7 +25,7 @@ body.navo2d-page{min-height:100vh;background:#080d12;color:#d7e1e6}
   background:#0b1016;user-select:none;
   border:0;border-radius:0;box-shadow:none
 }
-.n2-workspace:fullscreen,.n2-workspace:-webkit-full-screen{width:100vw;height:100vh;background:#0b1016}
+.n2-workspace.is-fullscreen{width:100vw;height:100vh;background:#0b1016}
 .n2-workspace.drag-over{box-shadow:inset 0 0 0 2px rgba(53,211,154,.5)}
 #n2-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;outline:0;cursor:default;touch-action:none}
 .n2-workspace.tool-select #n2-canvas,.n2-workspace.tool-measure #n2-canvas,.n2-workspace.tool-move #n2-canvas{cursor:crosshair}
@@ -131,3 +131,36 @@ body.navo2d-page{min-height:100vh;background:#080d12;color:#d7e1e6}
 @media(max-width:1180px){.n2-status-toggles button{padding:0 4px;font-size:7px}.n2-status-toggles select{width:42px}.n2-commandline{right:8px;left:8px}.n2-local{display:none}}
 @media(max-width:820px){.n2-status-toggles button:nth-of-type(5),.n2-status-toggles button:nth-of-type(6){display:none}.n2-command-history{display:none}.n2-commandline{grid-template-rows:32px;min-height:32px}.n2-command-entry{height:32px}.n2-osnap-panel{left:10px;right:10px;width:auto}.n2-status-left span:nth-child(n+2){display:none}}
 .n2-layer-row.is-current{background:rgba(0,109,255,.09);box-shadow:inset 2px 0 0 #006dff}.n2-layer-row.is-current .n2-layer-name{color:#83b8ff}
+
+/* V4 — CAD usability / readable UI / current layer control */
+.n2-layer-picker{height:34px;min-width:180px;max-width:260px;display:flex;align-items:center;gap:7px;padding:0 7px;border:1px solid rgba(255,255,255,.09);border-radius:6px;background:#0a1117}
+.n2-layer-swatch{flex:0 0 13px;width:13px;height:13px;border:1px solid rgba(255,255,255,.35);border-radius:2px;background:#fff}
+.n2-layer-select{min-width:0;max-width:220px;height:30px;flex:1;border:0;outline:0;background:#0a1117;color:#c7d2d8;font:750 11px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;cursor:pointer}
+.n2-layer-select:disabled{opacity:.38;cursor:default}
+body.n2-focus-mode .n2-appbar{display:none}
+body.n2-focus-mode .n2-main{top:0}
+body.n2-focus-mode .n2-workspace{position:fixed;inset:0;z-index:1000;width:100vw;height:100vh}
+body.n2-focus-mode{overflow:hidden}
+.n2-tool{font-size:11.5px;height:34px}
+.n2-layer-note{font-size:10px;line-height:1.55}
+.n2-drawer{width:390px}
+.n2-drawer-head{height:46px;font-size:10.5px}
+.n2-drawer-actions button{height:32px;font-size:10.5px}
+.n2-layer-row{min-height:40px;grid-template-columns:20px 25px minmax(100px,1fr) auto 32px}
+.n2-layer-name{font-size:10.5px}.n2-layer-count{font-size:9.5px}.n2-layer-meta b{font-size:7.5px}
+.n2-stats>div{min-height:38px}.n2-stats dt{font-size:11px}.n2-stats dd{font-size:11px;line-height:1.45}
+.n2-section-title{font-size:9.5px}.n2-info-box,.n2-analysis-list{font-size:10.5px;line-height:1.65}
+.n2-layer-assign button{font-size:9.5px;min-height:34px}
+.n2-commandline{min-height:66px;grid-template-rows:26px 36px;font-size:11px}
+.n2-command-history{padding:7px 11px 4px;font-size:10.5px}
+.n2-command-entry{gap:9px;padding:0 11px}.n2-command-entry span{font-size:11.5px}.n2-command-entry input{height:32px;font-size:12.5px}
+.n2-statusbar{height:34px;font-size:9px}.n2-status-toggles button,.n2-status-toggles select{height:25px;font-size:8.5px}
+.n2-osnap-head{font-size:9.5px}.n2-osnap-grid label{font-size:10.5px;min-height:33px}
+.n2-context-menu button{font-size:10.5px;height:33px}.n2-toast{font-size:10.5px}
+.n2-measure-card dt{font-size:9.5px}.n2-measure-card dd{font-size:10px}.n2-measure-card small{font-size:10px}
+@media(max-width:1300px){.n2-layer-picker{min-width:145px;max-width:180px}.n2-layer-select{font-size:10px}}
+
+/* V4 readability final tuning */
+.n2-stats dt,.n2-stats dd{font-size:12px}
+.n2-command-entry input{font-size:13px}.n2-command-entry span{font-size:12px}.n2-command-history{font-size:11px}
+.n2-info-box,.n2-analysis-list{font-size:11px}
