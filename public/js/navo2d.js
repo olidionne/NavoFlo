@@ -78,7 +78,10 @@ const state={
   ortho:false,polar:true,polarIncrement:45,gridSnap:false,gridSnapStep:1,otrack:true,dyn:true,
   osnapModes:new Set(['end','mid','center','quad','intersection','nearest','node']),snapOverride:null,
   trackingPoint:null,trackingSince:0,lastSnap:null,snapCycle:0,snapCandidateKey:'',
-  dynEditing:false,dynField:'distance',dynDistance:null,dynAngle:null,focusMode:false,filletRadius:0,chamferA:0,chamferB:0,trimExtendQuick:true,
+  dynEditing:false,dynField:'distance',dynDistance:null,dynAngle:null,focusMode:false,
+  filletRadius:0,filletTrim:true,
+  chamferA:0,chamferB:0,chamferTrim:true,chamferMethod:'distance',chamferAngleDistance:0,chamferAngle:45,
+  trimExtendQuick:true,
   gripEdit:null,hoverGrip:null,gripLimit:100,trimBrush:null,lastCrossingRect:null,pickboxSize:9
 };
 
@@ -857,7 +860,7 @@ function pointerUp(ev){
 
   if(state.command&&!state.command.selecting){
     const c=state.command;
-    const rawPick=(['TRIM','EXTEND'].includes(c.name))||(['FILLET','CHAMFER'].includes(c.name)&&['first','second','distanceA','distancePickSecond'].includes(c.step))||(['BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name)&&c.step==='selectEntity');
+    const rawPick=(['TRIM','EXTEND'].includes(c.name))||(['FILLET','CHAMFER'].includes(c.name)&&['first','second','distanceA','distancePickSecond','polyline'].includes(c.step))||(['BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name)&&c.step==='selectEntity');
     commandPoint(rawPick?raw:point,ev);
     return;
   }
@@ -1108,7 +1111,7 @@ function performExtendAtPoint(entity,pick,opts={}){
   if(entity.type==='POLYLINE'&&!entity.closed&&entity.points.length>=2){const first=entity.points[0],last=entity.points[entity.points.length-1],moveFirst=dist(pick,first)<dist(pick,last),origin=moveFirst?entity.points[1]:entity.points[entity.points.length-2],current=moveFirst?first:last,v={x:current.x-origin.x,y:current.y-origin.y},L=Math.hypot(v.x,v.y);if(L<1e-12)return false;const dir={x:v.x/L,y:v.y/L},hits=[];for(const o of state.entities)if(o.id!==entity.id&&layerVisible(o.layer))hits.push(...rayIntersectionsWithEntity(origin,dir,o).filter(h=>h.t>L+1e-8));if(!hits.length)return opts.quiet?false:commandError(FR?'Aucune limite trouvée.':'No boundary found.');hits.sort((a,b)=>a.t-b.t);if(opts.history!==false)pushHistory();if(moveFirst){entity.points[0].x=hits[0].p.x;entity.points[0].y=hits[0].p.y;}else{last.x=hits[0].p.x;last.y=hits[0].p.y;}afterGeometryChange();if(!opts.silent)toast(FR?'Polyligne prolongée.':'Polyline extended.');return true;}
   return opts.quiet?false:commandError(FR?'EXTEND supporte lignes et extrémités de polylignes ouvertes.':'EXTEND supports lines and open polyline endpoints.');
 }
-// Navo2D V6.4 — FILLET / CHAMFER use the actual object-pick side, not entity endpoint order.
+// Navo2D V6.5 — AutoCAD-style FILLET / CHAMFER options + robust corner geometry.
 // This mirrors AutoCAD: the portions clicked by the user are the portions kept,
 // while the opposite ends are trimmed or extended to the new corner geometry.
 function branchDirection(line,intersection,pick){
@@ -1172,9 +1175,214 @@ function existingCornerConnectorIds(a,b,I){
   return ids;
 }
 
-function performFillet(a,b,pickA,pickB,r){
+
+function cornerModeLabel(trim){
+  return trim?(FR?'TRIM':'TRIM'):(FR?'SANS AJUSTEMENT':'NO TRIM');
+}
+function filletPrimaryPrompt(c=state.command){
+  const multiple=c?.data?.multiple?' · MULTIPLE':'';
+  return FR
+    ? `FILLET Sélectionnez le premier objet ou [Undo Polyline Radius Trim Multiple]${multiple}:`
+    : `FILLET Select first object or [Undo Polyline Radius Trim Multiple]${multiple}:`;
+}
+function chamferPrimaryPrompt(c=state.command){
+  const multiple=c?.data?.multiple?' · MULTIPLE':'';
+  return FR
+    ? `CHAMFER Sélectionnez la première ligne ou [Undo Polyline Distance Angle Trim mEthod Multiple]${multiple}:`
+    : `CHAMFER Select first line or [Undo Polyline Distance Angle Trim mEthod Multiple]${multiple}:`;
+}
+function logFilletSettings(c=state.command){
+  const trim=c?.data?.trim??state.filletTrim;
+  const radius=c?.data?.radius??state.filletRadius;
+  commandLog(`(${cornerModeLabel(trim)} mode) ${FR?'Rayon courant':'Current radius'} = ${fmt(radius)}`);
+}
+function logChamferSettings(c=state.command){
+  const trim=c?.data?.trim??state.chamferTrim;
+  const method=(c?.data?.method??state.chamferMethod)==='angle'?'Angle':'Distance';
+  if(method==='Angle'){
+    const d=c?.data?.angleDistance??state.chamferAngleDistance;
+    const a=c?.data?.angle??state.chamferAngle;
+    commandLog(`(${cornerModeLabel(trim)} mode) ${FR?'Méthode':'Method'} = Angle, ${FR?'Distance':'Distance'} = ${fmt(d)}, ${FR?'Angle':'Angle'} = ${fmt(a)}°`);
+  }else{
+    const d1=c?.data?.a??state.chamferA,d2=c?.data?.b??state.chamferB;
+    commandLog(`(${cornerModeLabel(trim)} mode) ${FR?'Méthode':'Method'} = Distance, Dist1 = ${fmt(d1)}, Dist2 = ${fmt(d2)}`);
+  }
+}
+function resetCornerCommandPick(c){
+  if(!c)return;
+  c.step='first';
+  c.data.firstId=null;
+  c.data.firstPick=null;
+  c.data.distancePickMode=false;
+}
+function cornerCommandUndo(c){
+  if(!c||!(c.data.actionCount>0)||!state.history.length){
+    commandLog(FR?'Rien à annuler dans cette commande.':'Nothing to undo in this command.');
+    toast(FR?'Rien à annuler.':'Nothing to undo.');
+    resetCornerCommandPick(c);
+    setCommandPrompt(c?.name==='FILLET'?filletPrimaryPrompt(c):chamferPrimaryPrompt(c));
+    return;
+  }
+  undo();
+  c.data.actionCount=Math.max(0,(c.data.actionCount||0)-1);
+  resetCornerCommandPick(c);
+  if(c.name==='FILLET'){logFilletSettings(c);setCommandPrompt(filletPrimaryPrompt(c));}
+  else{logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));}
+}
+function afterCornerOperation(c){
+  if(!c)return;
+  c.data.actionCount=(c.data.actionCount||0)+1;
+  resetCornerCommandPick(c);
+  if(c.data.multiple){
+    if(c.name==='FILLET'){logFilletSettings(c);setCommandPrompt(filletPrimaryPrompt(c));}
+    else{logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));}
+  }else finishCommand();
+}
+function rotateVector(v,angle){
+  const cs=Math.cos(angle),sn=Math.sin(angle);
+  return{x:v.x*cs-v.y*sn,y:v.x*sn+v.y*cs};
+}
+function chamferSecondDistanceByAngleVectors(u,v,firstDistance,angleDeg){
+  const d1=Number(firstDistance),alpha=Number(angleDeg)*Math.PI/180;
+  if(!(d1>=0)||!(alpha>1e-8&&alpha<Math.PI-1e-8))return null;
+  const cross=u.x*v.y-u.y*v.x;
+  if(Math.abs(cross)<1e-12)return null;
+  const towardCorner={x:-u.x,y:-u.y};
+  const direction=rotateVector(towardCorner,-Math.sign(cross)*alpha);
+  const p1={x:u.x*d1,y:u.y*d1};
+  const q=infiniteLineIntersection(p1,{x:p1.x+direction.x,y:p1.y+direction.y},{x:0,y:0},{x:v.x,y:v.y});
+  if(!q)return null;
+  const d2=q.x*v.x+q.y*v.y;
+  if(!(d2>=-1e-9)||!Number.isFinite(d2))return null;
+  return Math.max(0,d2);
+}
+function chamferSecondDistanceByAngle(a,b,pickA,pickB,firstDistance,angleDeg){
+  if(a?.type!=='LINE'||b?.type!=='LINE')return null;
+  const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);
+  if(!I)return null;
+  const u=branchDirection(a,I,pickA),v=branchDirection(b,I,pickB);
+  if(!u||!v)return null;
+  return chamferSecondDistanceByAngleVectors(u,v,firstDistance,angleDeg);
+}
+function performChamferByAngle(a,b,pickA,pickB,firstDistance,angleDeg,options={}){
+  const d2=chamferSecondDistanceByAngle(a,b,pickA,pickB,firstDistance,angleDeg);
+  if(d2==null)return commandError(FR?'Angle de chanfrein impossible pour ces deux lignes.':'Chamfer angle is not valid for these two lines.');
+  return performChamfer(a,b,pickA,pickB,firstDistance,d2,options);
+}
+function polylineIsStraight2D(e){
+  return e?.type==='POLYLINE'&&Array.isArray(e.points)&&e.points.length>=2&&e.points.every(p=>Math.abs(Number(p.bulge)||0)<1e-10);
+}
+function polylineCornerData(points,index,closed){
+  const n=points.length;
+  if(!closed&&(index<=0||index>=n-1))return null;
+  const prev=points[(index-1+n)%n],I=points[index],next=points[(index+1)%n];
+  const ux=prev.x-I.x,uy=prev.y-I.y,vx=next.x-I.x,vy=next.y-I.y;
+  const lu=Math.hypot(ux,uy),lv=Math.hypot(vx,vy);
+  if(lu<1e-10||lv<1e-10)return null;
+  const u={x:ux/lu,y:uy/lu},v={x:vx/lv,y:vy/lv};
+  const dot=Math.max(-1,Math.min(1,u.x*v.x+u.y*v.y));
+  const theta=Math.acos(dot);
+  if(theta<1e-7||Math.abs(Math.PI-theta)<1e-7)return null;
+  return{prev,I,next,u,v,theta,prevLength:lu,nextLength:lv};
+}
+function buildPolylineCornerTreatment(e,kind,params={}){
+  if(!polylineIsStraight2D(e))return{error:FR?'L’option Polyligne supporte actuellement les polylignes 2D à segments droits.':'Polyline option currently supports straight-segment 2D polylines.'};
+  const pts=e.points.map(copyPoint),n=pts.length,closed=Boolean(e.closed);
+  if((closed&&n<3)||(!closed&&n<3))return{error:FR?'La polyligne doit contenir au moins trois sommets.':'Polyline must contain at least three vertices.'};
+  const corners=new Array(n).fill(null);
+  for(let i=0;i<n;i++){
+    const c=polylineCornerData(pts,i,closed);
+    if(!c)continue;
+    let dPrev=0,dNext=0,bulge=0;
+    if(kind==='fillet'){
+      const r=Number(params.radius);
+      if(!(r>=0))return{error:FR?'Rayon de congé invalide.':'Invalid fillet radius.'};
+      if(r<=1e-12){corners[i]={...c,inPoint:copyPoint(c.I),outPoint:copyPoint(c.I),bulge:0,dPrev:0,dNext:0};continue;}
+      const t=r/Math.tan(c.theta/2);
+      if(!Number.isFinite(t)||t<0)return{error:FR?'Impossible de calculer un congé sur cette polyligne.':'Unable to calculate a fillet on this polyline.'};
+      dPrev=t;dNext=t;
+      const turn=-(c.u.x*c.v.y-c.u.y*c.v.x);
+      const span=Math.PI-c.theta;
+      bulge=Math.sign(turn||1)*Math.tan(span/4);
+    }else{
+      dPrev=params.method==='angle'?Math.max(0,Number(params.angleDistance)||0):Math.max(0,Number(params.a)||0);
+      if(params.method==='angle'){
+        const d2=chamferSecondDistanceByAngleVectors(c.u,c.v,dPrev,params.angle);
+        if(d2==null)return{error:FR?`Angle de chanfrein impossible au sommet ${i+1}.`:`Invalid chamfer angle at vertex ${i+1}.`};
+        dNext=d2;
+      }else dNext=Math.max(0,Number(params.b)||0);
+    }
+    if(dPrev>c.prevLength+1e-9||dNext>c.nextLength+1e-9)return{error:FR?`Valeur trop grande au sommet ${i+1}.`:`Value is too large at vertex ${i+1}.`};
+    corners[i]={
+      ...c,dPrev,dNext,bulge,
+      inPoint:{x:c.I.x+c.u.x*dPrev,y:c.I.y+c.u.y*dPrev},
+      outPoint:{x:c.I.x+c.v.x*dNext,y:c.I.y+c.v.y*dNext}
+    };
+  }
+  // Neighboring corner treatments may not overlap on a segment.
+  const segCount=closed?n:n-1;
+  for(let i=0;i<segCount;i++){
+    const j=(i+1)%n;
+    const from=corners[i]?.dNext||0,to=corners[j]?.dPrev||0,L=dist(pts[i],pts[j]);
+    if(from+to>L+1e-9)return{error:FR?`Les congés/chanfreins se chevauchent sur le segment ${i+1}.`:`Corner treatments overlap on segment ${i+1}.`};
+  }
+  const out=[];
+  if(!closed){
+    out.push({...copyPoint(pts[0]),bulge:0});
+    for(let i=1;i<n-1;i++){
+      const c=corners[i];
+      if(!c){out.push({...copyPoint(pts[i]),bulge:0});continue;}
+      out.push({...copyPoint(c.inPoint),bulge:kind==='fillet'?c.bulge:0});
+      if(dist(c.inPoint,c.outPoint)>1e-10)out.push({...copyPoint(c.outPoint),bulge:0});
+    }
+    out.push({...copyPoint(pts[n-1]),bulge:0});
+  }else{
+    const c0=corners[0];
+    if(!c0)return{error:FR?'Sommet de polyligne invalide.':'Invalid polyline vertex.'};
+    out.push({...copyPoint(c0.outPoint),bulge:0});
+    for(let i=1;i<n;i++){
+      const c=corners[i];
+      if(!c)return{error:FR?'Sommet de polyligne invalide.':'Invalid polyline vertex.'};
+      out.push({...copyPoint(c.inPoint),bulge:kind==='fillet'?c.bulge:0});
+      if(dist(c.inPoint,c.outPoint)>1e-10)out.push({...copyPoint(c.outPoint),bulge:0});
+    }
+    out.push({...copyPoint(c0.inPoint),bulge:kind==='fillet'?c0.bulge:0});
+  }
+  // Remove consecutive duplicate points while preserving the bulge that starts
+  // the next non-zero segment.
+  const cleaned=[];
+  for(const q of out){
+    if(cleaned.length&&dist(cleaned[cleaned.length-1],q)<=1e-10){
+      if(Math.abs(q.bulge||0)>1e-12)cleaned[cleaned.length-1].bulge=q.bulge;
+      continue;
+    }
+    cleaned.push(q);
+  }
+  if(closed&&cleaned.length>1&&dist(cleaned[0],cleaned[cleaned.length-1])<=1e-10){
+    const last=cleaned.pop();
+    if(Math.abs(last?.bulge||0)>1e-12)cleaned[cleaned.length-1].bulge=last.bulge;
+  }
+  return{points:cleaned,closed};
+}
+function performFilletPolyline(e,r){
+  const result=buildPolylineCornerTreatment(e,'fillet',{radius:r});
+  if(result.error)return commandError(result.error);
+  pushHistory();
+  e.points=result.points;e.closed=result.closed;e.rawType='POLYLINE';
+  afterGeometryChange();toast(FR?`Congé polyligne R${fmt(r)} créé.`:`Polyline fillet R${fmt(r)} created.`);return true;
+}
+function performChamferPolyline(e,params){
+  const result=buildPolylineCornerTreatment(e,'chamfer',params);
+  if(result.error)return commandError(result.error);
+  pushHistory();
+  e.points=result.points;e.closed=result.closed;e.rawType='POLYLINE';
+  afterGeometryChange();toast(FR?'Chanfrein appliqué à la polyligne.':'Polyline chamfer applied.');return true;
+}
+
+function performFillet(a,b,pickA,pickB,r,options={}){
   if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'FILLET supporte actuellement deux lignes exactes.':'FILLET currently supports two exact lines.');
   const radius=Number(r);
+  const trim=options.trim!==false;
   if(!Number.isFinite(radius)||radius<0)return commandError(FR?'Le rayon doit être positif ou nul.':'Radius must be zero or greater.');
   const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);
   if(!I)return commandError(FR?'Les lignes sont parallèles ou colinéaires.':'Lines are parallel or collinear.');
@@ -1187,6 +1395,7 @@ function performFillet(a,b,pickA,pickB,r){
   const oldConnectorIds=existingCornerConnectorIds(a,b,I);
 
   if(radius<=1e-12){
+    if(!trim)return commandError(FR?'R0 avec Sans ajustement ne modifie aucune géométrie.':'R0 with No trim does not change geometry.');
     pushHistory();
     if(oldConnectorIds.length){
       const remove=new Set(oldConnectorIds);
@@ -1222,8 +1431,10 @@ function performFillet(a,b,pickA,pickB,r){
     const remove=new Set(oldConnectorIds);
     state.entities=state.entities.filter(e=>!remove.has(e.id));
   }
-  trimLineToPoint(a,I,d1,p1);
-  trimLineToPoint(b,I,d2,p2);
+  if(trim){
+    trimLineToPoint(a,I,d1,p1);
+    trimLineToPoint(b,I,d2,p2);
+  }
   const arc=copyEntityProps(a,'ARC');
   arc.layer=a.layer===b.layer?a.layer:state.activeLayer;
   arc.center=center;arc.radius=radius;arc.start=sA;arc.end=sB;
@@ -1245,9 +1456,10 @@ function chamferDistancesFromPicks(a,b,pickA,pickB){
   const dB=Math.abs((pB.x-I.x)*v.x+(pB.y-I.y)*v.y);
   return{I,u,v,dA,dB};
 }
-function performChamfer(a,b,pickA,pickB,dA,dB){
+function performChamfer(a,b,pickA,pickB,dA,dB,options={}){
   if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'CHAMFER supporte actuellement deux lignes exactes.':'CHAMFER currently supports two exact lines.');
   const firstDistance=Number(dA),secondDistance=Number(dB);
+  const trim=options.trim!==false;
   if(!Number.isFinite(firstDistance)||!Number.isFinite(secondDistance)||firstDistance<0||secondDistance<0)return commandError(FR?'Les distances de chanfrein doivent être positives ou nulles.':'Chamfer distances must be zero or greater.');
   const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);
   if(!I)return commandError(FR?'Les lignes sont parallèles ou colinéaires.':'Lines are parallel or collinear.');
@@ -1262,13 +1474,16 @@ function performChamfer(a,b,pickA,pickB,dA,dB){
   if(![p1.x,p1.y,p2.x,p2.y].every(Number.isFinite))return commandError(FR?'Géométrie de chanfrein invalide.':'Invalid chamfer geometry.');
 
   const oldConnectorIds=existingCornerConnectorIds(a,b,I);
+  if(!trim&&firstDistance<=1e-12&&secondDistance<=1e-12)return commandError(FR?'Chanfrein 0,0 avec Sans ajustement ne modifie aucune géométrie.':'Chamfer 0,0 with No trim does not change geometry.');
   pushHistory();
   if(oldConnectorIds.length){
     const remove=new Set(oldConnectorIds);
     state.entities=state.entities.filter(e=>!remove.has(e.id));
   }
-  trimLineToPoint(a,I,u,p1);
-  trimLineToPoint(b,I,v,p2);
+  if(trim){
+    trimLineToPoint(a,I,u,p1);
+    trimLineToPoint(b,I,v,p2);
+  }
 
   // AutoCAD CHAMFER with 0,0 simply trims/extends to a sharp intersection.
   // Do not create a zero-length LINE entity in that case.
@@ -1669,7 +1884,7 @@ const SNAP_OVERRIDE_NAMES={
 function dynamicDimensionAvailable(c=state.command){
   if(!state.dyn||!c||c.selecting||!commandNeedsPoint(c))return false;
   if(['TRIM','EXTEND'].includes(c.name))return false;
-  if(['FILLET','CHAMFER'].includes(c.name)&&['first','second','distanceA','distancePickSecond'].includes(c.step))return false;
+  if(['FILLET','CHAMFER'].includes(c.name)&&['first','second','distanceA','distancePickSecond','polyline'].includes(c.step))return false;
   if(['BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name)&&c.step==='selectEntity')return false;
   const ref=commandReferencePoint();
   if(!ref)return false;
@@ -1889,8 +2104,21 @@ function startCommand(rawName){
   else if(name==='OFFSET'){state.command.step='distance';setCommandPrompt(FR?`${name} Distance de décalage ou [ÀTravers]:`:`${name} Offset distance or [Through]:`);}
   else if(name==='TRIM'){state.command.step='pick';setCommandPrompt(FR?'TRIM Sélectionnez la portion à supprimer <Entrée pour terminer>:':'TRIM Select portion to remove <Enter to finish>:');}
   else if(name==='EXTEND'){state.command.step='pick';setCommandPrompt(FR?'EXTEND Sélectionnez l’objet à prolonger <Entrée pour terminer>:':'EXTEND Select object to extend <Enter to finish>:');}
-  else if(name==='FILLET'){state.command.step='first';state.command.data.radius=state.filletRadius;setCommandPrompt(FR?`FILLET Sélectionnez le premier objet ou [Rayon] <${fmt(state.filletRadius)}>`:`FILLET Select first object or [Radius] <${fmt(state.filletRadius)}>`);}
-  else if(name==='CHAMFER'){state.command.step='first';state.command.data.a=state.chamferA;state.command.data.b=state.chamferB;setCommandPrompt(FR?`CHAMFER Sélectionnez la première ligne ou [Distance] <${fmt(state.chamferA)},${fmt(state.chamferB)}>`:`CHAMFER Select first line or [Distance] <${fmt(state.chamferA)},${fmt(state.chamferB)}>`);}
+  else if(name==='FILLET'){
+    state.command.step='first';
+    Object.assign(state.command.data,{radius:state.filletRadius,trim:state.filletTrim,multiple:false,actionCount:0});
+    logFilletSettings(state.command);
+    setCommandPrompt(filletPrimaryPrompt(state.command));
+  }
+  else if(name==='CHAMFER'){
+    state.command.step='first';
+    Object.assign(state.command.data,{
+      a:state.chamferA,b:state.chamferB,trim:state.chamferTrim,method:state.chamferMethod,
+      angleDistance:state.chamferAngleDistance,angle:state.chamferAngle,multiple:false,actionCount:0
+    });
+    logChamferSettings(state.command);
+    setCommandPrompt(chamferPrimaryPrompt(state.command));
+  }
   else if(name==='BREAK'||name==='BREAKATPOINT'){state.command.step='selectEntity';setCommandPrompt(FR?`${name} Sélectionnez l’objet`:`${name} Select object`);}
   else if(name==='LENGTHEN'){state.command.step='delta';setCommandPrompt(FR?'LENGTHEN Entrez le delta de longueur:':'LENGTHEN Enter length delta:');}
   else if(name==='DIST'){state.command.step='first';setCommandPrompt(`${name} ${CMDT.distanceFirst}:`);}
@@ -1942,21 +2170,56 @@ function commandEnter(){
     performMirror(false);finishCommand();return;
   }
   if(c.name==='TRIM'||c.name==='EXTEND'||c.name==='OFFSET'){finishCommand();return;}
-  if(c.name==='CHAMFER'&&c.step==='distanceA'){
-    c.data.a=Number.isFinite(Number(c.data.a))?Number(c.data.a):state.chamferA;
-    c.step='distanceB';
-    setCommandPrompt(FR?`CHAMFER Deuxième distance <${fmt(state.chamferB)}>`:`CHAMFER Second distance <${fmt(state.chamferB)}>`);
-    return;
+  if(c.name==='FILLET'){
+    if(c.step==='radiusValue'){
+      c.data.radius=state.filletRadius;
+      resetCornerCommandPick(c);logFilletSettings(c);setCommandPrompt(filletPrimaryPrompt(c));return;
+    }
+    if(c.step==='trimMode'){
+      c.data.trim=state.filletTrim;
+      resetCornerCommandPick(c);logFilletSettings(c);setCommandPrompt(filletPrimaryPrompt(c));return;
+    }
+    if(c.step==='polyline'){resetCornerCommandPick(c);setCommandPrompt(filletPrimaryPrompt(c));return;}
+    finishCommand();return;
   }
-  if(c.name==='CHAMFER'&&c.step==='distanceB'){
-    c.data.b=Number.isFinite(Number(c.data.b))?Number(c.data.b):state.chamferB;
-    state.chamferA=c.data.a;state.chamferB=c.data.b;
-    c.step='first';
-    setCommandPrompt(FR?'CHAMFER Sélectionnez la première ligne:':'CHAMFER Select first line:');
-    return;
+  if(c.name==='CHAMFER'){
+    if(c.step==='distanceA'){
+      c.data.a=Number.isFinite(Number(c.data.a))?Number(c.data.a):state.chamferA;
+      c.step='distanceB';
+      setCommandPrompt(FR?`CHAMFER Deuxième distance <${fmt(state.chamferB)}>`:`CHAMFER Second distance <${fmt(state.chamferB)}>`);
+      return;
+    }
+    if(c.step==='distanceB'){
+      c.data.b=Number.isFinite(Number(c.data.b))?Number(c.data.b):state.chamferB;
+      state.chamferA=c.data.a;state.chamferB=c.data.b;state.chamferMethod='distance';c.data.method='distance';
+      resetCornerCommandPick(c);logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));return;
+    }
+    if(c.step==='angleDistance'){
+      c.data.angleDistance=Number.isFinite(Number(c.data.angleDistance))?Number(c.data.angleDistance):state.chamferAngleDistance;
+      c.step='angleValue';
+      setCommandPrompt(FR?`CHAMFER Angle depuis la première ligne <${fmt(state.chamferAngle)}°>:`:`CHAMFER Angle from first line <${fmt(state.chamferAngle)}°>:`);
+      return;
+    }
+    if(c.step==='angleValue'){
+      c.data.angle=Number.isFinite(Number(c.data.angle))?Number(c.data.angle):state.chamferAngle;
+      state.chamferAngleDistance=c.data.angleDistance;state.chamferAngle=c.data.angle;state.chamferMethod='angle';c.data.method='angle';
+      resetCornerCommandPick(c);logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));return;
+    }
+    if(c.step==='trimMode'){
+      c.data.trim=state.chamferTrim;
+      resetCornerCommandPick(c);logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));return;
+    }
+    if(c.step==='methodMode'){
+      c.data.method=state.chamferMethod;
+      resetCornerCommandPick(c);logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));return;
+    }
+    if(c.step==='distancePickSecond'){
+      c.step='distanceA';c.data.firstId=null;c.data.firstPick=null;c.data.distancePickMode=false;
+      setCommandPrompt(FR?`CHAMFER Première distance <${fmt(state.chamferA)}> ou cliquez la première ligne:`:`CHAMFER First distance <${fmt(state.chamferA)}> or click the first line:`);return;
+    }
+    if(c.step==='polyline'){resetCornerCommandPick(c);setCommandPrompt(chamferPrimaryPrompt(c));return;}
+    finishCommand();return;
   }
-  if(c.name==='CHAMFER'&&c.step==='distancePickSecond'){c.step='distanceA';c.data.firstId=null;c.data.firstPick=null;c.data.distancePickMode=false;setCommandPrompt(FR?`CHAMFER Première distance <${fmt(state.chamferA)}>`:`CHAMFER First distance <${fmt(state.chamferA)}>`);return;}
-  if(c.name==='FILLET'||c.name==='CHAMFER'){finishCommand();return;}
   if(c.name==='ARRAY'&&c.step==='arrayType'){c.name='ARRAYRECT';c.step='columns';setCommandPrompt(FR?'ARRAYRECT Nombre de colonnes <2>:' :'ARRAYRECT Number of columns <2>:');return;}
   if(c.name==='ARRAYRECT'&&c.step==='columns'){c.data.columns=2;c.step='rows';setCommandPrompt(FR?'Nombre de rangées <2>:':'Number of rows <2>:');return;}
   if(c.name==='ARRAYRECT'&&c.step==='rows'){c.data.rows=2;c.step='colSpacing';setCommandPrompt(FR?'Espacement des colonnes:':'Column spacing:');return;}
@@ -2014,13 +2277,76 @@ function commandText(raw){
   }
 
   if(c.name==='FILLET'){
-    if(c.step==='first'&&(u==='R'||u==='RADIUS'||u==='RAYON')){c.step='radiusValue';setCommandPrompt(FR?'FILLET Rayon:':'FILLET Radius:');return;}
-    if(c.step==='radiusValue'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);state.filletRadius=n;c.data.radius=n;c.step='first';setCommandPrompt(FR?'FILLET Sélectionnez le premier objet:':'FILLET Select first object:');return;}
+    if(c.step==='first'){
+      if(u==='U'||u==='UNDO'||u==='ANNULER'){cornerCommandUndo(c);return;}
+      if(u==='P'||u==='POLYLINE'||u==='POLYLIGNE'){c.step='polyline';setCommandPrompt(FR?'FILLET Sélectionnez une polyligne 2D:':'FILLET Select 2D polyline:');return;}
+      if(u==='R'||u==='RADIUS'||u==='RAYON'){c.step='radiusValue';setCommandPrompt(FR?`FILLET Rayon <${fmt(state.filletRadius)} >:`:`FILLET Radius <${fmt(state.filletRadius)} >:`);return;}
+      if(u==='T'||u==='TRIM'||u==='AJUSTER'){c.step='trimMode';setCommandPrompt(FR?`FILLET Mode d’ajustement [Trim/NoTrim] <${state.filletTrim?'Trim':'NoTrim'}>:`:`FILLET Trim mode [Trim/NoTrim] <${state.filletTrim?'Trim':'NoTrim'}>:`);return;}
+      if(u==='M'||u==='MULTIPLE'){c.data.multiple=true;setCommandPrompt(filletPrimaryPrompt(c));return;}
+    }
+    if(c.step==='radiusValue'){
+      const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);
+      state.filletRadius=n;c.data.radius=n;resetCornerCommandPick(c);logFilletSettings(c);setCommandPrompt(filletPrimaryPrompt(c));return;
+    }
+    if(c.step==='trimMode'){
+      if(['T','TRIM','O','OUI','Y','YES'].includes(u)){state.filletTrim=true;c.data.trim=true;}
+      else if(['N','NOTRIM','NO-TRIM','SANS','NON','NO'].includes(u)){state.filletTrim=false;c.data.trim=false;}
+      else return commandError(CMDT.valueInvalid);
+      resetCornerCommandPick(c);logFilletSettings(c);setCommandPrompt(filletPrimaryPrompt(c));return;
+    }
   }
   if(c.name==='CHAMFER'){
-    if(c.step==='first'&&(u==='D'||u==='DISTANCE')){c.step='distanceA';setCommandPrompt(FR?`CHAMFER Première distance <${fmt(state.chamferA)}> ou cliquez la première ligne:`:`CHAMFER First distance <${fmt(state.chamferA)}> or click the first line:`);return;}
-    if(c.step==='distanceA'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);c.data.a=n;c.step='distanceB';setCommandPrompt(FR?`CHAMFER Deuxième distance <${fmt(state.chamferB)}>`:`CHAMFER Second distance <${fmt(state.chamferB)}>`);return;}
-    if(c.step==='distanceB'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);c.data.b=n;state.chamferA=c.data.a;state.chamferB=n;c.step='first';setCommandPrompt(FR?'CHAMFER Sélectionnez la première ligne:':'CHAMFER Select first line:');return;}
+    if(c.step==='first'){
+      if(u==='U'||u==='UNDO'||u==='ANNULER'){cornerCommandUndo(c);return;}
+      if(u==='P'||u==='POLYLINE'||u==='POLYLIGNE'){c.step='polyline';setCommandPrompt(FR?'CHAMFER Sélectionnez une polyligne 2D:':'CHAMFER Select 2D polyline:');return;}
+      if(u==='D'||u==='DISTANCE'){
+        c.data.method='distance';state.chamferMethod='distance';c.step='distanceA';
+        setCommandPrompt(FR?`CHAMFER Première distance <${fmt(state.chamferA)}> ou cliquez la première ligne:`:`CHAMFER First distance <${fmt(state.chamferA)}> or click the first line:`);return;
+      }
+      if(u==='A'||u==='ANGLE'){
+        c.data.method='angle';state.chamferMethod='angle';c.step='angleDistance';
+        setCommandPrompt(FR?`CHAMFER Distance sur la première ligne <${fmt(state.chamferAngleDistance)} >:`:`CHAMFER Distance on first line <${fmt(state.chamferAngleDistance)} >:`);return;
+      }
+      if(u==='T'||u==='TRIM'||u==='AJUSTER'){
+        c.step='trimMode';setCommandPrompt(FR?`CHAMFER Mode d’ajustement [Trim/NoTrim] <${state.chamferTrim?'Trim':'NoTrim'}>:`:`CHAMFER Trim mode [Trim/NoTrim] <${state.chamferTrim?'Trim':'NoTrim'}>:`);return;
+      }
+      if(u==='E'||u==='METHOD'||u==='METHODE'||u==='MÉTHODE'){
+        c.step='methodMode';setCommandPrompt(FR?`CHAMFER Méthode [Distance/Angle] <${state.chamferMethod==='angle'?'Angle':'Distance'}>:`:`CHAMFER Method [Distance/Angle] <${state.chamferMethod==='angle'?'Angle':'Distance'}>:`);return;
+      }
+      if(u==='M'||u==='MULTIPLE'){c.data.multiple=true;setCommandPrompt(chamferPrimaryPrompt(c));return;}
+    }
+    if(c.step==='distanceA'){
+      const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);
+      c.data.a=n;c.data.method='distance';state.chamferMethod='distance';c.step='distanceB';
+      setCommandPrompt(FR?`CHAMFER Deuxième distance <${fmt(state.chamferB)}>`:`CHAMFER Second distance <${fmt(state.chamferB)}>`);return;
+    }
+    if(c.step==='distanceB'){
+      const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);
+      c.data.b=n;state.chamferA=c.data.a;state.chamferB=n;state.chamferMethod='distance';c.data.method='distance';
+      resetCornerCommandPick(c);logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));return;
+    }
+    if(c.step==='angleDistance'){
+      const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);
+      c.data.angleDistance=n;c.data.method='angle';state.chamferMethod='angle';c.step='angleValue';
+      setCommandPrompt(FR?`CHAMFER Angle depuis la première ligne <${fmt(state.chamferAngle)}°>:`:`CHAMFER Angle from first line <${fmt(state.chamferAngle)}°>:`);return;
+    }
+    if(c.step==='angleValue'){
+      const n=parseNumber(raw);if(!(n>0&&n<180))return commandError(FR?'L’angle doit être entre 0° et 180°.':'Angle must be between 0° and 180°.');
+      c.data.angle=n;state.chamferAngleDistance=c.data.angleDistance;state.chamferAngle=n;state.chamferMethod='angle';c.data.method='angle';
+      resetCornerCommandPick(c);logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));return;
+    }
+    if(c.step==='trimMode'){
+      if(['T','TRIM','O','OUI','Y','YES'].includes(u)){state.chamferTrim=true;c.data.trim=true;}
+      else if(['N','NOTRIM','NO-TRIM','SANS','NON','NO'].includes(u)){state.chamferTrim=false;c.data.trim=false;}
+      else return commandError(CMDT.valueInvalid);
+      resetCornerCommandPick(c);logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));return;
+    }
+    if(c.step==='methodMode'){
+      if(u==='D'||u==='DISTANCE'){state.chamferMethod='distance';c.data.method='distance';}
+      else if(u==='A'||u==='ANGLE'){state.chamferMethod='angle';c.data.method='angle';}
+      else return commandError(CMDT.valueInvalid);
+      resetCornerCommandPick(c);logChamferSettings(c);setCommandPrompt(chamferPrimaryPrompt(c));return;
+    }
   }
   if(c.name==='LENGTHEN'&&c.step==='delta'){const n=parseNumber(raw);if(!Number.isFinite(n))return commandError(CMDT.valueInvalid);c.data.delta=n;c.step='selectEntity';setCommandPrompt(FR?'LENGTHEN Sélectionnez près de l’extrémité à modifier:':'LENGTHEN Select near endpoint to modify:');return;}
   if(c.name==='ARRAY'&&c.step==='arrayType'){
@@ -2091,16 +2417,36 @@ function commandPoint(point,event,fromKeyboard=false){
     if(ok){setCommandPrompt(c.name==='TRIM'?(FR?'TRIM Sélectionnez une autre portion (Shift=Prolonger) <Entrée>':'TRIM Select another portion (Shift=Extend) <Enter>'):(FR?'EXTEND Sélectionnez un autre objet (Shift=Ajuster) <Entrée>':'EXTEND Select another object (Shift=Trim) <Enter>'));}
     return;
   }
+  if((c.name==='FILLET'||c.name==='CHAMFER')&&c.step==='polyline'){
+    const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+    if(!hit)return;
+    if(hit.type!=='POLYLINE')return commandError(FR?'Sélectionnez une polyligne 2D.':'Select a 2D polyline.');
+    let ok=false;
+    if(c.name==='FILLET'){
+      ok=performFilletPolyline(hit,c.data.radius??state.filletRadius);
+    }else{
+      ok=performChamferPolyline(hit,{
+        method:c.data.method??state.chamferMethod,
+        a:c.data.a??state.chamferA,
+        b:c.data.b??state.chamferB,
+        angleDistance:c.data.angleDistance??state.chamferAngleDistance,
+        angle:c.data.angle??state.chamferAngle
+      });
+    }
+    if(ok)afterCornerOperation(c);
+    return;
+  }
   if(c.name==='CHAMFER'&&c.step==='distanceA'){
-    // Mouse-distance mode: CHA -> D -> click line 1 -> click line 2.
-    // The actual click locations define Distance 1 and Distance 2 from the
-    // theoretical intersection. Numeric D1/D2 entry still works unchanged.
+    // Navo2D extension kept from V6.4: CHA -> D -> click line 1 -> click line 2
+    // uses the two click locations as Dist1 / Dist2. Numeric entry still follows
+    // the normal AutoCAD Distance workflow.
     const hit=event?hitTest(event.clientX,event.clientY):null;
     if(hit?.type==='LINE'){
       const rawPoint=event?screenToWorld(event.clientX,event.clientY):point;
       c.data.firstId=hit.id;
       c.data.firstPick=copyPoint(rawPoint);
       c.data.distancePickMode=true;
+      c.data.method='distance';state.chamferMethod='distance';
       c.step='distancePickSecond';
       setCommandPrompt(FR?'CHAMFER D · Sélectionnez la deuxième ligne (les clics définissent D1/D2):':'CHAMFER D · Select second line (clicks define D1/D2):');
       return;
@@ -2116,19 +2462,48 @@ function commandPoint(point,event,fromKeyboard=false){
       if(!picked)return commandError(FR?'Impossible de déterminer le coin du chanfrein.':'Unable to determine chamfer corner.');
       const {dA,dB}=picked;
       if(!(dA>1e-10)||!(dB>1e-10))return commandError(FR?'Cliquez les lignes à une distance non nulle du coin.':'Pick each line a non-zero distance from the corner.');
-      c.data.a=dA;c.data.b=dB;state.chamferA=dA;state.chamferB=dB;
-      const ok=performChamfer(first,hit,c.data.firstPick,rawPoint,dA,dB);
-      if(ok){
-        c.step='first';c.data.firstId=null;c.data.firstPick=null;c.data.distancePickMode=false;
-        setCommandPrompt(FR?`CHAMFER créé · D1=${fmt(dA)}, D2=${fmt(dB)} · Sélectionnez la première ligne <Entrée pour terminer>:`:`CHAMFER created · D1=${fmt(dA)}, D2=${fmt(dB)} · Select first line <Enter to finish>:`);
-      }
+      c.data.a=dA;c.data.b=dB;c.data.method='distance';
+      state.chamferA=dA;state.chamferB=dB;state.chamferMethod='distance';
+      const ok=performChamfer(first,hit,c.data.firstPick,rawPoint,dA,dB,{trim:c.data.trim!==false});
+      if(ok)afterCornerOperation(c);
       return;
     }
   }
   if(c.name==='FILLET'||c.name==='CHAMFER'){
-    const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);if(!hit)return;
-    if(c.step==='first'){c.data.firstId=hit.id;c.data.firstPick=copyPoint(point);c.step='second';setCommandPrompt(c.name==='FILLET'?(FR?'FILLET Sélectionnez le deuxième objet:':'FILLET Select second object:'):(FR?'CHAMFER Sélectionnez la deuxième ligne:':'CHAMFER Select second line:'));return;}
-    if(c.step==='second'){const first=state.entities.find(e=>e.id===c.data.firstId);if(!first||first.id===hit.id)return;const sharp=Boolean(event?.shiftKey),ok=c.name==='FILLET'?performFillet(first,hit,c.data.firstPick,point,sharp?0:(c.data.radius??state.filletRadius)):performChamfer(first,hit,c.data.firstPick,point,sharp?0:(c.data.a??state.chamferA),sharp?0:(c.data.b??state.chamferB));if(ok){c.step='first';c.data.firstId=null;setCommandPrompt(c.name==='FILLET'?(FR?'FILLET Sélectionnez le premier objet <Entrée pour terminer>:':'FILLET Select first object <Enter to finish>:'):(FR?'CHAMFER Sélectionnez la première ligne <Entrée pour terminer>:':'CHAMFER Select first line <Enter to finish>:'));}return;}
+    const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+    if(!hit)return;
+    if(hit.type!=='LINE')return commandError(c.name==='FILLET'?(FR?'Sélectionnez une ligne exacte ou utilisez l’option Polyligne.':'Select an exact line or use Polyline.'):(FR?'Sélectionnez une ligne exacte ou utilisez l’option Polyligne.':'Select an exact line or use Polyline.'));
+    if(c.step==='first'){
+      c.data.firstId=hit.id;c.data.firstPick=copyPoint(point);c.step='second';
+      setCommandPrompt(c.name==='FILLET'?(FR?'FILLET Sélectionnez le deuxième objet:':'FILLET Select second object:'):(FR?'CHAMFER Sélectionnez la deuxième ligne:':'CHAMFER Select second line:'));
+      return;
+    }
+    if(c.step==='second'){
+      const first=state.entities.find(e=>e.id===c.data.firstId);
+      if(!first||first.id===hit.id)return;
+      const sharp=Boolean(event?.shiftKey);
+      let ok=false;
+      if(c.name==='FILLET'){
+        ok=performFillet(first,hit,c.data.firstPick,point,sharp?0:(c.data.radius??state.filletRadius),{trim:sharp?true:c.data.trim!==false});
+      }else if(sharp){
+        ok=performChamfer(first,hit,c.data.firstPick,point,0,0,{trim:true});
+      }else if((c.data.method??state.chamferMethod)==='angle'){
+        ok=performChamferByAngle(
+          first,hit,c.data.firstPick,point,
+          c.data.angleDistance??state.chamferAngleDistance,
+          c.data.angle??state.chamferAngle,
+          {trim:c.data.trim!==false}
+        );
+      }else{
+        ok=performChamfer(
+          first,hit,c.data.firstPick,point,
+          c.data.a??state.chamferA,c.data.b??state.chamferB,
+          {trim:c.data.trim!==false}
+        );
+      }
+      if(ok)afterCornerOperation(c);
+      return;
+    }
   }
   if(c.name==='BREAK'||c.name==='BREAKATPOINT'){
     if(c.step==='selectEntity'){const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);if(!hit)return;c.data.entityId=hit.id;c.step='first';setCommandPrompt(FR?`${c.name} Premier point de coupure:`:`${c.name} First break point:`);return;}
@@ -2202,7 +2577,7 @@ function commandNeedsPoint(c){
   if(['ROTATE','SCALE'].includes(c.name))return c.step==='base'||c.step==='angle'||c.step==='factor';
   if(c.name==='MIRROR')return c.step==='mirror1'||c.step==='mirror2';
   if(c.name==='OFFSET')return c.step==='selectEntity'||c.step==='side';
-  if(['TRIM','EXTEND','FILLET','CHAMFER','BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name))return ['pick','first','second','distanceA','distancePickSecond','selectEntity'].includes(c.step);
+  if(['TRIM','EXTEND','FILLET','CHAMFER','BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name))return ['pick','first','second','distanceA','distancePickSecond','polyline','selectEntity'].includes(c.step);
   if(c.name==='BREAK'||c.name==='BREAKATPOINT')return ['selectEntity','first','second'].includes(c.step);
   if(c.name==='ARRAYPOLAR')return c.step==='center';
   return false;
