@@ -857,7 +857,7 @@ function pointerUp(ev){
 
   if(state.command&&!state.command.selecting){
     const c=state.command;
-    const rawPick=(['TRIM','EXTEND'].includes(c.name))||(['FILLET','CHAMFER'].includes(c.name)&&['first','second'].includes(c.step))||(['BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name)&&c.step==='selectEntity');
+    const rawPick=(['TRIM','EXTEND'].includes(c.name))||(['FILLET','CHAMFER'].includes(c.name)&&['first','second','distanceA','distancePickSecond'].includes(c.step))||(['BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name)&&c.step==='selectEntity');
     commandPoint(rawPick?raw:point,ev);
     return;
   }
@@ -1030,20 +1030,65 @@ function uniqueNumbers(values,tol=1e-8){const a=[...values].filter(Number.isFini
 function copyEntityProps(source,type){const e=cloneEntity(source,true);e.type=type;e.rawType=type;delete e.p1;delete e.p2;delete e.points;delete e.center;delete e.radius;delete e.start;delete e.end;delete e.text;delete e.point;return e;}
 function replaceEntityWith(id,replacements){state.entities=state.entities.filter(e=>e.id!==id);state.entities.push(...replacements);state.selected.delete(id);}
 function intersectionsWithEntity(target){const out=[];for(const other of state.entities){if(other.id===target.id||!layerVisible(other.layer))continue;for(const p of entityIntersections(target,other))out.push(p);}return out;}
+function removeTrimmedEntity(entity,opts={},message){
+  if(opts.history!==false)pushHistory();
+  replaceEntityWith(entity.id,[]);
+  afterGeometryChange();
+  if(!opts.silent)toast(message||(FR?'Objet supprimé — aucune intersection.':'Object removed — no intersection.'));
+  return true;
+}
 function performTrimAtPoint(entity,pick,opts={}){
   if(!entity)return false;
   if(entity.type==='LINE'){
-    const ts=uniqueNumbers(intersectionsWithEntity(entity).map(p=>lineParam(p,entity.p1,entity.p2)).filter(t=>t>1e-8&&t<1-1e-8));if(!ts.length)return opts.quiet?false:commandError(FR?'Aucune arête de coupe intersectée.':'No cutting edge intersects this object.');
-    const tc=Math.max(0,Math.min(1,lineParam(projectPointToLine(pick,entity.p1,entity.p2,true),entity.p1,entity.p2))),cuts=[0,...ts,1];let k=0;for(let i=0;i<cuts.length-1;i++)if(tc>=cuts[i]-1e-9&&tc<=cuts[i+1]+1e-9){k=i;break;}const lo=cuts[k],hi=cuts[k+1],v={x:entity.p2.x-entity.p1.x,y:entity.p2.y-entity.p1.y},pt=t=>({x:entity.p1.x+v.x*t,y:entity.p1.y+v.y*t}),repl=[];
-    if(lo>1e-8){const n=copyEntityProps(entity,'LINE');n.p1=copyPoint(entity.p1);n.p2=pt(lo);repl.push(n);}if(hi<1-1e-8){const n=copyEntityProps(entity,'LINE');n.p1=pt(hi);n.p2=copyPoint(entity.p2);repl.push(n);}if(opts.history!==false)pushHistory();replaceEntityWith(entity.id,repl);afterGeometryChange();if(!opts.silent)toast(FR?'Objet ajusté.':'Object trimmed.');return true;
+    // Quick-TRIM behavior: the clicked continuous portion is removed all the
+    // way to the nearest real intersections. If the line has no interior
+    // intersection at all, the complete line is erased.
+    const ts=uniqueNumbers(
+      intersectionsWithEntity(entity)
+        .map(p=>lineParam(p,entity.p1,entity.p2))
+        .filter(t=>t>1e-8&&t<1-1e-8)
+    );
+    if(!ts.length)return removeTrimmedEntity(entity,opts,FR?'Ligne supprimée — aucune intersection.':'Line removed — no intersection.');
+
+    const projected=projectPointToLine(pick,entity.p1,entity.p2,true);
+    const tc=Math.max(0,Math.min(1,lineParam(projected||pick,entity.p1,entity.p2)));
+    const cuts=[0,...ts,1];
+    let k=0;
+    // Use half-open intervals so a click very near an intersection does not
+    // accidentally delete both neighboring portions across repeated clicks.
+    for(let i=0;i<cuts.length-1;i++){
+      if(tc<cuts[i+1]-1e-10||i===cuts.length-2){k=i;break;}
+    }
+    const lo=cuts[k],hi=cuts[k+1];
+    const v={x:entity.p2.x-entity.p1.x,y:entity.p2.y-entity.p1.y};
+    const pt=t=>({x:entity.p1.x+v.x*t,y:entity.p1.y+v.y*t});
+    const repl=[];
+    if(lo>1e-8){const n=copyEntityProps(entity,'LINE');n.p1=copyPoint(entity.p1);n.p2=pt(lo);repl.push(n);}
+    if(hi<1-1e-8){const n=copyEntityProps(entity,'LINE');n.p1=pt(hi);n.p2=copyPoint(entity.p2);repl.push(n);}
+    if(opts.history!==false)pushHistory();
+    replaceEntityWith(entity.id,repl);
+    afterGeometryChange();
+    if(!opts.silent)toast(FR?'Portion supprimée jusqu’aux intersections.':'Portion removed to intersections.');
+    return true;
   }
   if(entity.type==='CIRCLE'){
-    const angles=uniqueNumbers(intersectionsWithEntity(entity).map(p=>{let a=Math.atan2(p.y-entity.center.y,p.x-entity.center.x);while(a<0)a+=Math.PI*2;return a;}));if(angles.length<2)return opts.quiet?false:commandError(FR?'Deux intersections sont requises pour couper ce cercle.':'Two intersections are required to trim this circle.');
-    let ac=Math.atan2(pick.y-entity.center.y,pick.x-entity.center.x);while(ac<0)ac+=Math.PI*2;let start=0,end=0;for(let i=0;i<angles.length;i++){const a=angles[i],b=i===angles.length-1?angles[0]+Math.PI*2:angles[i+1],x=ac<a?ac+Math.PI*2:ac;if(x>=a&&x<=b){start=a;end=b;break;}}const keepStart=end%(Math.PI*2),keepEnd=start%(Math.PI*2),n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=keepStart;n.end=keepEnd;if(opts.history!==false)pushHistory();replaceEntityWith(entity.id,[n]);afterGeometryChange();if(!opts.silent)toast(FR?'Cercle ajusté en arc.':'Circle trimmed to arc.');return true;
+    const angles=uniqueNumbers(intersectionsWithEntity(entity).map(p=>{let a=Math.atan2(p.y-entity.center.y,p.x-entity.center.x);while(a<0)a+=Math.PI*2;return a;}));
+    if(!angles.length)return removeTrimmedEntity(entity,opts,FR?'Cercle supprimé — aucune intersection.':'Circle removed — no intersection.');
+    if(angles.length<2)return opts.quiet?false:commandError(FR?'Deux intersections sont requises pour couper ce cercle.':'Two intersections are required to trim this circle.');
+    let ac=Math.atan2(pick.y-entity.center.y,pick.x-entity.center.x);while(ac<0)ac+=Math.PI*2;let start=0,end=0;
+    for(let i=0;i<angles.length;i++){const a=angles[i],b=i===angles.length-1?angles[0]+Math.PI*2:angles[i+1],x=ac<a?ac+Math.PI*2:ac;if(x>=a&&x<=b){start=a;end=b;break;}}
+    const keepStart=end%(Math.PI*2),keepEnd=start%(Math.PI*2),n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=keepStart;n.end=keepEnd;
+    if(opts.history!==false)pushHistory();replaceEntityWith(entity.id,[n]);afterGeometryChange();if(!opts.silent)toast(FR?'Portion du cercle supprimée.':'Circle portion trimmed.');return true;
   }
   if(entity.type==='ARC'){
-    const span=positiveSpan(entity.start,entity.end),rels=uniqueNumbers(intersectionsWithEntity(entity).map(p=>{let a=Math.atan2(p.y-entity.center.y,p.x-entity.center.x),r=a-entity.start;while(r<0)r+=Math.PI*2;return r;}).filter(r=>r>1e-8&&r<span-1e-8));if(!rels.length)return opts.quiet?false:commandError(FR?'Aucune arête de coupe intersectée.':'No cutting edge intersects this arc.');
-    let ap=Math.atan2(pick.y-entity.center.y,pick.x-entity.center.x)-entity.start;while(ap<0)ap+=Math.PI*2;ap=Math.min(span,ap);const cuts=[0,...rels,span];let k=0;for(let i=0;i<cuts.length-1;i++)if(ap>=cuts[i]-1e-9&&ap<=cuts[i+1]+1e-9){k=i;break;}const lo=cuts[k],hi=cuts[k+1],repl=[];if(lo>1e-8){const n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=entity.start;n.end=entity.start+lo;repl.push(n);}if(hi<span-1e-8){const n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=entity.start+hi;n.end=entity.end;repl.push(n);}if(opts.history!==false)pushHistory();replaceEntityWith(entity.id,repl);afterGeometryChange();if(!opts.silent)toast(FR?'Arc ajusté.':'Arc trimmed.');return true;
+    const span=positiveSpan(entity.start,entity.end),rels=uniqueNumbers(intersectionsWithEntity(entity).map(p=>{let a=Math.atan2(p.y-entity.center.y,p.x-entity.center.x),r=a-entity.start;while(r<0)r+=Math.PI*2;return r;}).filter(r=>r>1e-8&&r<span-1e-8));
+    if(!rels.length)return removeTrimmedEntity(entity,opts,FR?'Arc supprimé — aucune intersection.':'Arc removed — no intersection.');
+    let ap=Math.atan2(pick.y-entity.center.y,pick.x-entity.center.x)-entity.start;while(ap<0)ap+=Math.PI*2;ap=Math.min(span,ap);const cuts=[0,...rels,span];let k=0;
+    for(let i=0;i<cuts.length-1;i++){if(ap<cuts[i+1]-1e-10||i===cuts.length-2){k=i;break;}}
+    const lo=cuts[k],hi=cuts[k+1],repl=[];
+    if(lo>1e-8){const n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=entity.start;n.end=entity.start+lo;repl.push(n);}
+    if(hi<span-1e-8){const n=copyEntityProps(entity,'ARC');n.center=copyPoint(entity.center);n.radius=entity.radius;n.start=entity.start+hi;n.end=entity.end;repl.push(n);}
+    if(opts.history!==false)pushHistory();replaceEntityWith(entity.id,repl);afterGeometryChange();if(!opts.silent)toast(FR?'Portion de l’arc supprimée.':'Arc portion trimmed.');return true;
   }
   return opts.quiet?false:commandError(FR?'TRIM supporte actuellement lignes, cercles et arcs exacts.':'TRIM currently supports exact lines, circles and arcs.');
 }
@@ -1063,7 +1108,7 @@ function performExtendAtPoint(entity,pick,opts={}){
   if(entity.type==='POLYLINE'&&!entity.closed&&entity.points.length>=2){const first=entity.points[0],last=entity.points[entity.points.length-1],moveFirst=dist(pick,first)<dist(pick,last),origin=moveFirst?entity.points[1]:entity.points[entity.points.length-2],current=moveFirst?first:last,v={x:current.x-origin.x,y:current.y-origin.y},L=Math.hypot(v.x,v.y);if(L<1e-12)return false;const dir={x:v.x/L,y:v.y/L},hits=[];for(const o of state.entities)if(o.id!==entity.id&&layerVisible(o.layer))hits.push(...rayIntersectionsWithEntity(origin,dir,o).filter(h=>h.t>L+1e-8));if(!hits.length)return opts.quiet?false:commandError(FR?'Aucune limite trouvée.':'No boundary found.');hits.sort((a,b)=>a.t-b.t);if(opts.history!==false)pushHistory();if(moveFirst){entity.points[0].x=hits[0].p.x;entity.points[0].y=hits[0].p.y;}else{last.x=hits[0].p.x;last.y=hits[0].p.y;}afterGeometryChange();if(!opts.silent)toast(FR?'Polyligne prolongée.':'Polyline extended.');return true;}
   return opts.quiet?false:commandError(FR?'EXTEND supporte lignes et extrémités de polylignes ouvertes.':'EXTEND supports lines and open polyline endpoints.');
 }
-// Navo2D V6.2 — FILLET / CHAMFER use the actual object-pick side, not entity endpoint order.
+// Navo2D V6.4 — FILLET / CHAMFER use the actual object-pick side, not entity endpoint order.
 // This mirrors AutoCAD: the portions clicked by the user are the portions kept,
 // while the opposite ends are trimmed or extended to the new corner geometry.
 function branchDirection(line,intersection,pick){
@@ -1104,19 +1149,25 @@ function arcEndPoints(arc){
     {x:arc.center.x+arc.radius*Math.cos(arc.end),y:arc.center.y+arc.radius*Math.sin(arc.end)}
   ];
 }
-function existingFilletArcIds(a,b,I){
-  // If these same two lines were already filleted, their endpoints nearest the
-  // theoretical intersection are the two tangent points of the existing arc.
-  // Replace that connector instead of stacking another ARC on top of it.
+function existingCornerConnectorIds(a,b,I){
+  // Detect a connector already joining the two current corner endpoints. This
+  // covers an existing fillet ARC as well as an existing chamfer LINE so a new
+  // FILLET/CHAMFER replaces the old corner treatment instead of stacking it.
   const ea=lineCornerEndpoint(a,I),eb=lineCornerEndpoint(b,I);
   const drawingScale=Math.max(1,state.bounds?.width||0,state.bounds?.height||0,dist(ea,I),dist(eb,I));
   const tol=Math.max(1e-8,drawingScale*1e-7);
   const near=(p,q)=>dist(p,q)<=tol;
   const ids=[];
   for(const e of state.entities){
-    if(e.id===a.id||e.id===b.id||e.type!=='ARC'||!e.center||!(e.radius>=0))continue;
-    const [x,y]=arcEndPoints(e);
-    if((near(x,ea)&&near(y,eb))||(near(x,eb)&&near(y,ea)))ids.push(e.id);
+    if(e.id===a.id||e.id===b.id)continue;
+    if(e.type==='ARC'&&e.center&&e.radius>=0){
+      const [x,y]=arcEndPoints(e);
+      if((near(x,ea)&&near(y,eb))||(near(x,eb)&&near(y,ea)))ids.push(e.id);
+      continue;
+    }
+    if(e.type==='LINE'&&e.p1&&e.p2){
+      if((near(e.p1,ea)&&near(e.p2,eb))||(near(e.p1,eb)&&near(e.p2,ea)))ids.push(e.id);
+    }
   }
   return ids;
 }
@@ -1133,12 +1184,12 @@ function performFillet(a,b,pickA,pickB,r){
   const theta=Math.acos(dot);
   if(theta<1e-7||Math.abs(Math.PI-theta)<1e-7)return commandError(FR?'Angle invalide pour un congé.':'Invalid fillet angle.');
 
-  const oldFilletIds=existingFilletArcIds(a,b,I);
+  const oldConnectorIds=existingCornerConnectorIds(a,b,I);
 
   if(radius<=1e-12){
     pushHistory();
-    if(oldFilletIds.length){
-      const remove=new Set(oldFilletIds);
+    if(oldConnectorIds.length){
+      const remove=new Set(oldConnectorIds);
       state.entities=state.entities.filter(e=>!remove.has(e.id));
     }
     trimLineToPoint(a,I,d1,I);
@@ -1167,8 +1218,8 @@ function performFillet(a,b,pickA,pickB,r){
   if(positiveSpan(sA,sB)>Math.PI){const tmp=sA;sA=sB;sB=tmp;}
 
   pushHistory();
-  if(oldFilletIds.length){
-    const remove=new Set(oldFilletIds);
+  if(oldConnectorIds.length){
+    const remove=new Set(oldConnectorIds);
     state.entities=state.entities.filter(e=>!remove.has(e.id));
   }
   trimLineToPoint(a,I,d1,p1);
@@ -1182,6 +1233,18 @@ function performFillet(a,b,pickA,pickB,r){
   return true;
 }
 
+function chamferDistancesFromPicks(a,b,pickA,pickB){
+  if(a?.type!=='LINE'||b?.type!=='LINE')return null;
+  const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);
+  if(!I)return null;
+  const u=branchDirection(a,I,pickA),v=branchDirection(b,I,pickB);
+  if(!u||!v)return null;
+  const pA=projectPointToLine(pickA,a.p1,a.p2,false)||pickA;
+  const pB=projectPointToLine(pickB,b.p1,b.p2,false)||pickB;
+  const dA=Math.abs((pA.x-I.x)*u.x+(pA.y-I.y)*u.y);
+  const dB=Math.abs((pB.x-I.x)*v.x+(pB.y-I.y)*v.y);
+  return{I,u,v,dA,dB};
+}
 function performChamfer(a,b,pickA,pickB,dA,dB){
   if(a.type!=='LINE'||b.type!=='LINE')return commandError(FR?'CHAMFER supporte actuellement deux lignes exactes.':'CHAMFER currently supports two exact lines.');
   const firstDistance=Number(dA),secondDistance=Number(dB);
@@ -1198,7 +1261,12 @@ function performChamfer(a,b,pickA,pickB,dA,dB){
   const p2={x:I.x+v.x*secondDistance,y:I.y+v.y*secondDistance};
   if(![p1.x,p1.y,p2.x,p2.y].every(Number.isFinite))return commandError(FR?'Géométrie de chanfrein invalide.':'Invalid chamfer geometry.');
 
+  const oldConnectorIds=existingCornerConnectorIds(a,b,I);
   pushHistory();
+  if(oldConnectorIds.length){
+    const remove=new Set(oldConnectorIds);
+    state.entities=state.entities.filter(e=>!remove.has(e.id));
+  }
   trimLineToPoint(a,I,u,p1);
   trimLineToPoint(b,I,v,p2);
 
@@ -1601,7 +1669,7 @@ const SNAP_OVERRIDE_NAMES={
 function dynamicDimensionAvailable(c=state.command){
   if(!state.dyn||!c||c.selecting||!commandNeedsPoint(c))return false;
   if(['TRIM','EXTEND'].includes(c.name))return false;
-  if(['FILLET','CHAMFER'].includes(c.name)&&['first','second'].includes(c.step))return false;
+  if(['FILLET','CHAMFER'].includes(c.name)&&['first','second','distanceA','distancePickSecond'].includes(c.step))return false;
   if(['BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name)&&c.step==='selectEntity')return false;
   const ref=commandReferencePoint();
   if(!ref)return false;
@@ -1887,6 +1955,7 @@ function commandEnter(){
     setCommandPrompt(FR?'CHAMFER Sélectionnez la première ligne:':'CHAMFER Select first line:');
     return;
   }
+  if(c.name==='CHAMFER'&&c.step==='distancePickSecond'){c.step='distanceA';c.data.firstId=null;c.data.firstPick=null;c.data.distancePickMode=false;setCommandPrompt(FR?`CHAMFER Première distance <${fmt(state.chamferA)}>`:`CHAMFER First distance <${fmt(state.chamferA)}>`);return;}
   if(c.name==='FILLET'||c.name==='CHAMFER'){finishCommand();return;}
   if(c.name==='ARRAY'&&c.step==='arrayType'){c.name='ARRAYRECT';c.step='columns';setCommandPrompt(FR?'ARRAYRECT Nombre de colonnes <2>:' :'ARRAYRECT Number of columns <2>:');return;}
   if(c.name==='ARRAYRECT'&&c.step==='columns'){c.data.columns=2;c.step='rows';setCommandPrompt(FR?'Nombre de rangées <2>:':'Number of rows <2>:');return;}
@@ -1949,7 +2018,7 @@ function commandText(raw){
     if(c.step==='radiusValue'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);state.filletRadius=n;c.data.radius=n;c.step='first';setCommandPrompt(FR?'FILLET Sélectionnez le premier objet:':'FILLET Select first object:');return;}
   }
   if(c.name==='CHAMFER'){
-    if(c.step==='first'&&(u==='D'||u==='DISTANCE')){c.step='distanceA';setCommandPrompt(FR?`CHAMFER Première distance <${fmt(state.chamferA)}>`:`CHAMFER First distance <${fmt(state.chamferA)}>`);return;}
+    if(c.step==='first'&&(u==='D'||u==='DISTANCE')){c.step='distanceA';setCommandPrompt(FR?`CHAMFER Première distance <${fmt(state.chamferA)}> ou cliquez la première ligne:`:`CHAMFER First distance <${fmt(state.chamferA)}> or click the first line:`);return;}
     if(c.step==='distanceA'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);c.data.a=n;c.step='distanceB';setCommandPrompt(FR?`CHAMFER Deuxième distance <${fmt(state.chamferB)}>`:`CHAMFER Second distance <${fmt(state.chamferB)}>`);return;}
     if(c.step==='distanceB'){const n=parseNumber(raw);if(!(n>=0))return commandError(CMDT.valueInvalid);c.data.b=n;state.chamferA=c.data.a;state.chamferB=n;c.step='first';setCommandPrompt(FR?'CHAMFER Sélectionnez la première ligne:':'CHAMFER Select first line:');return;}
   }
@@ -2022,18 +2091,37 @@ function commandPoint(point,event,fromKeyboard=false){
     if(ok){setCommandPrompt(c.name==='TRIM'?(FR?'TRIM Sélectionnez une autre portion (Shift=Prolonger) <Entrée>':'TRIM Select another portion (Shift=Extend) <Enter>'):(FR?'EXTEND Sélectionnez un autre objet (Shift=Ajuster) <Entrée>':'EXTEND Select another object (Shift=Trim) <Enter>'));}
     return;
   }
-  if(c.name==='CHAMFER'&&(c.step==='distanceA'||c.step==='distanceB')){
-    // Convenience compatible with the user's CAD workflow: after D, a click
-    // directly on a line accepts the currently displayed distance defaults and
-    // immediately starts the two-line selection. Numeric entry + Enter remains
-    // available and follows AutoCAD's Dist1 / Dist2 prompts.
+  if(c.name==='CHAMFER'&&c.step==='distanceA'){
+    // Mouse-distance mode: CHA -> D -> click line 1 -> click line 2.
+    // The actual click locations define Distance 1 and Distance 2 from the
+    // theoretical intersection. Numeric D1/D2 entry still works unchanged.
     const hit=event?hitTest(event.clientX,event.clientY):null;
     if(hit?.type==='LINE'){
-      if(c.step==='distanceA')c.data.a=Number.isFinite(Number(c.data.a))?Number(c.data.a):state.chamferA;
-      c.data.b=Number.isFinite(Number(c.data.b))?Number(c.data.b):state.chamferB;
-      state.chamferA=c.data.a;state.chamferB=c.data.b;
-      c.data.firstId=hit.id;c.data.firstPick=copyPoint(point);c.step='second';
-      setCommandPrompt(FR?'CHAMFER Sélectionnez la deuxième ligne:':'CHAMFER Select second line:');
+      const rawPoint=event?screenToWorld(event.clientX,event.clientY):point;
+      c.data.firstId=hit.id;
+      c.data.firstPick=copyPoint(rawPoint);
+      c.data.distancePickMode=true;
+      c.step='distancePickSecond';
+      setCommandPrompt(FR?'CHAMFER D · Sélectionnez la deuxième ligne (les clics définissent D1/D2):':'CHAMFER D · Select second line (clicks define D1/D2):');
+      return;
+    }
+  }
+  if(c.name==='CHAMFER'&&c.step==='distancePickSecond'){
+    const hit=event?hitTest(event.clientX,event.clientY):null;
+    if(hit?.type==='LINE'){
+      const first=state.entities.find(e=>e.id===c.data.firstId);
+      if(!first||first.id===hit.id)return;
+      const rawPoint=event?screenToWorld(event.clientX,event.clientY):point;
+      const picked=chamferDistancesFromPicks(first,hit,c.data.firstPick,rawPoint);
+      if(!picked)return commandError(FR?'Impossible de déterminer le coin du chanfrein.':'Unable to determine chamfer corner.');
+      const {dA,dB}=picked;
+      if(!(dA>1e-10)||!(dB>1e-10))return commandError(FR?'Cliquez les lignes à une distance non nulle du coin.':'Pick each line a non-zero distance from the corner.');
+      c.data.a=dA;c.data.b=dB;state.chamferA=dA;state.chamferB=dB;
+      const ok=performChamfer(first,hit,c.data.firstPick,rawPoint,dA,dB);
+      if(ok){
+        c.step='first';c.data.firstId=null;c.data.firstPick=null;c.data.distancePickMode=false;
+        setCommandPrompt(FR?`CHAMFER créé · D1=${fmt(dA)}, D2=${fmt(dB)} · Sélectionnez la première ligne <Entrée pour terminer>:`:`CHAMFER created · D1=${fmt(dA)}, D2=${fmt(dB)} · Select first line <Enter to finish>:`);
+      }
       return;
     }
   }
@@ -2114,7 +2202,7 @@ function commandNeedsPoint(c){
   if(['ROTATE','SCALE'].includes(c.name))return c.step==='base'||c.step==='angle'||c.step==='factor';
   if(c.name==='MIRROR')return c.step==='mirror1'||c.step==='mirror2';
   if(c.name==='OFFSET')return c.step==='selectEntity'||c.step==='side';
-  if(['TRIM','EXTEND','FILLET','CHAMFER','BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name))return ['pick','first','second','selectEntity'].includes(c.step);
+  if(['TRIM','EXTEND','FILLET','CHAMFER','BREAK','BREAKATPOINT','LENGTHEN'].includes(c.name))return ['pick','first','second','distanceA','distancePickSecond','selectEntity'].includes(c.step);
   if(c.name==='BREAK'||c.name==='BREAKATPOINT')return ['selectEntity','first','second'].includes(c.step);
   if(c.name==='ARRAYPOLAR')return c.step==='center';
   return false;
