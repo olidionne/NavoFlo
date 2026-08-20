@@ -108,7 +108,7 @@ function bindUI(){
   E.snap?.addEventListener('click',()=>toggleDraftSetting('osnap'));
   E.layers.addEventListener('click',()=>toggleDrawer('layers'));
   E.layerSelect?.addEventListener('change',()=>{
-    setActiveLayer(E.layerSelect.value);
+    applyLayerPickerChange(E.layerSelect.value);
     try{E.canvas.focus()}catch{}
   });
   E.props.addEventListener('click',()=>toggleDrawer('properties'));
@@ -710,6 +710,9 @@ function syncLayerDefinition(layer){
 }
 function assignSelectedLayer(name){
   if(!state.selected.size)return toast(T.chooseSelection);
+  if(!name||!state.layers.has(name))return;
+  const changed=state.entities.some(e=>state.selected.has(e.id)&&e.layer!==name);
+  if(!changed){syncLayerPicker();return;}
   pushHistory();ensureLayerDefinition(name);
   for(const e of state.entities)if(state.selected.has(e.id)){e.layer=name;e.colorMode='bylayer';e.colorIndex=256;e.trueColor=null;}
   rebuildLayers();renderLayerList();recomputeBounds();syncUI();toast(`Layer → ${name}`);
@@ -722,24 +725,43 @@ function setActiveLayer(name){
   if(E.currentLayer)E.currentLayer.textContent=`Layer: ${name}`;
   commandLog(`Layer: ${name}`);
 }
+function selectedLayerContext(){
+  const selected=state.entities.filter(e=>state.selected.has(e.id));
+  if(!selected.length)return{mode:'current',name:state.activeLayer||'0'};
+  const name=selected[0].layer||'0';
+  return selected.every(e=>(e.layer||'0')===name)?{mode:'selection',name}:{mode:'mixed',name:null};
+}
+function applyLayerPickerChange(name){
+  if(!name||name==='__MIXED__')return syncLayerPicker();
+  if(state.selected.size)assignSelectedLayer(name);
+  else setActiveLayer(name);
+}
 function syncLayerPicker(){
   if(!E.layerSelect)return;
   const layers=[...state.layers.values()].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
-  const current=state.activeLayer||'0';
+  const context=selectedLayerContext();
   const frag=document.createDocumentFragment();
+  if(context.mode==='mixed'){
+    const mixed=document.createElement('option');
+    mixed.value='__MIXED__';mixed.textContent=FR?'*PLUSIEURS LAYERS*':'*VARIES*';mixed.disabled=true;
+    frag.append(mixed);
+  }
   for(const layer of layers){
     const option=document.createElement('option');
     option.value=layer.name;
-    const suffix=layer.count===0?(FR?' · inutilisé':' · unused'):'';
-    option.textContent=`■  ${layer.name}${suffix}`;
+    option.textContent=`■  ${layer.name}`;
     option.style.color=layer.color||aciColorToHex(layer.colorIndex||7);
     frag.append(option);
   }
   E.layerSelect.replaceChildren(frag);
-  if(layers.some(x=>x.name===current))E.layerSelect.value=current;
-  else if(layers.length){state.activeLayer=layers[0].name;E.layerSelect.value=state.activeLayer;}
-  const layer=state.layers.get(state.activeLayer);
-  if(E.layerSwatch)E.layerSwatch.style.background=layer?.color||'#ffffff';
+  if(context.mode==='mixed')E.layerSelect.value='__MIXED__';
+  else if(layers.some(x=>x.name===context.name))E.layerSelect.value=context.name;
+  else if(layers.length){
+    if(context.mode==='current')state.activeLayer=layers[0].name;
+    E.layerSelect.value=layers[0].name;
+  }
+  const shown=context.mode==='mixed'?null:state.layers.get(E.layerSelect.value);
+  if(E.layerSwatch)E.layerSwatch.style.background=shown?.color||'#71818e';
   E.layerSelect.disabled=!state.file||layers.length===0;
 }
 function renderLayerList(){
@@ -796,46 +818,140 @@ function renderProperties(){
   recomputeBounds();E.propSize.textContent=state.bounds?`${fmt(state.bounds.width)} × ${fmt(state.bounds.height)} ${state.unitLabel}`:'—';syncSelectionUI();renderAnalysis();
 }
 function syncSelectionUI(){
-  E.del.disabled=!state.selected.size;E.move.disabled=!state.selected.size;const sel=state.entities.filter(e=>state.selected.has(e.id));if(!sel.length)E.selectionInfo.textContent=T.noSelection;else if(sel.length===1){const e=sel[0];let s=`${e.rawType||e.type}\nLayer: ${e.layer}`;if(e.type==='LINE')s+=`\nLength: ${formatLength(dist(e.p1,e.p2))}`;if(e.type==='CIRCLE')s+=`\nØ ${formatLength(e.radius*2)}`;if(e.type==='ARC')s+=`\nR ${formatLength(e.radius)}`;if(e.approx)s+=`\n≈ ${FR?'géométrie approximée':'approximated geometry'}`;E.selectionInfo.textContent=s;}else E.selectionInfo.textContent=`${sel.length} ${T.selected}`;}
+  E.del.disabled=!state.selected.size;E.move.disabled=!state.selected.size;const sel=state.entities.filter(e=>state.selected.has(e.id));if(!sel.length)E.selectionInfo.textContent=T.noSelection;else if(sel.length===1){const e=sel[0];let s=`${e.rawType||e.type}\nLayer: ${e.layer}`;if(e.type==='LINE')s+=`\nLength: ${formatLength(dist(e.p1,e.p2))}`;if(e.type==='CIRCLE')s+=`\nØ ${formatLength(e.radius*2)}`;if(e.type==='ARC')s+=`\nR ${formatLength(e.radius)}`;if(e.approx)s+=`\n≈ ${FR?'géométrie approximée':'approximated geometry'}`;E.selectionInfo.textContent=s;}else E.selectionInfo.textContent=`${sel.length} ${T.selected}`;
+  syncLayerPicker();
+}
 function syncHistoryButtons(){E.undo.disabled=!state.history.length;E.redo.disabled=!state.future.length;}
 function syncUI(){const has=Boolean(state.file);for(const b of[E.select,E.measure,E.fit,E.grid,E.snap,E.layers,E.analyze,E.props,E.export,E.close,E.layerSelect].filter(Boolean))b.disabled=!has;E.statusFile.textContent=state.file?.name||T.noDxf;E.statusEntities.textContent=has?`${state.entities.length} ${T.entities}`:'—';E.statusUnits.textContent=has?state.unitLabel:'—';if(E.currentLayer)E.currentLayer.textContent=has?`Layer: ${state.activeLayer||'0'}`:'Layer: —';E.empty.hidden=has;syncHistoryButtons();renderProperties();syncDraftingUI();syncLayerPicker();updateCommandPrompt();}
 function clearFile(){cancelCommand(false);state.file=null;state.dxf=null;state.rawText='';state.entities=[];state.layers.clear();state.layerDefinitions.clear();state.unsupported=[];state.selected.clear();state.history=[];state.future=[];state.analysis=null;state.bounds=null;state.selectionBox=null;closeContextMenu();clearMeasure();syncUI();E.layerDrawer.hidden=true;E.propDrawer.hidden=true;}
 function toggleDrawer(which,force){const el=which==='layers'?E.layerDrawer:E.propDrawer,other=which==='layers'?E.propDrawer:E.layerDrawer;const show=force??el.hidden;el.hidden=!show;if(show)other.hidden=true;if(which==='properties'&&show)renderProperties();}
 
-function exportDxf(){if(!state.file)return;const text=writeDxf();const name=(state.file.name.replace(/\.dxf$/i,'')||'navo2d')+'-Navo2D.dxf';downloadBlob(text,name,'application/dxf');toast(T.exported);}
+function exportDxf(){
+  if(!state.file)return;
+  try{
+    const result=writeDxf();
+    const check=validateExportDxf(result.text);
+    if(result.written!==state.entities.length||check.entities!==result.written){
+      throw new Error(`DXF entity mismatch: model=${state.entities.length}, written=${result.written}, parsed=${check.entities}`);
+    }
+    if(check.layers<state.layers.size){
+      throw new Error(`DXF layer mismatch: model=${state.layers.size}, parsed=${check.layers}`);
+    }
+    const name=(state.file.name.replace(/\.dxf$/i,'')||'navo2d')+'-Navo2D.dxf';
+    downloadBlob(result.text,name,'application/dxf');
+    commandLog(`DXF export OK · ${result.written}/${state.entities.length} ${T.entities} · ${state.layers.size} layers`);
+    toast(`${T.exported} ${result.written} ${T.entities}`);
+  }catch(error){
+    console.error('Navo2D DXF export failed',error);
+    commandLog(`DXF EXPORT ERROR · ${error?.message||error}`);
+    toast(FR?'Export DXF annulé : validation échouée.':'DXF export canceled: validation failed.');
+  }
+}
+function validateExportDxf(text){
+  const parsed=new DxfParser().parseSync(text);
+  if(!parsed)throw new Error('Generated DXF cannot be parsed.');
+  const entities=Array.isArray(parsed.entities)?parsed.entities.length:0;
+  const layers=Object.keys(parsed?.tables?.layer?.layers||{}).length;
+  return{entities,layers};
+}
 function writeDxf(){
+  // AC1009/R12: simple and highly compatible with AutoCAD/LT and CAM software.
+  // Navo2D exports the complete canonical model and reparses it before download.
   const lines=[];const add=(c,v)=>{lines.push(String(c),String(v));};
-  add(0,'SECTION');add(2,'HEADER');add(9,'$ACADVER');add(1,'AC1015');add(9,'$INSUNITS');add(70,state.unitCode||0);add(0,'ENDSEC');
+  recomputeBounds();
+  const bounds=state.bounds||{minX:0,minY:0,maxX:0,maxY:0};
+  const metric=[4,5,6,7,11,12,13,14].includes(state.unitCode)?1:0;
 
-  add(0,'SECTION');add(2,'TABLES');add(0,'TABLE');add(2,'LAYER');add(70,state.layers.size);
+  add(0,'SECTION');add(2,'HEADER');
+  add(9,'$ACADVER');add(1,'AC1009');
+  add(9,'$DWGCODEPAGE');add(3,'ANSI_1252');
+  add(9,'$INSUNITS');add(70,state.unitCode||0);
+  add(9,'$MEASUREMENT');add(70,metric);
+  add(9,'$CLAYER');add(8,safeDxfName(state.activeLayer||'0'));
+  add(9,'$EXTMIN');add(10,bounds.minX||0);add(20,bounds.minY||0);add(30,0);
+  add(9,'$EXTMAX');add(10,bounds.maxX||0);add(20,bounds.maxY||0);add(30,0);
+  add(0,'ENDSEC');
+
+  add(0,'SECTION');add(2,'TABLES');
+  add(0,'TABLE');add(2,'LTYPE');add(70,1);
+  add(0,'LTYPE');add(2,'CONTINUOUS');add(70,0);add(3,'Solid line');add(72,65);add(73,0);add(40,0.0);
+  add(0,'ENDTAB');
+
+  add(0,'TABLE');add(2,'LAYER');add(70,state.layers.size);
   for(const layer of state.layers.values()){
     const baseFlags=Number(layer.flags)||0;
     const flags=layer.frozen?(baseFlags|1):(baseFlags&~3);
-    const aci=Math.max(1,Math.min(255,Math.abs(Number(layer.colorIndex)||7)));
-    add(0,'LAYER');add(2,layer.name);add(70,flags);add(62,layer.visible?aci:-aci);
-    if(Number.isFinite(layer.trueColor))add(420,layer.trueColor);
-    add(6,layer.linetype||'CONTINUOUS');
-    if(Number.isFinite(layer.lineweight))add(370,layer.lineweight);
-    add(290,layer.plot===false?0:1);
+    const aci=exportAciColor(layer);
+    add(0,'LAYER');add(2,safeDxfName(layer.name));add(70,flags);add(62,layer.visible?aci:-aci);add(6,'CONTINUOUS');
   }
-  add(0,'ENDTAB');add(0,'ENDSEC');
+  add(0,'ENDTAB');
 
-  add(0,'SECTION');add(2,'ENTITIES');for(const e of state.entities)writeEntity(add,e);add(0,'ENDSEC');add(0,'EOF');
-  return lines.join('\r\n')+'\r\n';
+  add(0,'TABLE');add(2,'STYLE');add(70,1);
+  add(0,'STYLE');add(2,'STANDARD');add(70,0);add(40,0);add(41,1);add(50,0);add(71,0);add(42,2.5);add(3,'txt');add(4,'');
+  add(0,'ENDTAB');
+  add(0,'ENDSEC');
+
+  add(0,'SECTION');add(2,'ENTITIES');
+  let written=0;
+  for(const entity of state.entities){
+    if(writeEntity(add,entity))written++;
+    else throw new Error(`Unsupported export entity: ${entity?.type||'UNKNOWN'} (${entity?.id||'?'})`);
+  }
+  add(0,'ENDSEC');add(0,'EOF');
+  return{text:lines.join('\r\n')+'\r\n',written};
 }
 function writeEntity(add,e){
+  const layer=safeDxfName(e.layer||'0');
   const common=()=>{
-    add(8,e.layer||'0');
+    add(8,layer);
     if(e.colorMode==='aci'&&e.colorIndex>=1&&e.colorIndex<=255)add(62,e.colorIndex);
     else if(e.colorMode==='byblock')add(62,0);
-    if(e.colorMode==='true'&&Number.isFinite(e.trueColor))add(420,e.trueColor);
+    else if(e.colorMode==='true'&&Number.isFinite(e.trueColor))add(62,nearestAciColor(e.trueColor));
   };
-  if(e.type==='LINE'){add(0,'LINE');common();add(10,e.p1.x);add(20,e.p1.y);add(30,0);add(11,e.p2.x);add(21,e.p2.y);add(31,0);return;}
-  if(e.type==='CIRCLE'){add(0,'CIRCLE');common();add(10,e.center.x);add(20,e.center.y);add(30,0);add(40,e.radius);return;}
-  if(e.type==='ARC'){add(0,'ARC');common();add(10,e.center.x);add(20,e.center.y);add(30,0);add(40,e.radius);add(50,radToDeg(e.start));add(51,radToDeg(e.end));return;}
-  if(e.type==='POINT'){add(0,'POINT');common();add(10,e.point.x);add(20,e.point.y);add(30,0);return;}
-  if(e.type==='TEXT'){add(0,'TEXT');common();add(10,e.point.x);add(20,e.point.y);add(30,0);add(40,e.height||2.5);add(1,e.text||'');add(50,e.rotation||0);return;}
-  if(e.type==='POLYLINE'){add(0,'LWPOLYLINE');common();add(90,e.points.length);add(70,e.closed?1:0);for(const q of e.points){add(10,q.x);add(20,q.y);if(Math.abs(q.bulge||0)>1e-12)add(42,q.bulge);}return;}
+  if(e.type==='LINE'){
+    add(0,'LINE');common();add(10,e.p1.x);add(20,e.p1.y);add(30,0);add(11,e.p2.x);add(21,e.p2.y);add(31,0);return true;
+  }
+  if(e.type==='CIRCLE'){
+    add(0,'CIRCLE');common();add(10,e.center.x);add(20,e.center.y);add(30,0);add(40,Math.abs(e.radius));return true;
+  }
+  if(e.type==='ARC'){
+    add(0,'ARC');common();add(10,e.center.x);add(20,e.center.y);add(30,0);add(40,Math.abs(e.radius));add(50,radToDeg(e.start));add(51,radToDeg(e.end));return true;
+  }
+  if(e.type==='POINT'){
+    add(0,'POINT');common();add(10,e.point.x);add(20,e.point.y);add(30,0);return true;
+  }
+  if(e.type==='TEXT'){
+    add(0,'TEXT');common();add(10,e.point.x);add(20,e.point.y);add(30,0);add(40,Math.max(Math.abs(Number(e.height)||2.5),1e-9));add(1,safeDxfText(e.text));add(50,Number(e.rotation)||0);add(7,'STANDARD');return true;
+  }
+  if(e.type==='POLYLINE'){
+    const points=Array.isArray(e.points)?e.points:[];
+    if(points.length<2)return false;
+    add(0,'POLYLINE');common();add(66,1);add(70,e.closed?1:0);add(10,0);add(20,0);add(30,0);
+    for(const q of points){
+      add(0,'VERTEX');add(8,layer);add(10,q.x);add(20,q.y);add(30,0);
+      if(Math.abs(Number(q.bulge)||0)>1e-12)add(42,q.bulge);
+    }
+    add(0,'SEQEND');add(8,layer);return true;
+  }
+  return false;
+}
+function safeDxfName(value){return String(value??'0').replace(/[\r\n\0]/g,'').trim()||'0';}
+function safeDxfText(value){return String(value??'').replace(/\\P/gi,' ').replace(/[\r\n\0]+/g,' ');}
+function exportAciColor(layer){
+  if(Number.isFinite(layer?.trueColor))return nearestAciColor(layer.trueColor);
+  const idx=Math.abs(Number(layer?.colorIndex)||7);
+  return Math.max(1,Math.min(255,idx));
+}
+function nearestAciColor(packed){
+  const rgb=Number(packed)>>>0,r=(rgb>>16)&255,g=(rgb>>8)&255,b=rgb&255;
+  let best=7,bestD=Infinity;
+  for(let i=1;i<=255;i++){
+    const c=Number(AUTO_CAD_COLOR_INDEX[i]);if(!Number.isFinite(c))continue;
+    const cr=(c>>16)&255,cg=(c>>8)&255,cb=c&255;
+    const d=(r-cr)*(r-cr)+(g-cg)*(g-cg)+(b-cb)*(b-cb);
+    if(d<bestD){bestD=d;best=i;if(d===0)break;}
+  }
+  return best;
 }
 function radToDeg(v){let d=v*180/Math.PI;while(d<0)d+=360;while(d>=360)d-=360;return d;}
 function downloadBlob(text,name,type){const blob=new Blob([text],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
