@@ -3,8 +3,18 @@
   const toggle = document.querySelector('.nav-toggle');
   const nav = document.querySelector('#site-nav');
   const year = document.querySelector('#year');
+  const isEnglish = document.documentElement.lang.toLowerCase().startsWith('en');
 
   if (year) year.textContent = String(new Date().getFullYear());
+
+  // Keep pricing discoverable without requiring a full rewrite of older pages.
+  if (nav && !nav.querySelector('a[href*="pricing"]')) {
+    const link = document.createElement('a');
+    link.href = isEnglish ? '/en/pricing/' : '/pricing/';
+    link.textContent = isEnglish ? 'Pricing' : 'Tarifs';
+    const contactButton = nav.querySelector('.button');
+    nav.insertBefore(link, contactButton || null);
+  }
 
   const updateHeader = () => {
     if (header) header.classList.toggle('scrolled', window.scrollY > 8);
@@ -27,12 +37,7 @@
       document.body.classList.toggle('menu-open', opening);
     });
 
-    nav.querySelectorAll('a').forEach((link) => {
-      link.addEventListener('click', closeMenu);
-    });
-
-    window.addEventListener('resize', () => {
-      if (window.innerWidth > 850) closeMenu();
-    });
+    nav.querySelectorAll('a').forEach((link) => link.addEventListener('click', closeMenu));
+    window.addEventListener('resize', () => { if (window.innerWidth > 850) closeMenu(); });
   }
 })();
