@@ -93,3 +93,11 @@ PAD is delayed-notification. Do not grant a permanent licence simply because Che
 
 ## 10. Customer Portal note
 The current portal endpoint can be opened using the recent Checkout Session ID. This is acceptable during the private development phase behind Cloudflare Access. Before the public launch, replace this with authenticated NavoFlo organization/user authorization.
+
+## V5 - PAD mandate fix
+Canadian ACSS Debit (PAD) Checkout now sends the full Stripe mandate terms required for an annual business subscription:
+- `payment_schedule=interval`
+- localized annual `interval_description`
+- `transaction_type=business`
+
+This fixes Stripe error: `acss_debit requires payment_method_options[acss_debit][mandate_options] to be set`.

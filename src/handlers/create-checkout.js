@@ -31,6 +31,12 @@ export async function createCheckout(context) {
       locale,
       'payment_method_types[0]': 'card',
       'payment_method_types[1]': 'acss_debit',
+      // Payments Canada PAD mandate terms required by Stripe for ACSS Debit.
+      // NavoFlo subscriptions renew once per year, so this is an interval mandate.
+      'payment_method_options[acss_debit][mandate_options][payment_schedule]': 'interval',
+      'payment_method_options[acss_debit][mandate_options][interval_description]': locale === 'fr'
+        ? 'Une fois par année à la date de renouvellement de l’abonnement.'
+        : 'Once per year on the subscription renewal date.',
       'payment_method_options[acss_debit][mandate_options][transaction_type]': 'business',
       'line_items[0][price]': plan.mainPrice,
       'line_items[0][quantity]': 1,

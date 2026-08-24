@@ -24,3 +24,11 @@ Expected webhook browser test after deployment:
   -> HTTP 405 Method Not Allowed
 
 That is intentional: Stripe sends POST requests, not GET requests.
+
+## V5 - PAD mandate fix
+Canadian ACSS Debit (PAD) Checkout now sends the full Stripe mandate terms required for an annual business subscription:
+- `payment_schedule=interval`
+- localized annual `interval_description`
+- `transaction_type=business`
+
+This fixes Stripe error: `acss_debit requires payment_method_options[acss_debit][mandate_options] to be set`.
