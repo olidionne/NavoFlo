@@ -8,6 +8,43 @@ import {
   verifyStripeSignature
 } from '../lib/stripe.js';
 
+async function paymentIntentIdForSubscription(env, subscription) {
+  const latest = subscription?.latest_invoice;
+  if (latest && typeof latest === 'object') {
+    const pi = latest.payment_intent;
+    if (typeof pi === 'string') return pi;
+    if (pi?.id) return pi.id;
+  }
+
+  const invoiceId = typeof latest === 'string' ? latest : latest?.id;
+  if (!invoiceId) throw new Error('PAD subscription is missing the first invoice.');
+
+  // Newer Stripe API versions expose invoice payments as a separate collection.
+  // Use it as a fallback when latest_invoice.payment_intent is not expanded.
+  const payments = await stripeRequest(env, `/invoice_payments?invoice=${encodeURIComponent(invoiceId)}&limit=10`);
+  for (const row of payments?.data || []) {
+    const pi = row?.payment?.payment_intent;
+    if (typeof pi === 'string') return pi;
+    if (pi?.id) return pi.id;
+  }
+  throw new Error('PAD subscription first invoice has no PaymentIntent.');
+}
+
+async function confirmPadInitialInvoice(env, setupIntent, subscription, paymentMethod) {
+  const mandate = typeof setupIntent?.mandate === 'string' ? setupIntent.mandate : setupIntent?.mandate?.id;
+  if (!mandate) throw new Error('PAD setup is missing the reusable mandate.');
+
+  const paymentIntentId = await paymentIntentIdForSubscription(env, subscription);
+  return stripeRequest(env, `/payment_intents/${encodeURIComponent(paymentIntentId)}/confirm`, {
+    method: 'POST',
+    form: {
+      payment_method: paymentMethod,
+      mandate
+    },
+    idempotencyKey: `navoflo-pad-initial-payment-${setupIntent.id}`
+  });
+}
+
 async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
   const meta = setupIntent?.metadata || {};
   if (meta.navoflo_payment_method !== 'pad') return null;
@@ -32,6 +69,7 @@ async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
     customer,
     default_payment_method: paymentMethod,
     payment_behavior: 'default_incomplete',
+    'expand[0]': 'latest_invoice.payment_intent',
     'payment_settings[payment_method_types][0]': 'acss_debit',
     'payment_settings[save_default_payment_method]': 'on_subscription',
     'items[0][price]': plan.mainPrice,
@@ -56,10 +94,19 @@ async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
     });
   }
 
-  const subscription = await stripeRequest(env, '/subscriptions', {
+  let subscription = await stripeRequest(env, '/subscriptions', {
     method: 'POST', form,
     idempotencyKey: `navoflo-pad-subscription-${setupIntent.id}`
   });
+
+  // The subscription is intentionally created incomplete. Because the PAD mandate
+  // was collected first in Checkout setup mode, explicitly confirm Stripe's first
+  // invoice PaymentIntent with that existing PaymentMethod + Mandate. This starts
+  // the actual bank debit instead of leaving the subscription stuck incomplete.
+  await confirmPadInitialInvoice(env, setupIntent, subscription, paymentMethod);
+
+  // Refresh so D1 (when enabled) reflects Stripe's post-confirmation status.
+  subscription = await stripeRequest(env, `/subscriptions/${encodeURIComponent(subscription.id)}`);
 
   await upsertSubscription(env, {
     stripe_subscription_id: subscription.id,

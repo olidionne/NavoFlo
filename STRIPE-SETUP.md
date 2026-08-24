@@ -113,9 +113,12 @@ V6.1: PAD Setup Checkout now follows Stripe Billing's ACSS Debit mandate shape: 
 V6.2: Canadian PAD mandates are explicitly marked `transaction_type=business` in both Checkout setup and the Billing subscription payment settings. This makes Stripe display the service/transaction type as business instead of the default personal value.
 
 
-## V6.3 PAD webhook hardening
+## V6.5 PAD webhook hardening
 PAD subscription creation now runs from both `setup_intent.succeeded` and a setup-mode `checkout.session.completed` fallback. Stripe idempotency uses the SetupIntent ID, so duplicate webhook delivery cannot create duplicate subscriptions. Subscription creation uses `payment_behavior=default_incomplete`, matching Stripe's ACSS Debit Billing guidance.
 
 
-## V6.4 PAD subscription creation
+## V6.5 PAD subscription creation
 When the PAD SetupIntent was created with `default_for=[invoice,subscription]`, the mandate is already authorized for Stripe Billing. Subscription creation therefore reuses the customer's verified default ACSS Debit payment method and no longer sends a second `mandate_options[transaction_type]` block on `/v1/subscriptions`. This matches Stripe's saved-PAD-for-Billing flow and avoids re-declaring mandate options on an already-authorized payment method.
+
+
+V6.5 PAD initial payment: after the reusable PAD mandate succeeds and the subscription is created with `default_incomplete`, NavoFlo explicitly confirms the first invoice PaymentIntent using the saved PaymentMethod + Mandate. This starts the actual debit and prevents the subscription from remaining `incomplete` solely because the PaymentIntent was never confirmed.

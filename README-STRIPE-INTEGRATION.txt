@@ -36,7 +36,10 @@ This fixes Stripe error: `acss_debit requires payment_method_options[acss_debit]
 IMPORTANT V5.1: `keep_vars: true` is enabled in `wrangler.jsonc` so Git/Wrangler code deployments preserve Runtime Variables configured in the Cloudflare dashboard. Secrets remain protected.
 
 
-V6.3: Card and Canadian PAD are now separate Stripe flows. PAD is collected in Checkout setup mode and the annual subscription is created from the setup_intent.succeeded webhook because Stripe Checkout subscription mode does not support acss_debit. Add setup_intent.succeeded to the Stripe webhook destination.
+V6.5: Card and Canadian PAD are now separate Stripe flows. PAD is collected in Checkout setup mode and the annual subscription is created from the setup_intent.succeeded webhook because Stripe Checkout subscription mode does not support acss_debit. Add setup_intent.succeeded to the Stripe webhook destination.
 
-V6.3: PAD Setup Checkout now follows Stripe Billing's ACSS Debit mandate shape: mandate_options only sets default_for=[invoice, subscription]. payment_schedule and interval_description are intentionally omitted because Stripe rejects them when default_for is provided.
-V6.3: Canadian PAD mandates are explicitly marked `transaction_type=business` in both Checkout setup and the Billing subscription payment settings. This makes Stripe display the service/transaction type as business instead of the default personal value.
+V6.5: PAD Setup Checkout now follows Stripe Billing's ACSS Debit mandate shape: mandate_options only sets default_for=[invoice, subscription]. payment_schedule and interval_description are intentionally omitted because Stripe rejects them when default_for is provided.
+V6.5: Canadian PAD mandates are explicitly marked `transaction_type=business` in both Checkout setup and the Billing subscription payment settings. This makes Stripe display the service/transaction type as business instead of the default personal value.
+
+
+V6.5 PAD initial payment: after the reusable PAD mandate succeeds and the subscription is created with `default_incomplete`, NavoFlo explicitly confirms the first invoice PaymentIntent using the saved PaymentMethod + Mandate. This starts the actual debit and prevents the subscription from remaining `incomplete` solely because the PaymentIntent was never confirmed.
