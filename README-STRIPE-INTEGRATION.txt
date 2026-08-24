@@ -32,3 +32,5 @@ Canadian ACSS Debit (PAD) Checkout now sends the full Stripe mandate terms requi
 - `transaction_type=business`
 
 This fixes Stripe error: `acss_debit requires payment_method_options[acss_debit][mandate_options] to be set`.
+
+IMPORTANT V5.1: `keep_vars: true` is enabled in `wrangler.jsonc` so Git/Wrangler code deployments preserve Runtime Variables configured in the Cloudflare dashboard. Secrets remain protected.
