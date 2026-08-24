@@ -9,24 +9,19 @@ import {
 } from '../lib/stripe.js';
 
 async function payPadInitialInvoice(env, setupIntent, subscription, paymentMethod) {
-  const mandate = typeof setupIntent?.mandate === 'string' ? setupIntent.mandate : setupIntent?.mandate?.id;
-  if (!mandate) throw new Error('PAD setup is missing the reusable mandate.');
-
   const latest = subscription?.latest_invoice;
   const invoiceId = typeof latest === 'string' ? latest : latest?.id;
   if (!invoiceId) throw new Error('PAD subscription is missing the first invoice.');
 
   // This is the API equivalent of clicking “Pay / Régler” in the Stripe Dashboard.
-  // The bank account + Billing mandate were already collected and verified by the
-  // SetupIntent, so tell Stripe to collect the finalized subscription invoice with
-  // that existing PaymentMethod and Mandate. Stripe then owns the asynchronous
-  // ACSS Debit lifecycle (processing -> paid/failed).
+  // The SetupIntent already created a reusable Billing mandate with
+  // default_for=[invoice, subscription]. Passing that mandate again here conflicts
+  // with the mandate information Stripe already carries in the invoice/payment
+  // method options. Reuse only the verified PaymentMethod and let Stripe reuse the
+  // existing mandate automatically.
   return stripeRequest(env, `/invoices/${encodeURIComponent(invoiceId)}/pay`, {
     method: 'POST',
-    form: {
-      payment_method: paymentMethod,
-      mandate
-    },
+    form: { payment_method: paymentMethod },
     idempotencyKey: `navoflo-pad-initial-invoice-pay-${setupIntent.id}`
   });
 }
