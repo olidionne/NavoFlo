@@ -1,4 +1,4 @@
-import { json, planConfig, safeOrigin, stripeRequest, taxRatesForProvince } from '../../_lib/stripe.js';
+import { json, planConfig, provinceFromCanadianPostalCode, provinceLabel, safeOrigin, stripeRequest, taxRatesForProvince } from '../../_lib/stripe.js';
 
 export async function onRequestPost(context) {
   try {
@@ -7,9 +7,24 @@ export async function onRequestPost(context) {
     const plan = planConfig(env, body.plan);
     const seats = Math.max(1, Math.min(250, Math.floor(Number(body.seats) || 1)));
     const locale = body.locale === 'en' ? 'en' : 'fr';
-    const province = String(body.province || '').trim().toUpperCase();
+    const postalCode = String(body.postalCode || '').trim().toUpperCase();
+    const province = provinceFromCanadianPostalCode(postalCode);
     const origin = safeOrigin(request, env);
-    const taxRates = taxRatesForProvince(env, province);
+
+    let taxRates;
+    try {
+      taxRates = taxRatesForProvince(env, province);
+    } catch (error) {
+      if (String(error.message || '').includes('Manual tax rates are not configured')) {
+        const region = provinceLabel(province, locale);
+        return json({
+          error: locale === 'fr'
+            ? `L’abonnement en ligne n’est pas encore configuré pour ${region}. Contactez NavoFlo pour cette province.`
+            : `Online subscription is not yet configured for ${region}. Contact NavoFlo for this province.`
+        }, 400);
+      }
+      throw error;
+    }
 
     const form = {
       mode: 'subscription',
@@ -25,10 +40,12 @@ export async function onRequestPost(context) {
       'tax_id_collection[enabled]': 'true',
       'subscription_data[metadata][navoflo_plan]': plan.code,
       'subscription_data[metadata][navoflo_seats]': seats,
-      'subscription_data[metadata][navoflo_province]': province,
+      'subscription_data[metadata][navoflo_tax_province]': province,
+      'subscription_data[metadata][navoflo_postal_fsa]': postalCode.replace(/\s+/g, '').slice(0, 3),
       'metadata[navoflo_plan]': plan.code,
       'metadata[navoflo_seats]': seats,
-      'metadata[navoflo_province]': province,
+      'metadata[navoflo_tax_province]': province,
+      'metadata[navoflo_postal_fsa]': postalCode.replace(/\s+/g, '').slice(0, 3),
       'metadata[source]': 'navoflo_web'
     };
 

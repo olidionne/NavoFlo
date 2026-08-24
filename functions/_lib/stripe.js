@@ -63,6 +63,34 @@ export function planConfig(env, plan) {
 }
 
 
+export function provinceFromCanadianPostalCode(postalCode) {
+  const code = String(postalCode || '').toUpperCase().replace(/\s+/g, '');
+  if (!/^[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTVWXYZ]\d[ABCEGHJ-NPRSTVWXYZ]\d$/.test(code)) {
+    throw new Error('A valid Canadian billing postal code is required.');
+  }
+  const first = code[0];
+  const direct = {
+    A: 'NL', B: 'NS', C: 'PE', E: 'NB', G: 'QC', H: 'QC', J: 'QC',
+    K: 'ON', L: 'ON', M: 'ON', N: 'ON', P: 'ON', R: 'MB', S: 'SK',
+    T: 'AB', V: 'BC', Y: 'YT'
+  };
+  if (direct[first]) return direct[first];
+  if (first === 'X') return ['X0A', 'X0B', 'X0C'].includes(code.slice(0, 3)) ? 'NU' : 'NT';
+  throw new Error('Unable to determine the Canadian province from this postal code.');
+}
+
+export function provinceLabel(province, locale = 'fr') {
+  const labels = {
+    AB: ['Alberta', 'Alberta'], BC: ['Colombie-Britannique', 'British Columbia'], MB: ['Manitoba', 'Manitoba'],
+    NB: ['Nouveau-Brunswick', 'New Brunswick'], NL: ['Terre-Neuve-et-Labrador', 'Newfoundland and Labrador'],
+    NS: ['Nouvelle-Écosse', 'Nova Scotia'], NT: ['Territoires du Nord-Ouest', 'Northwest Territories'],
+    NU: ['Nunavut', 'Nunavut'], ON: ['Ontario', 'Ontario'], PE: ['Île-du-Prince-Édouard', 'Prince Edward Island'],
+    QC: ['le Québec', 'Quebec'], SK: ['Saskatchewan', 'Saskatchewan'], YT: ['Yukon', 'Yukon']
+  };
+  const pair = labels[String(province || '').toUpperCase()];
+  return pair ? pair[locale === 'en' ? 1 : 0] : String(province || '');
+}
+
 export function taxRatesForProvince(env, province) {
   const code = String(province || '').trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(code)) throw new Error('Province is required for manual tax calculation.');

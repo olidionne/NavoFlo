@@ -1,4 +1,5 @@
-# NavoFlo — Stripe Billing setup V2 (Card + Canadian PAD + manual taxes)
+# NavoFlo — Stripe Billing setup V3
+## Card + Canadian PAD + manual taxes + automatic province detection
 
 This package is designed for Cloudflare Pages + Pages Functions.
 No Stripe secret key is ever exposed in browser JavaScript.
@@ -24,14 +25,23 @@ Enable:
 The Checkout code requests a business PAD mandate.
 
 ## 3. Manual tax rates
-Stripe Automatic Tax must NOT be enabled by this integration.
+Stripe Automatic Tax is NOT used by this integration.
+
 For Quebec, create two active **exclusive** manual tax rates:
 - GST / TPS: 5%
 - QST / TVQ: 9.975%
 
 Copy both `txr_...` IDs.
 
-The integration intentionally does not guess Canadian interprovincial tax rules. It uses a province-to-tax-rate environment variable. At launch you can enable Quebec only, then add other provinces after their tax treatment has been confirmed.
+### How V3 chooses the province without a province dropdown
+The public pricing page does **not** ask the customer to choose a province.
+When the customer clicks Subscribe, NavoFlo asks only for the Canadian billing postal code in a small modal.
+The Cloudflare Function validates the postal code and derives the province server-side from the postal prefix.
+Stripe Checkout then collects the customer's complete billing address.
+
+This gives a cleaner UX while still allowing manual tax rates to be selected **before** the Checkout Session is created.
+
+At launch, if only `STRIPE_TAX_RATES_QC` exists, Quebec checkouts work and other provinces receive a friendly "not configured yet" message. Add other province tax-rate environment variables only after their tax treatment has been confirmed.
 
 ## 4. Cloudflare Pages environment variables / secrets
 In Cloudflare > Pages > NavoFlo > Settings > Environment variables / Secrets:
@@ -47,7 +57,12 @@ PUBLIC_APP_URL=https://navoflo.com
 
 Use Cloudflare **Secrets** for STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET.
 
-Do NOT define STRIPE_AUTOMATIC_TAX in V2. Manual tax rates are applied directly to every subscription line item.
+For future provinces, the convention is:
+`STRIPE_TAX_RATES_ON=txr_...`
+`STRIPE_TAX_RATES_BC=txr_...,txr_...`
+etc.
+
+Do NOT enable Stripe Automatic Tax in the Checkout code. Manual tax rates are attached directly to every subscription line item.
 
 ## 5. Webhook
 In Stripe Developers > Webhooks, add:
@@ -73,12 +88,20 @@ The Checkout can open without D1, but D1 is strongly recommended before access-c
 ## 7. PAD behavior
 PAD is delayed-notification. Do NOT grant permanent NavoBase/NavoPro access solely because the browser returned from Checkout. Access must be based on the server-side subscription/payment state updated by Stripe webhooks, especially `invoice.paid`.
 
-## 8. Current scope
+## 8. V3 UX changes
+- Removed the province dropdown from the pricing cards.
+- "Total annuel" is now "Sous-total annuel" / "Annual subtotal".
+- The seat counter still updates the subtotal live.
+- Payment note is customer-facing and no longer mentions technical Stripe tax-rate implementation.
+- Billing postal code is requested only after clicking Subscribe.
+- Stripe Checkout still collects the full billing address.
+
+## 9. Current scope
 Implemented:
 - NavoBase / NavoPro annual Checkout
 - Main licence + additional-seat quantities
 - Card + Canadian PAD
-- Manual Stripe tax rates by configured province
+- Manual Stripe tax rates selected from billing postal code
 - Quebec GST 5% + QST 9.975% ready through `STRIPE_TAX_RATES_QC`
 - Stripe Customer Portal endpoint
 - Webhook signature verification
