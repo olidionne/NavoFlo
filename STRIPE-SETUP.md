@@ -111,3 +111,7 @@ Stripe currently does **not** support `acss_debit` in Checkout `subscription` mo
 
 V6.1: PAD Setup Checkout now follows Stripe Billing's ACSS Debit mandate shape: mandate_options only sets default_for=[invoice, subscription]. payment_schedule and interval_description are intentionally omitted because Stripe rejects them when default_for is provided.
 V6.2: Canadian PAD mandates are explicitly marked `transaction_type=business` in both Checkout setup and the Billing subscription payment settings. This makes Stripe display the service/transaction type as business instead of the default personal value.
+
+
+## V6.3 PAD webhook hardening
+PAD subscription creation now runs from both `setup_intent.succeeded` and a setup-mode `checkout.session.completed` fallback. Stripe idempotency uses the SetupIntent ID, so duplicate webhook delivery cannot create duplicate subscriptions. Subscription creation uses `payment_behavior=default_incomplete`, matching Stripe's ACSS Debit Billing guidance.

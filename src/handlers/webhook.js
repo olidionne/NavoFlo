@@ -31,7 +31,7 @@ async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
   const form = {
     customer,
     default_payment_method: paymentMethod,
-    payment_behavior: 'allow_incomplete',
+    payment_behavior: 'default_incomplete',
     'payment_settings[payment_method_types][0]': 'acss_debit',
     'payment_settings[payment_method_options][acss_debit][mandate_options][transaction_type]': 'business',
     'payment_settings[save_default_payment_method]': 'on_subscription',
@@ -102,6 +102,8 @@ export async function handleWebhook({ request, env }) {
 
     if (event.type === 'checkout.session.completed') {
       const s = event.data.object;
+
+      // Card Checkout already created the subscription for us.
       if (s.subscription) {
         await upsertSubscription(env, {
           stripe_subscription_id: typeof s.subscription === 'string' ? s.subscription : s.subscription?.id,
@@ -111,6 +113,20 @@ export async function handleWebhook({ request, env }) {
           seats: Number(s.metadata?.navoflo_seats || 1),
           status: s.payment_status === 'paid' ? 'active' : 'pending_payment'
         });
+      }
+
+      // PAD Checkout runs in setup mode. Some Stripe webhook destinations may not
+      // subscribe to setup_intent.succeeded, so also finish the PAD subscription
+      // from checkout.session.completed. The subscription creation uses an
+      // idempotency key based on the SetupIntent, so receiving both events is safe.
+      if (!s.subscription && s.mode === 'setup' && s.setup_intent) {
+        const setupIntentId = typeof s.setup_intent === 'string' ? s.setup_intent : s.setup_intent?.id;
+        if (setupIntentId) {
+          const setupIntent = await stripeRequest(env, `/setup_intents/${encodeURIComponent(setupIntentId)}`);
+          if (setupIntent.status === 'succeeded') {
+            await createPadSubscriptionFromSetupIntent(env, setupIntent);
+          }
+        }
       }
     }
 
