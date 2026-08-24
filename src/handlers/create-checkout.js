@@ -7,7 +7,12 @@ export async function createCheckout(context) {
     const plan = planConfig(env, body.plan);
     const seats = Math.max(1, Math.min(250, Math.floor(Number(body.seats) || 1)));
     const locale = body.locale === 'en' ? 'en' : 'fr';
-    const paymentMethod = body.paymentMethod === 'pad' ? 'pad' : 'card';
+    const padEnabled = String(env.NAVOFLO_PAD_ENABLED || '').toLowerCase() === 'true';
+    const requestedPaymentMethod = body.paymentMethod === 'pad' ? 'pad' : 'card';
+    const paymentMethod = requestedPaymentMethod === 'pad' && padEnabled ? 'pad' : 'card';
+    if (requestedPaymentMethod === 'pad' && !padEnabled) {
+      return json({ error: locale === 'fr' ? 'Le PAD bancaire est temporairement indisponible.' : 'Bank PAD is temporarily unavailable.' }, 400);
+    }
     const postalCode = String(body.postalCode || '').trim().toUpperCase();
     const province = provinceFromCanadianPostalCode(postalCode);
     const origin = safeOrigin(request, env);

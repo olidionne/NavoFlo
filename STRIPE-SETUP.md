@@ -132,3 +132,15 @@ V6.7 PAD invoice pay fix:
 - First PAD invoice is paid with the verified payment_method only.
 - The reusable Billing mandate from SetupIntent default_for=[invoice,subscription] is not re-sent to /invoices/:id/pay.
 - Fixes Stripe error: cannot provide both a mandate id and mandate information to payment_method_options.
+
+
+## V6.8 — PAD feature flag
+PAD is intentionally disabled by default for both NavoBase and NavoPro while Stripe ACSS transaction limits are reviewed.
+- No variable is required to keep PAD disabled.
+- To re-enable it later, add runtime variable `NAVOFLO_PAD_ENABLED=true` and redeploy/promote that Worker version.
+- The backend also rejects PAD requests while the flag is off, so hiding the UI is not the only protection.
+
+## D1 binding
+Create a Cloudflare D1 database (recommended name: `navoflo-prod`) and bind it to this Worker as `NAVOFLO_DB`.
+Run `migrations/0001_billing.sql` in the D1 console before testing new subscriptions.
+The webhook will then upsert Stripe subscription state automatically.

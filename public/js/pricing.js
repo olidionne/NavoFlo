@@ -18,8 +18,8 @@
           <span class="eyebrow-text">${isFr ? 'FACTURATION' : 'BILLING'}</span>
           <h2 id="billing-postal-title">${isFr ? 'Finaliser votre abonnement' : 'Complete your subscription'}</h2>
           <p>${isFr
-            ? 'Le code postal détermine automatiquement les taxes. Choisissez ensuite votre mode de paiement.'
-            : 'Your postal code determines the applicable taxes. Then choose your payment method.'}</p>
+            ? 'Le code postal détermine automatiquement les taxes applicables.'
+            : 'Your postal code determines the applicable taxes.'}</p>
           <label>
             <span>${isFr ? 'Code postal de facturation' : 'Billing postal code'}</span>
             <input type="text" inputmode="text" autocomplete="postal-code" maxlength="7" placeholder="A1A 1A1" aria-describedby="billing-postal-error">
@@ -29,12 +29,11 @@
             <legend>${isFr ? 'Mode de paiement' : 'Payment method'}</legend>
             <label class="billing-method-option">
               <input type="radio" name="navoflo-payment" value="card" checked>
-              <span><strong>${isFr ? 'Carte' : 'Card'}</strong><small>${isFr ? 'Abonnement annuel créé directement dans Stripe Checkout.' : 'Annual subscription created directly in Stripe Checkout.'}</small></span>
+              <span><strong>${isFr ? 'Carte' : 'Card'}</strong><small>${isFr ? 'Paiement annuel sécurisé par Stripe.' : 'Secure annual payment with Stripe.'}</small></span>
             </label>
-            <label class="billing-method-option">
-              <input type="radio" name="navoflo-payment" value="pad">
-              <span><strong>${isFr ? 'PAD bancaire canadien' : 'Canadian bank PAD'}</strong><small>${isFr ? 'Stripe vérifie le compte et enregistre le mandat annuel avant de créer l’abonnement.' : 'Stripe verifies the bank account and saves the annual mandate before creating the subscription.'}</small></span>
-            </label>
+            <div class="billing-method-option is-disabled" aria-disabled="true">
+              <span><strong>${isFr ? 'PAD bancaire canadien' : 'Canadian bank PAD'}</strong><small>${isFr ? 'Temporairement indisponible — sera réactivé après approbation des limites Stripe.' : 'Temporarily unavailable — will be re-enabled after Stripe limit approval.'}</small></span>
+            </div>
           </fieldset>
           <button type="button" class="checkout-btn billing-postal-continue">${isFr ? 'Continuer vers Stripe' : 'Continue to Stripe'}</button>
           <small class="billing-postal-privacy">${isFr ? 'Les informations de paiement sont traitées par Stripe.' : 'Payment information is processed by Stripe.'}</small>
@@ -51,7 +50,7 @@
           input.focus();
           return;
         }
-        const paymentMethod = overlay.querySelector('input[name="navoflo-payment"]:checked')?.value || 'card';
+        const paymentMethod = 'card';
         overlay.remove();
         resolve({ postalCode: compact.slice(0, 3) + ' ' + compact.slice(3), paymentMethod });
       };

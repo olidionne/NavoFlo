@@ -51,3 +51,5 @@ V6.7 PAD invoice pay fix:
 - First PAD invoice is paid with the verified payment_method only.
 - The reusable Billing mandate from SetupIntent default_for=[invoice,subscription] is not re-sent to /invoices/:id/pay.
 - Fixes Stripe error: cannot provide both a mandate id and mandate information to payment_method_options.
+
+V6.8: PAD hidden/disabled by default behind NAVOFLO_PAD_ENABLED; D1 migration ready.

@@ -10,3 +10,5 @@
 /* V6 — Stripe Checkout subscription mode does not currently support Canadian PAD.
    Card uses subscription Checkout; PAD uses setup Checkout and a webhook-created subscription. */
 .billing-methods{display:grid;gap:10px;margin:14px 0 18px;padding:0;border:0}.billing-methods legend{margin-bottom:7px;font-weight:800}.billing-method-option{display:flex!important;grid-template-columns:none!important;align-items:flex-start;gap:11px!important;padding:13px;border:1px solid #344856;border-radius:10px;background:#0a1016;cursor:pointer;font-weight:400!important}.billing-method-option:has(input:checked){border-color:#35d39a;box-shadow:0 0 0 3px rgba(53,211,154,.10)}.billing-method-option input{width:auto!important;height:auto!important;margin-top:4px;accent-color:#35d39a}.billing-method-option span{display:grid;gap:3px}.billing-method-option strong{color:#eef6f2}.billing-method-option small{color:#91a2ae;line-height:1.35}
+
+.billing-method-option.is-disabled{opacity:.52;cursor:not-allowed}.billing-method-option.is-disabled strong{color:inherit}
