@@ -1,25 +1,26 @@
-NavoFlo Stripe Integration V3
-=============================
+NavoFlo Stripe V4 — Cloudflare Workers native
+==============================================
 
-Purpose
--------
-Cloudflare Pages integration for NavoBase / NavoPro subscriptions.
+This version is for the current NavoFlo deployment architecture:
+Cloudflare Workers + Static Assets + `npx wrangler deploy`.
 
-V3 changes
-----------
-- Province dropdown removed from pricing page.
-- Annual total renamed to annual subtotal (before applicable taxes).
-- Cleaner customer-facing payment note.
-- On Subscribe, a compact billing-postal-code dialog appears.
-- Province is derived server-side from the Canadian postal code.
-- Manual Stripe tax rates are selected before Checkout creation.
-- Stripe Checkout still collects the complete billing address.
-- Quebec is supported immediately when STRIPE_TAX_RATES_QC is configured.
-- Other provinces fail safely until their manual tax-rate IDs are configured.
+IMPORTANT CHANGE FROM V3
+------------------------
+V3 used a /functions directory (Cloudflare Pages Functions routing).
+The current NavoFlo project is a Workers Static Assets deployment, not Pages.
+V4 replaces /functions with a real Worker entrypoint:
 
-Security
---------
-Never commit Stripe secret keys or webhook signing secrets.
-If a key has appeared in a screenshot or chat, rotate it before use.
+  src/index.js
 
-See STRIPE-SETUP.md for installation and Cloudflare variables.
+and adds:
+
+  wrangler.jsonc
+
+The Worker handles /api/stripe/* and delegates the rest of the site to
+Cloudflare Static Assets through env.ASSETS.
+
+Expected webhook browser test after deployment:
+  GET https://navoflo.com/api/stripe/webhook
+  -> HTTP 405 Method Not Allowed
+
+That is intentional: Stripe sends POST requests, not GET requests.
