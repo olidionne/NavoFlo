@@ -1,4 +1,78 @@
-import { json, requireEnv, upsertSubscription, verifyStripeSignature } from '../lib/stripe.js';
+import {
+  json,
+  planConfig,
+  requireEnv,
+  stripeRequest,
+  taxRatesForProvince,
+  upsertSubscription,
+  verifyStripeSignature
+} from '../lib/stripe.js';
+
+async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
+  const meta = setupIntent?.metadata || {};
+  if (meta.navoflo_payment_method !== 'pad') return null;
+
+  const customer = typeof setupIntent.customer === 'string' ? setupIntent.customer : setupIntent.customer?.id;
+  const paymentMethod = typeof setupIntent.payment_method === 'string' ? setupIntent.payment_method : setupIntent.payment_method?.id;
+  if (!customer || !paymentMethod) throw new Error('PAD setup is missing customer or payment method.');
+
+  const plan = planConfig(env, meta.navoflo_plan);
+  const seats = Math.max(1, Math.min(250, Math.floor(Number(meta.navoflo_seats) || 1)));
+  const province = String(meta.navoflo_tax_province || '').toUpperCase();
+  const taxRates = taxRatesForProvince(env, province);
+
+  // Make the verified PAD method the default for future invoice/subscription debits.
+  await stripeRequest(env, `/customers/${encodeURIComponent(customer)}`, {
+    method: 'POST',
+    form: { 'invoice_settings[default_payment_method]': paymentMethod },
+    idempotencyKey: `navoflo-pad-customer-${setupIntent.id}`
+  });
+
+  const form = {
+    customer,
+    default_payment_method: paymentMethod,
+    payment_behavior: 'allow_incomplete',
+    'payment_settings[payment_method_types][0]': 'acss_debit',
+    'payment_settings[save_default_payment_method]': 'on_subscription',
+    'items[0][price]': plan.mainPrice,
+    'items[0][quantity]': 1,
+    'metadata[navoflo_plan]': plan.code,
+    'metadata[navoflo_seats]': seats,
+    'metadata[navoflo_tax_province]': province,
+    'metadata[navoflo_postal_fsa]': meta.navoflo_postal_fsa || '',
+    'metadata[navoflo_payment_method]': 'pad',
+    'metadata[navoflo_setup_intent]': setupIntent.id
+  };
+
+  taxRates.forEach((rate, index) => {
+    form[`items[0][tax_rates][${index}]`] = rate;
+  });
+
+  if (seats > 1) {
+    form['items[1][price]'] = plan.seatPrice;
+    form['items[1][quantity]'] = seats - 1;
+    taxRates.forEach((rate, index) => {
+      form[`items[1][tax_rates][${index}]`] = rate;
+    });
+  }
+
+  const subscription = await stripeRequest(env, '/subscriptions', {
+    method: 'POST', form,
+    idempotencyKey: `navoflo-pad-subscription-${setupIntent.id}`
+  });
+
+  await upsertSubscription(env, {
+    stripe_subscription_id: subscription.id,
+    stripe_customer_id: customer,
+    plan: plan.code,
+    seats,
+    status: subscription.status,
+    current_period_end: subscription.current_period_end || null,
+    cancel_at_period_end: Boolean(subscription.cancel_at_period_end)
+  });
+
+  return subscription;
+}
 
 export async function handleWebhook({ request, env }) {
   const raw = await request.text();
@@ -8,6 +82,10 @@ export async function handleWebhook({ request, env }) {
 
   const event = JSON.parse(raw);
   try {
+    if (event.type === 'setup_intent.succeeded') {
+      await createPadSubscriptionFromSetupIntent(env, event.data.object);
+    }
+
     if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
       const s = event.data.object;
       await upsertSubscription(env, {

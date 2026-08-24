@@ -75,6 +75,7 @@ Stripe webhook events:
 - `customer.subscription.deleted`
 - `invoice.paid`
 - `invoice.payment_failed`
+- `setup_intent.succeeded`
 
 After deployment, opening the webhook URL in a browser should return **405 Method Not Allowed** instead of Cloudflare Access or a static 404.
 
@@ -84,7 +85,7 @@ Create a D1 database and bind it to this Worker as `NAVOFLO_DB`, then run:
 `migrations/0001_billing.sql`
 
 ## 8. Checkout flow
-Pricing page -> postal code -> province derived server-side -> manual tax-rate IDs chosen -> Stripe Checkout -> card/PAD -> webhook -> subscription state.
+Pricing page -> postal code + payment choice -> province derived server-side -> manual tax-rate IDs chosen. Card uses Stripe Checkout subscription mode. Canadian PAD uses Stripe Checkout setup mode to collect/verify the bank account and annual mandate; `setup_intent.succeeded` then creates the recurring subscription server-side. Webhooks remain the source of truth for entitlement state.
 
 Quebec is enabled when `STRIPE_TAX_RATES_QC` exists. Other provinces fail closed with a friendly message until their manual tax treatment is configured.
 
@@ -103,3 +104,7 @@ Canadian ACSS Debit (PAD) Checkout now sends the full Stripe mandate terms requi
 This fixes Stripe error: `acss_debit requires payment_method_options[acss_debit][mandate_options] to be set`.
 
 IMPORTANT V5.1: `keep_vars: true` is enabled in `wrangler.jsonc` so Git/Wrangler code deployments preserve Runtime Variables configured in the Cloudflare dashboard. Secrets remain protected.
+
+
+## V6 PAD architecture note
+Stripe currently does **not** support `acss_debit` in Checkout `subscription` mode. NavoFlo therefore splits the flow: card -> Checkout subscription; PAD -> Checkout setup + `setup_intent.succeeded` -> server-side Subscription creation. Do not grant permanent access until the invoice payment is confirmed.

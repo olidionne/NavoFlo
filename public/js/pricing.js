@@ -8,7 +8,7 @@
     pro: { main: 3495, seat: 895 }
   };
 
-  function postalModal() {
+  function checkoutModal() {
     return new Promise((resolve) => {
       const overlay = document.createElement('div');
       overlay.className = 'billing-postal-overlay';
@@ -16,20 +16,31 @@
         <div class="billing-postal-dialog" role="dialog" aria-modal="true" aria-labelledby="billing-postal-title">
           <button type="button" class="billing-postal-close" aria-label="${isFr ? 'Fermer' : 'Close'}">×</button>
           <span class="eyebrow-text">${isFr ? 'FACTURATION' : 'BILLING'}</span>
-          <h2 id="billing-postal-title">${isFr ? 'Votre code postal' : 'Your postal code'}</h2>
+          <h2 id="billing-postal-title">${isFr ? 'Finaliser votre abonnement' : 'Complete your subscription'}</h2>
           <p>${isFr
-            ? 'Il sert uniquement à déterminer automatiquement les taxes applicables. Stripe recueillera votre adresse complète au paiement.'
-            : 'It is used only to determine the applicable taxes automatically. Stripe will collect your full billing address at checkout.'}</p>
+            ? 'Le code postal détermine automatiquement les taxes. Choisissez ensuite votre mode de paiement.'
+            : 'Your postal code determines the applicable taxes. Then choose your payment method.'}</p>
           <label>
             <span>${isFr ? 'Code postal de facturation' : 'Billing postal code'}</span>
             <input type="text" inputmode="text" autocomplete="postal-code" maxlength="7" placeholder="A1A 1A1" aria-describedby="billing-postal-error">
           </label>
           <small id="billing-postal-error" class="billing-postal-error" aria-live="polite"></small>
+          <fieldset class="billing-methods">
+            <legend>${isFr ? 'Mode de paiement' : 'Payment method'}</legend>
+            <label class="billing-method-option">
+              <input type="radio" name="navoflo-payment" value="card" checked>
+              <span><strong>${isFr ? 'Carte' : 'Card'}</strong><small>${isFr ? 'Abonnement annuel créé directement dans Stripe Checkout.' : 'Annual subscription created directly in Stripe Checkout.'}</small></span>
+            </label>
+            <label class="billing-method-option">
+              <input type="radio" name="navoflo-payment" value="pad">
+              <span><strong>${isFr ? 'PAD bancaire canadien' : 'Canadian bank PAD'}</strong><small>${isFr ? 'Stripe vérifie le compte et enregistre le mandat annuel avant de créer l’abonnement.' : 'Stripe verifies the bank account and saves the annual mandate before creating the subscription.'}</small></span>
+            </label>
+          </fieldset>
           <button type="button" class="checkout-btn billing-postal-continue">${isFr ? 'Continuer vers Stripe' : 'Continue to Stripe'}</button>
-          <small class="billing-postal-privacy">${isFr ? 'Le paiement et les coordonnées bancaires sont traités par Stripe.' : 'Payment and banking details are processed by Stripe.'}</small>
+          <small class="billing-postal-privacy">${isFr ? 'Les informations de paiement sont traitées par Stripe.' : 'Payment information is processed by Stripe.'}</small>
         </div>`;
       document.body.appendChild(overlay);
-      const input = overlay.querySelector('input');
+      const input = overlay.querySelector('input[type="text"]');
       const error = overlay.querySelector('.billing-postal-error');
       const close = () => { overlay.remove(); resolve(null); };
       const submit = () => {
@@ -40,8 +51,9 @@
           input.focus();
           return;
         }
+        const paymentMethod = overlay.querySelector('input[name="navoflo-payment"]:checked')?.value || 'card';
         overlay.remove();
-        resolve(compact.slice(0, 3) + ' ' + compact.slice(3));
+        resolve({ postalCode: compact.slice(0, 3) + ' ' + compact.slice(3), paymentMethod });
       };
       overlay.querySelector('.billing-postal-close').addEventListener('click', close);
       overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
@@ -78,8 +90,8 @@
     });
 
     buy.addEventListener('click', async () => {
-      const postalCode = await postalModal();
-      if (!postalCode) return;
+      const checkout = await checkoutModal();
+      if (!checkout) return;
       buy.disabled = true;
       const old = buy.textContent;
       buy.textContent = isFr ? 'Ouverture de Stripe…' : 'Opening Stripe…';
@@ -90,7 +102,8 @@
           body: JSON.stringify({
             plan,
             seats: Number(input.value),
-            postalCode,
+            postalCode: checkout.postalCode,
+            paymentMethod: checkout.paymentMethod,
             locale: isFr ? 'fr' : 'en'
           })
         });

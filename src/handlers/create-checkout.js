@@ -7,6 +7,7 @@ export async function createCheckout(context) {
     const plan = planConfig(env, body.plan);
     const seats = Math.max(1, Math.min(250, Math.floor(Number(body.seats) || 1)));
     const locale = body.locale === 'en' ? 'en' : 'fr';
+    const paymentMethod = body.paymentMethod === 'pad' ? 'pad' : 'card';
     const postalCode = String(body.postalCode || '').trim().toUpperCase();
     const province = provinceFromCanadianPostalCode(postalCode);
     const origin = safeOrigin(request, env);
@@ -26,18 +27,51 @@ export async function createCheckout(context) {
       throw error;
     }
 
+    const metadata = {
+      navoflo_plan: plan.code,
+      navoflo_seats: seats,
+      navoflo_tax_province: province,
+      navoflo_postal_fsa: postalCode.replace(/\s+/g, '').slice(0, 3),
+      navoflo_payment_method: paymentMethod,
+      source: 'navoflo_web'
+    };
+
+    if (paymentMethod === 'pad') {
+      // Stripe Checkout does not support acss_debit in subscription mode.
+      // We therefore use Checkout setup mode to collect/verify the Canadian bank account
+      // and annual PAD mandate, then create the recurring subscription from the
+      // setup_intent.succeeded webhook.
+      const form = {
+        mode: 'setup',
+        locale,
+        customer_creation: 'always',
+        'payment_method_types[0]': 'acss_debit',
+        'payment_method_options[acss_debit][currency]': 'cad',
+        'payment_method_options[acss_debit][mandate_options][payment_schedule]': 'interval',
+        'payment_method_options[acss_debit][mandate_options][interval_description]': locale === 'fr'
+          ? 'Une fois par année à la date de renouvellement de l’abonnement NavoFlo.'
+          : 'Once per year on the NavoFlo subscription renewal date.',
+        'payment_method_options[acss_debit][mandate_options][transaction_type]': 'business',
+        'payment_method_options[acss_debit][mandate_options][default_for][0]': 'invoice',
+        'payment_method_options[acss_debit][mandate_options][default_for][1]': 'subscription',
+        success_url: `${origin}/${locale === 'en' ? 'en/' : ''}billing/success/?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${origin}/${locale === 'en' ? 'en/' : ''}pricing/?canceled=1`,
+        billing_address_collection: 'required',
+        ...Object.fromEntries(Object.entries(metadata).map(([k, v]) => [`metadata[${k}]`, v])),
+        ...Object.fromEntries(Object.entries(metadata).map(([k, v]) => [`setup_intent_data[metadata][${k}]`, v]))
+      };
+
+      const session = await stripeRequest(env, '/checkout/sessions', {
+        method: 'POST', form,
+        idempotencyKey: `navoflo-pad-setup-${crypto.randomUUID()}`
+      });
+      return json({ url: session.url, session_id: session.id, flow: 'pad_setup' });
+    }
+
     const form = {
       mode: 'subscription',
       locale,
       'payment_method_types[0]': 'card',
-      'payment_method_types[1]': 'acss_debit',
-      // Payments Canada PAD mandate terms required by Stripe for ACSS Debit.
-      // NavoFlo subscriptions renew once per year, so this is an interval mandate.
-      'payment_method_options[acss_debit][mandate_options][payment_schedule]': 'interval',
-      'payment_method_options[acss_debit][mandate_options][interval_description]': locale === 'fr'
-        ? 'Une fois par année à la date de renouvellement de l’abonnement.'
-        : 'Once per year on the subscription renewal date.',
-      'payment_method_options[acss_debit][mandate_options][transaction_type]': 'business',
       'line_items[0][price]': plan.mainPrice,
       'line_items[0][quantity]': 1,
       success_url: `${origin}/${locale === 'en' ? 'en/' : ''}billing/success/?session_id={CHECKOUT_SESSION_ID}`,
@@ -47,12 +81,9 @@ export async function createCheckout(context) {
       'subscription_data[metadata][navoflo_plan]': plan.code,
       'subscription_data[metadata][navoflo_seats]': seats,
       'subscription_data[metadata][navoflo_tax_province]': province,
-      'subscription_data[metadata][navoflo_postal_fsa]': postalCode.replace(/\s+/g, '').slice(0, 3),
-      'metadata[navoflo_plan]': plan.code,
-      'metadata[navoflo_seats]': seats,
-      'metadata[navoflo_tax_province]': province,
-      'metadata[navoflo_postal_fsa]': postalCode.replace(/\s+/g, '').slice(0, 3),
-      'metadata[source]': 'navoflo_web'
+      'subscription_data[metadata][navoflo_postal_fsa]': metadata.navoflo_postal_fsa,
+      'subscription_data[metadata][navoflo_payment_method]': 'card',
+      ...Object.fromEntries(Object.entries(metadata).map(([k, v]) => [`metadata[${k}]`, v]))
     };
 
     taxRates.forEach((rate, index) => {
@@ -69,10 +100,10 @@ export async function createCheckout(context) {
 
     const session = await stripeRequest(env, '/checkout/sessions', {
       method: 'POST', form,
-      idempotencyKey: `navoflo-${crypto.randomUUID()}`
+      idempotencyKey: `navoflo-card-${crypto.randomUUID()}`
     });
 
-    return json({ url: session.url, session_id: session.id });
+    return json({ url: session.url, session_id: session.id, flow: 'card_subscription' });
   } catch (error) {
     console.error('create-checkout', error);
     return json({ error: error.message || 'Unable to create checkout.' }, error.status || 500);

@@ -34,3 +34,6 @@ Canadian ACSS Debit (PAD) Checkout now sends the full Stripe mandate terms requi
 This fixes Stripe error: `acss_debit requires payment_method_options[acss_debit][mandate_options] to be set`.
 
 IMPORTANT V5.1: `keep_vars: true` is enabled in `wrangler.jsonc` so Git/Wrangler code deployments preserve Runtime Variables configured in the Cloudflare dashboard. Secrets remain protected.
+
+
+V6: Card and Canadian PAD are now separate Stripe flows. PAD is collected in Checkout setup mode and the annual subscription is created from the setup_intent.succeeded webhook because Stripe Checkout subscription mode does not support acss_debit. Add setup_intent.succeeded to the Stripe webhook destination.

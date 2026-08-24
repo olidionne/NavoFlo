@@ -12,6 +12,8 @@ export async function getSession({ request, env }) {
       customer_email: s.customer_details?.email || s.customer_email || null,
       payment_status: s.payment_status,
       status: s.status,
+      mode: s.mode || null,
+      payment_flow: s.metadata?.navoflo_payment_method || subscription?.metadata?.navoflo_payment_method || null,
       subscription_status: subscription?.status || null,
       plan: s.metadata?.navoflo_plan || subscription?.metadata?.navoflo_plan || null,
       seats: Number(s.metadata?.navoflo_seats || subscription?.metadata?.navoflo_seats || 1),
