@@ -115,3 +115,7 @@ V6.2: Canadian PAD mandates are explicitly marked `transaction_type=business` in
 
 ## V6.3 PAD webhook hardening
 PAD subscription creation now runs from both `setup_intent.succeeded` and a setup-mode `checkout.session.completed` fallback. Stripe idempotency uses the SetupIntent ID, so duplicate webhook delivery cannot create duplicate subscriptions. Subscription creation uses `payment_behavior=default_incomplete`, matching Stripe's ACSS Debit Billing guidance.
+
+
+## V6.4 PAD subscription creation
+When the PAD SetupIntent was created with `default_for=[invoice,subscription]`, the mandate is already authorized for Stripe Billing. Subscription creation therefore reuses the customer's verified default ACSS Debit payment method and no longer sends a second `mandate_options[transaction_type]` block on `/v1/subscriptions`. This matches Stripe's saved-PAD-for-Billing flow and avoids re-declaring mandate options on an already-authorized payment method.
