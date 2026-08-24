@@ -108,3 +108,5 @@ IMPORTANT V5.1: `keep_vars: true` is enabled in `wrangler.jsonc` so Git/Wrangler
 
 ## V6 PAD architecture note
 Stripe currently does **not** support `acss_debit` in Checkout `subscription` mode. NavoFlo therefore splits the flow: card -> Checkout subscription; PAD -> Checkout setup + `setup_intent.succeeded` -> server-side Subscription creation. Do not grant permanent access until the invoice payment is confirmed.
+
+V6.1: PAD Setup Checkout now follows Stripe Billing's ACSS Debit mandate shape: mandate_options only sets default_for=[invoice, subscription]. payment_schedule and interval_description are intentionally omitted because Stripe rejects them when default_for is provided.

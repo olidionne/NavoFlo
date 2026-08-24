@@ -47,11 +47,10 @@ export async function createCheckout(context) {
         customer_creation: 'always',
         'payment_method_types[0]': 'acss_debit',
         'payment_method_options[acss_debit][currency]': 'cad',
-        'payment_method_options[acss_debit][mandate_options][payment_schedule]': 'interval',
-        'payment_method_options[acss_debit][mandate_options][interval_description]': locale === 'fr'
-          ? 'Une fois par année à la date de renouvellement de l’abonnement NavoFlo.'
-          : 'Once per year on the NavoFlo subscription renewal date.',
-        'payment_method_options[acss_debit][mandate_options][transaction_type]': 'business',
+        // For a PAD method that will be reused by Stripe Billing, Stripe requires
+        // default_for=[invoice,subscription]. In this Billing-specific setup flow,
+        // payment_schedule / interval_description (and custom_mandate_url) must NOT
+        // be sent alongside default_for.
         'payment_method_options[acss_debit][mandate_options][default_for][0]': 'invoice',
         'payment_method_options[acss_debit][mandate_options][default_for][1]': 'subscription',
         success_url: `${origin}/${locale === 'en' ? 'en/' : ''}billing/success/?session_id={CHECKOUT_SESSION_ID}`,

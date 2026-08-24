@@ -37,3 +37,5 @@ IMPORTANT V5.1: `keep_vars: true` is enabled in `wrangler.jsonc` so Git/Wrangler
 
 
 V6: Card and Canadian PAD are now separate Stripe flows. PAD is collected in Checkout setup mode and the annual subscription is created from the setup_intent.succeeded webhook because Stripe Checkout subscription mode does not support acss_debit. Add setup_intent.succeeded to the Stripe webhook destination.
+
+V6.1: PAD Setup Checkout now follows Stripe Billing's ACSS Debit mandate shape: mandate_options only sets default_for=[invoice, subscription]. payment_schedule and interval_description are intentionally omitted because Stripe rejects them when default_for is provided.
