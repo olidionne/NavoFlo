@@ -43,3 +43,5 @@ V6.5: Canadian PAD mandates are explicitly marked `transaction_type=business` in
 
 
 V6.5 PAD initial payment: after the reusable PAD mandate succeeds and the subscription is created with `default_incomplete`, NavoFlo explicitly confirms the first invoice PaymentIntent using the saved PaymentMethod + Mandate. This starts the actual debit and prevents the subscription from remaining `incomplete` solely because the PaymentIntent was never confirmed.
+
+V6.6: PAD first invoice now uses Stripe invoice.pay (same action as Dashboard “Régler”).

@@ -122,3 +122,7 @@ When the PAD SetupIntent was created with `default_for=[invoice,subscription]`, 
 
 
 V6.5 PAD initial payment: after the reusable PAD mandate succeeds and the subscription is created with `default_incomplete`, NavoFlo explicitly confirms the first invoice PaymentIntent using the saved PaymentMethod + Mandate. This starts the actual debit and prevents the subscription from remaining `incomplete` solely because the PaymentIntent was never confirmed.
+
+
+## V6.6 PAD initial invoice collection
+The first PAD subscription invoice is now collected with `POST /v1/invoices/{invoice}/pay` using the already-verified ACSS Debit PaymentMethod and reusable mandate. This is the API equivalent of clicking **Régler / Pay** on the invoice in Stripe Dashboard. It replaces direct confirmation of the invoice PaymentIntent and lets Stripe manage the asynchronous PAD processing lifecycle.

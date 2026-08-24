@@ -8,40 +8,26 @@ import {
   verifyStripeSignature
 } from '../lib/stripe.js';
 
-async function paymentIntentIdForSubscription(env, subscription) {
-  const latest = subscription?.latest_invoice;
-  if (latest && typeof latest === 'object') {
-    const pi = latest.payment_intent;
-    if (typeof pi === 'string') return pi;
-    if (pi?.id) return pi.id;
-  }
-
-  const invoiceId = typeof latest === 'string' ? latest : latest?.id;
-  if (!invoiceId) throw new Error('PAD subscription is missing the first invoice.');
-
-  // Newer Stripe API versions expose invoice payments as a separate collection.
-  // Use it as a fallback when latest_invoice.payment_intent is not expanded.
-  const payments = await stripeRequest(env, `/invoice_payments?invoice=${encodeURIComponent(invoiceId)}&limit=10`);
-  for (const row of payments?.data || []) {
-    const pi = row?.payment?.payment_intent;
-    if (typeof pi === 'string') return pi;
-    if (pi?.id) return pi.id;
-  }
-  throw new Error('PAD subscription first invoice has no PaymentIntent.');
-}
-
-async function confirmPadInitialInvoice(env, setupIntent, subscription, paymentMethod) {
+async function payPadInitialInvoice(env, setupIntent, subscription, paymentMethod) {
   const mandate = typeof setupIntent?.mandate === 'string' ? setupIntent.mandate : setupIntent?.mandate?.id;
   if (!mandate) throw new Error('PAD setup is missing the reusable mandate.');
 
-  const paymentIntentId = await paymentIntentIdForSubscription(env, subscription);
-  return stripeRequest(env, `/payment_intents/${encodeURIComponent(paymentIntentId)}/confirm`, {
+  const latest = subscription?.latest_invoice;
+  const invoiceId = typeof latest === 'string' ? latest : latest?.id;
+  if (!invoiceId) throw new Error('PAD subscription is missing the first invoice.');
+
+  // This is the API equivalent of clicking “Pay / Régler” in the Stripe Dashboard.
+  // The bank account + Billing mandate were already collected and verified by the
+  // SetupIntent, so tell Stripe to collect the finalized subscription invoice with
+  // that existing PaymentMethod and Mandate. Stripe then owns the asynchronous
+  // ACSS Debit lifecycle (processing -> paid/failed).
+  return stripeRequest(env, `/invoices/${encodeURIComponent(invoiceId)}/pay`, {
     method: 'POST',
     form: {
       payment_method: paymentMethod,
       mandate
     },
-    idempotencyKey: `navoflo-pad-initial-payment-${setupIntent.id}`
+    idempotencyKey: `navoflo-pad-initial-invoice-pay-${setupIntent.id}`
   });
 }
 
@@ -99,13 +85,13 @@ async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
     idempotencyKey: `navoflo-pad-subscription-${setupIntent.id}`
   });
 
-  // The subscription is intentionally created incomplete. Because the PAD mandate
-  // was collected first in Checkout setup mode, explicitly confirm Stripe's first
-  // invoice PaymentIntent with that existing PaymentMethod + Mandate. This starts
-  // the actual bank debit instead of leaving the subscription stuck incomplete.
-  await confirmPadInitialInvoice(env, setupIntent, subscription, paymentMethod);
+  // The subscription is intentionally created incomplete. The PAD mandate was
+  // collected first in Checkout setup mode. Pay the finalized first invoice with
+  // the existing PaymentMethod + Mandate — the same action as Stripe Dashboard's
+  // “Régler / Pay invoice” button — so Stripe starts the asynchronous bank debit.
+  await payPadInitialInvoice(env, setupIntent, subscription, paymentMethod);
 
-  // Refresh so D1 (when enabled) reflects Stripe's post-confirmation status.
+  // Refresh so D1 (when enabled) reflects Stripe's post-payment-attempt status.
   subscription = await stripeRequest(env, `/subscriptions/${encodeURIComponent(subscription.id)}`);
 
   await upsertSubscription(env, {
