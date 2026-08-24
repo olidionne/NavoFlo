@@ -51,6 +51,7 @@ export async function createCheckout(context) {
         // default_for=[invoice,subscription]. In this Billing-specific setup flow,
         // payment_schedule / interval_description (and custom_mandate_url) must NOT
         // be sent alongside default_for.
+        'payment_method_options[acss_debit][mandate_options][transaction_type]': 'business',
         'payment_method_options[acss_debit][mandate_options][default_for][0]': 'invoice',
         'payment_method_options[acss_debit][mandate_options][default_for][1]': 'subscription',
         success_url: `${origin}/${locale === 'en' ? 'en/' : ''}billing/success/?session_id={CHECKOUT_SESSION_ID}`,

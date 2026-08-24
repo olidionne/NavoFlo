@@ -33,6 +33,7 @@ async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
     default_payment_method: paymentMethod,
     payment_behavior: 'allow_incomplete',
     'payment_settings[payment_method_types][0]': 'acss_debit',
+    'payment_settings[payment_method_options][acss_debit][mandate_options][transaction_type]': 'business',
     'payment_settings[save_default_payment_method]': 'on_subscription',
     'items[0][price]': plan.mainPrice,
     'items[0][quantity]': 1,
