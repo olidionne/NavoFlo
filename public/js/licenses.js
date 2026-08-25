@@ -6,7 +6,7 @@
   const currentDeviceId = localStorage.getItem('navoflo_device_id') || '';
   let state = null;
   let security = { sessions: [], devices: [] };
-  let audit = { events: [], has_more: false, next_before_id: null, loading: false, error: '', filters: { category: '', user_id: '', from: '', to: '' } };
+  let audit = { events: [], has_more: false, next_before_id: null, loading: false, error: '', expanded: localStorage.getItem('navoflo_audit_expanded') === '1', filters: { category: '', user_id: '', from: '', to: '' } };
   let banner = '';
 
   const t = {
@@ -358,8 +358,15 @@
     const members = state?.members || [];
     const options = members.map(member => `<option value="${member.user_id}" ${String(filters.user_id) === String(member.user_id) ? 'selected' : ''}>${esc(member.display_name || member.email)}</option>`).join('');
     const events = audit.events || [];
-    return `<section class="license-panel audit-panel">
-      <div class="license-panel-head audit-heading"><div><h2>${t.audit}</h2><p>${t.auditIntro}</p></div><button class="button secondary audit-refresh" type="button" data-audit-refresh ${audit.loading ? 'disabled' : ''}>${t.auditRefresh}</button></div>
+    return `<section class="license-panel audit-panel ${audit.expanded ? 'is-open' : ''}">
+      <div class="audit-heading">
+        <button class="audit-toggle" type="button" data-audit-toggle aria-expanded="${audit.expanded ? 'true' : 'false'}">
+          <span class="audit-toggle-copy"><span class="audit-title">${t.audit}</span><span class="audit-intro">${t.auditIntro}</span></span>
+          <span class="audit-chevron" aria-hidden="true">⌄</span>
+        </button>
+      </div>
+      <div class="audit-collapse" ${audit.expanded ? '' : 'hidden'}>
+      <div class="audit-toolbar"><button class="button secondary audit-refresh" type="button" data-audit-refresh ${audit.loading ? 'disabled' : ''}>${t.auditRefresh}</button></div>
       <form class="audit-filters" data-audit-filters>
         <label><span>${fr ? 'Type' : 'Type'}</span><select name="category"><option value="">${t.auditAll}</option><option value="auth" ${filters.category === 'auth' ? 'selected' : ''}>${t.auditAuth}</option><option value="member" ${filters.category === 'member' ? 'selected' : ''}>${t.auditMembers}</option><option value="license" ${filters.category === 'license' ? 'selected' : ''}>${t.auditLicenses}</option><option value="billing" ${filters.category === 'billing' ? 'selected' : ''}>${t.auditBilling}</option></select></label>
         <label><span>${fr ? 'Utilisateur' : 'User'}</span><select name="user_id"><option value="">${t.auditAllUsers}</option>${options}</select></label>
@@ -374,6 +381,7 @@
         return `<article class="audit-row"><div class="audit-kind ${kind.cls}" aria-hidden="true">${kind.label}</div><div class="audit-main"><strong>${esc(view.title)}</strong>${view.detail ? `<span>${esc(view.detail)}</span>` : ''}<small>${esc(fmtDateTime(event.created_at))} · ${esc(event.action)}</small></div></article>`;
       }).join('') : `<p class="license-muted">${audit.loading ? (fr ? 'Chargement du journal…' : 'Loading audit log…') : t.auditEmpty}</p>`}</div>
       ${audit.has_more ? `<div class="audit-more"><button class="button secondary" type="button" data-audit-more ${audit.loading ? 'disabled' : ''}>${t.auditMore}</button></div>` : ''}
+      </div>
     </section>`;
   }
 
@@ -520,6 +528,11 @@
         button.disabled = false;
       }
     }));
+    root.querySelector('[data-audit-toggle]')?.addEventListener('click', () => {
+      audit.expanded = !audit.expanded;
+      localStorage.setItem('navoflo_audit_expanded', audit.expanded ? '1' : '0');
+      render();
+    });
     root.querySelector('[data-audit-refresh]')?.addEventListener('click', async event => {
       event.currentTarget.disabled = true;
       await loadAudit();
