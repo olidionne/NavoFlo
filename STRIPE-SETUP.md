@@ -80,3 +80,20 @@ FROM subscriptions;
 ```
 
 If the current subscription has only one seat, seeing `1 / 1` with the Add User button disabled is expected.
+
+## V7.1 — Fast Track licence additionnelle
+
+Avant le premier test V7.1, exécuter dans `navoflo-prod` :
+
+```sql
+ALTER TABLE memberships ADD COLUMN pending_license INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_memberships_pending_license
+ON memberships(organization_id, pending_license, active);
+```
+
+La page `/account/licenses/` garde maintenant le bouton **Ajouter un utilisateur**
+actif même lorsque 0 siège est disponible. Elle affiche une confirmation d'achat,
+puis NavoFlo met à jour l'abonnement Stripe existant avec `proration_behavior=always_invoice`
+et `payment_behavior=pending_if_incomplete`. Si une authentification carte est requise,
+le client est envoyé vers la facture Stripe hébergée. Le siège est attribué dans D1
+uniquement après que Stripe confirme l'augmentation de l'abonnement.

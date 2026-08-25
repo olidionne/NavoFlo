@@ -12,10 +12,33 @@ import {
   verifyStripeSignature,
   webhookEventAlreadyProcessed
 } from '../lib/stripe.js';
-import { ensureBillingOwnerLicense } from '../lib/licensing.js';
+import { assignPendingLicenses, ensureBillingOwnerLicense } from '../lib/licensing.js';
 
 function objectId(value) {
   return typeof value === 'string' ? value : value?.id || null;
+}
+
+function subscriptionItemPriceId(item) {
+  return typeof item?.price === 'string' ? item.price : item?.price?.id || item?.plan?.id || null;
+}
+
+function seatsFromSubscription(env, subscription, planCode, fallback = 1) {
+  try {
+    if (!planCode || !Array.isArray(subscription?.items?.data)) return Number(fallback || 1);
+    const plan = planConfig(env, planCode);
+    let main = 0;
+    let extras = 0;
+    for (const item of subscription.items.data) {
+      const priceId = subscriptionItemPriceId(item);
+      const quantity = Math.max(0, Number(item?.quantity || 0));
+      if (priceId === plan.mainPrice) main += quantity;
+      if (priceId === plan.seatPrice) extras += quantity;
+    }
+    if (main > 0) return Math.max(1, main + extras);
+    return Math.max(1, extras + Number(fallback || 1));
+  } catch {
+    return Number(fallback || 1);
+  }
 }
 
 async function organizationForCustomer(env, customerId, hints = {}) {
@@ -48,12 +71,14 @@ async function syncSubscription(env, subscription, hints = {}) {
       })
     : null;
 
+  const planCode = subscription.metadata?.navoflo_plan || hints.plan || null;
+  const fallbackSeats = Number(subscription.metadata?.navoflo_seats || hints.seats || 1);
   const row = {
     stripe_subscription_id: subscription.id,
     stripe_customer_id: customerId,
     customer_email: hints.customer_email || organization?.billing_email || null,
-    plan: subscription.metadata?.navoflo_plan || hints.plan || null,
-    seats: Number(subscription.metadata?.navoflo_seats || hints.seats || 1),
+    plan: planCode,
+    seats: seatsFromSubscription(env, subscription, planCode, fallbackSeats),
     status: subscription.status || hints.status || 'unknown',
     current_period_end: subscriptionPeriodEnd(subscription),
     cancel_at_period_end: Boolean(subscription.cancel_at_period_end),
@@ -68,6 +93,9 @@ async function syncSubscription(env, subscription, hints = {}) {
       display_name: hints.customer_name || null,
       subscription: row
     });
+  }
+  if (organization?.id) {
+    await assignPendingLicenses(env, organization.id, row);
   }
 }
 

@@ -2,6 +2,7 @@ import { json } from '../lib/stripe.js';
 import {
   addMember,
   createLicensingPortal,
+  purchaseSeatForMember,
   licensingJsonError,
   removeMember,
   requireLicensingContext,
@@ -42,6 +43,17 @@ export async function deleteLicensingMember({ request, env, userId }) {
   try {
     const context = await requireLicensingContext(request, env, { includeMembers: true });
     return json(await removeMember(env, context, userId), 200, { 'cache-control': 'no-store' });
+  } catch (error) {
+    return licensingJsonError(error);
+  }
+}
+
+
+export async function fastTrackLicensingSeat({ request, env }) {
+  try {
+    const context = await requireLicensingContext(request, env, { includeMembers: true });
+    const body = await request.json().catch(() => ({}));
+    return json(await purchaseSeatForMember(request, env, context, body), 200, { 'cache-control': 'no-store' });
   } catch (error) {
     return licensingJsonError(error);
   }

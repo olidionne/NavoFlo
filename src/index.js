@@ -7,6 +7,7 @@ import {
   createAccountPortal,
   createLicensingMember,
   deleteLicensingMember,
+  fastTrackLicensingSeat,
   getLicensingMe,
   updateLicensingMemberLicense
 } from './handlers/licensing.js';
@@ -19,6 +20,7 @@ const API = Object.freeze({
   '/api/stripe/webhook': { POST: handleWebhook },
   '/api/licensing/me': { GET: getLicensingMe },
   '/api/licensing/members': { POST: createLicensingMember },
+  '/api/licensing/fast-track-seat': { POST: fastTrackLicensingSeat },
   '/api/licensing/portal': { POST: createAccountPortal }
 });
 

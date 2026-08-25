@@ -1,4 +1,4 @@
-import { json, safeOrigin, stripeRequest } from './stripe.js';
+import { json, planConfig, safeOrigin, stripeRequest, taxRatesForProvince } from './stripe.js';
 
 const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
 
@@ -196,7 +196,7 @@ export async function licensingContext(env, email, { includeMembers = true, touc
     const result = await env.NAVOFLO_DB.prepare(`
       SELECT
         u.id AS user_id, u.email, u.display_name,
-        m.role, m.active AS membership_active,
+        m.role, m.active AS membership_active, m.pending_license,
         COALESCE(la.active, 0) AS licensed,
         la.assigned_at, la.revoked_at
       FROM memberships m
@@ -291,7 +291,7 @@ export async function addMember(env, context, payload = {}) {
     `).bind(orgId, user.id).run();
   } else if (!existingMembership.active) {
     await env.NAVOFLO_DB.prepare(`
-      UPDATE memberships SET active=1, updated_at=datetime('now') WHERE id=?
+      UPDATE memberships SET active=1, pending_license=0, updated_at=datetime('now') WHERE id=?
     `).bind(existingMembership.id).run();
   }
 
@@ -308,6 +308,10 @@ export async function addMember(env, context, payload = {}) {
         active=1, assigned_at=datetime('now'), revoked_at=NULL,
         subscription_id=excluded.subscription_id
     `).bind(orgId, user.id, fresh.subscription.id).run();
+    await env.NAVOFLO_DB.prepare(`
+      UPDATE memberships SET pending_license=0, updated_at=datetime('now')
+      WHERE organization_id=? AND user_id=?
+    `).bind(orgId, user.id).run();
   }
 
   return licensingContext(env, context.user.email, { includeMembers: true });
@@ -341,11 +345,21 @@ export async function setMemberLicense(env, context, userId, active) {
         active=1, assigned_at=datetime('now'), revoked_at=NULL,
         subscription_id=excluded.subscription_id
     `).bind(context.organization.id, targetId, fresh.subscription?.id || null).run();
-  } else {
     await env.NAVOFLO_DB.prepare(`
-      UPDATE license_assignments SET active=0, revoked_at=datetime('now')
+      UPDATE memberships SET pending_license=0, updated_at=datetime('now')
       WHERE organization_id=? AND user_id=?
     `).bind(context.organization.id, targetId).run();
+  } else {
+    await env.NAVOFLO_DB.batch([
+      env.NAVOFLO_DB.prepare(`
+        UPDATE license_assignments SET active=0, revoked_at=datetime('now')
+        WHERE organization_id=? AND user_id=?
+      `).bind(context.organization.id, targetId),
+      env.NAVOFLO_DB.prepare(`
+        UPDATE memberships SET pending_license=0, updated_at=datetime('now')
+        WHERE organization_id=? AND user_id=?
+      `).bind(context.organization.id, targetId)
+    ]);
   }
   return licensingContext(env, context.user.email, { includeMembers: true });
 }
@@ -368,11 +382,156 @@ export async function removeMember(env, context, userId) {
       WHERE organization_id=? AND user_id=?
     `).bind(context.organization.id, targetId),
     env.NAVOFLO_DB.prepare(`
-      UPDATE memberships SET active=0, updated_at=datetime('now')
+      UPDATE memberships SET active=0, pending_license=0, updated_at=datetime('now')
       WHERE organization_id=? AND user_id=?
     `).bind(context.organization.id, targetId)
   ]);
   return licensingContext(env, context.user.email, { includeMembers: true });
+}
+
+
+export async function assignPendingLicenses(env, organizationId, subscription = null) {
+  if (!env?.NAVOFLO_DB || !organizationId) return 0;
+  const sub = subscription || await organizationSubscription(env, organizationId);
+  if (!sub || !ACTIVE_SUBSCRIPTION_STATUSES.has(String(sub.status || ''))) return 0;
+
+  const purchased = Math.max(0, Number(sub.seats || 0));
+  const usedRow = await env.NAVOFLO_DB.prepare(`
+    SELECT COUNT(*) AS count FROM license_assignments
+    WHERE organization_id=? AND active=1
+  `).bind(organizationId).first();
+  let available = Math.max(0, purchased - Number(usedRow?.count || 0));
+  if (!available) return 0;
+
+  const pending = await env.NAVOFLO_DB.prepare(`
+    SELECT m.user_id
+    FROM memberships m
+    LEFT JOIN license_assignments la
+      ON la.organization_id=m.organization_id AND la.user_id=m.user_id AND la.active=1
+    WHERE m.organization_id=? AND m.active=1 AND m.pending_license=1 AND la.id IS NULL
+    ORDER BY m.created_at, m.id
+  `).bind(organizationId).all();
+
+  let assigned = 0;
+  for (const row of pending.results || []) {
+    if (available <= 0) break;
+    await env.NAVOFLO_DB.batch([
+      env.NAVOFLO_DB.prepare(`
+        INSERT INTO license_assignments (organization_id, user_id, active, assigned_at, revoked_at, subscription_id)
+        VALUES (?, ?, 1, datetime('now'), NULL, ?)
+        ON CONFLICT(organization_id, user_id) DO UPDATE SET
+          active=1, assigned_at=datetime('now'), revoked_at=NULL,
+          subscription_id=excluded.subscription_id
+      `).bind(organizationId, row.user_id, sub.stripe_subscription_id || sub.id || null),
+      env.NAVOFLO_DB.prepare(`
+        UPDATE memberships SET pending_license=0, updated_at=datetime('now')
+        WHERE organization_id=? AND user_id=?
+      `).bind(organizationId, row.user_id)
+    ]);
+    available -= 1;
+    assigned += 1;
+  }
+  return assigned;
+}
+
+function subscriptionItems(subscription) {
+  return Array.isArray(subscription?.items?.data) ? subscription.items.data : [];
+}
+
+function itemPriceId(item) {
+  return typeof item?.price === 'string' ? item.price : item?.price?.id || item?.plan?.id || null;
+}
+
+export async function purchaseSeatForMember(request, env, context, payload = {}) {
+  requireManager(context);
+  if (!context.subscription?.active) throw licensingError('The organization does not have an active subscription.', 409, 'SUBSCRIPTION_INACTIVE');
+
+  const email = normalizeEmail(payload.email);
+  if (!email || !/^\S+@\S+\.\S+$/.test(email)) throw licensingError('A valid email address is required.');
+  const orgId = context.organization.id;
+  const user = await ensureUser(env, { email, display_name: payload.display_name || null });
+  if (!user) throw licensingError('Unable to create user.', 500);
+
+  const existingMembership = await env.NAVOFLO_DB.prepare(`
+    SELECT id, active FROM memberships WHERE organization_id=? AND user_id=? LIMIT 1
+  `).bind(orgId, user.id).first();
+  if (!existingMembership) {
+    await env.NAVOFLO_DB.prepare(`
+      INSERT INTO memberships (organization_id, user_id, role, active, pending_license, updated_at)
+      VALUES (?, ?, 'member', 1, 1, datetime('now'))
+    `).bind(orgId, user.id).run();
+  } else {
+    await env.NAVOFLO_DB.prepare(`
+      UPDATE memberships SET active=1, pending_license=1, updated_at=datetime('now') WHERE id=?
+    `).bind(existingMembership.id).run();
+  }
+
+  const fresh = await licensingContext(env, context.user.email, { includeMembers: true });
+  const member = fresh.members.find(row => Number(row.user_id) === Number(user.id));
+  if (member?.licensed) {
+    await env.NAVOFLO_DB.prepare(`
+      UPDATE memberships SET pending_license=0, updated_at=datetime('now')
+      WHERE organization_id=? AND user_id=?
+    `).bind(orgId, user.id).run();
+    return { state: await licensingContext(env, context.user.email, { includeMembers: true }), purchase: null };
+  }
+
+  if (fresh.seats.available > 0) {
+    await setMemberLicense(env, fresh, user.id, true);
+    return { state: await licensingContext(env, context.user.email, { includeMembers: true }), purchase: null };
+  }
+
+  const subId = fresh.subscription.id;
+  const stripeSub = await stripeRequest(env, `/subscriptions/${encodeURIComponent(subId)}?expand[]=items.data.price&expand[]=latest_invoice`);
+  const plan = planConfig(env, fresh.subscription.plan);
+  const items = subscriptionItems(stripeSub);
+  const seatItem = items.find(item => itemPriceId(item) === plan.seatPrice) || null;
+  const currentExtraSeats = Math.max(0, Number(seatItem?.quantity || 0));
+  const targetSeats = 1 + currentExtraSeats + 1;
+  const province = String(stripeSub.metadata?.navoflo_tax_province || '').toUpperCase();
+
+  const form = {
+    payment_behavior: 'pending_if_incomplete',
+    proration_behavior: 'always_invoice',
+    'expand[0]': 'latest_invoice'
+  };
+  if (seatItem?.id) {
+    form['items[0][id]'] = seatItem.id;
+    form['items[0][quantity]'] = currentExtraSeats + 1;
+  } else {
+    form['items[0][price]'] = plan.seatPrice;
+    form['items[0][quantity]'] = 1;
+    if (province) {
+      const taxRates = taxRatesForProvince(env, province);
+      taxRates.forEach((rate, index) => { form[`items[0][tax_rates][${index}]`] = rate; });
+    }
+  }
+
+  try {
+    const updated = await stripeRequest(env, `/subscriptions/${encodeURIComponent(subId)}`, {
+      method: 'POST',
+      form,
+      idempotencyKey: `navoflo-seat-fasttrack-${subId}-${user.id}-${targetSeats}`
+    });
+    const invoice = typeof updated.latest_invoice === 'object' ? updated.latest_invoice : null;
+    const paid = invoice?.status === 'paid';
+    const billingUrl = !paid ? (invoice?.hosted_invoice_url || null) : null;
+    return {
+      state: await licensingContext(env, context.user.email, { includeMembers: true }),
+      purchase: {
+        requested: true,
+        target_seats: targetSeats,
+        status: paid ? 'paid' : (updated.pending_update ? 'pending_payment' : 'processing'),
+        billing_url: billingUrl
+      }
+    };
+  } catch (error) {
+    await env.NAVOFLO_DB.prepare(`
+      UPDATE memberships SET pending_license=0, updated_at=datetime('now')
+      WHERE organization_id=? AND user_id=?
+    `).bind(orgId, user.id).run();
+    throw error;
+  }
 }
 
 export async function createLicensingPortal(request, env, context) {
