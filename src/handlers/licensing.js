@@ -1,69 +1,28 @@
 import { json } from '../lib/stripe.js';
 import {
+  acquireAppLease,
   addMember,
   createLicensingPortal,
-  purchaseSeatForMember,
   licensingJsonError,
+  purchaseSeatForMember,
+  refreshAppLease,
+  releaseAppLease,
   removeMember,
   requireLicensingContext,
-  setMemberLicense
+  resendMemberInvitation,
+  setMemberLicense,
+  transferMemberLicense
 } from '../lib/licensing.js';
 
-export async function getLicensingMe({ request, env }) {
-  try {
-    const context = await requireLicensingContext(request, env, { includeMembers: true });
-    return json(context, 200, { 'cache-control': 'no-store' });
-  } catch (error) {
-    return licensingJsonError(error);
-  }
-}
-
-export async function createLicensingMember({ request, env }) {
-  try {
-    const context = await requireLicensingContext(request, env, { includeMembers: true });
-    const body = await request.json().catch(() => ({}));
-    return json(await addMember(env, context, body), 200, { 'cache-control': 'no-store' });
-  } catch (error) {
-    return licensingJsonError(error);
-  }
-}
-
-export async function updateLicensingMemberLicense({ request, env, userId }) {
-  try {
-    const context = await requireLicensingContext(request, env, { includeMembers: true });
-    const body = await request.json().catch(() => ({}));
-    if (typeof body.active !== 'boolean') return json({ error: 'active must be true or false.' }, 400);
-    return json(await setMemberLicense(env, context, userId, body.active), 200, { 'cache-control': 'no-store' });
-  } catch (error) {
-    return licensingJsonError(error);
-  }
-}
-
-export async function deleteLicensingMember({ request, env, userId }) {
-  try {
-    const context = await requireLicensingContext(request, env, { includeMembers: true });
-    return json(await removeMember(env, context, userId), 200, { 'cache-control': 'no-store' });
-  } catch (error) {
-    return licensingJsonError(error);
-  }
-}
-
-
-export async function fastTrackLicensingSeat({ request, env }) {
-  try {
-    const context = await requireLicensingContext(request, env, { includeMembers: true });
-    const body = await request.json().catch(() => ({}));
-    return json(await purchaseSeatForMember(request, env, context, body), 200, { 'cache-control': 'no-store' });
-  } catch (error) {
-    return licensingJsonError(error);
-  }
-}
-
-export async function createAccountPortal({ request, env }) {
-  try {
-    const context = await requireLicensingContext(request, env, { includeMembers: false });
-    return json({ url: await createLicensingPortal(request, env, context) });
-  } catch (error) {
-    return licensingJsonError(error);
-  }
-}
+async function run(fn){ try{return await fn();}catch(error){return licensingJsonError(error);} }
+export async function getLicensingMe({request,env}){ return run(async()=>json(await requireLicensingContext(request,env))); }
+export async function createLicensingMember({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env);return json(await addMember(request,env,c,await request.json()));}); }
+export async function fastTrackLicensingSeat({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env);return json(await purchaseSeatForMember(request,env,c,await request.json()));}); }
+export async function updateLicensingMemberLicense({request,env,userId}){ return run(async()=>{const c=await requireLicensingContext(request,env);const b=await request.json();return json(await setMemberLicense(env,c,userId,Boolean(b.active)));}); }
+export async function deleteLicensingMember({request,env,userId}){ return run(async()=>{const c=await requireLicensingContext(request,env);return json(await removeMember(env,c,userId));}); }
+export async function inviteLicensingMember({request,env,userId}){ return run(async()=>{const c=await requireLicensingContext(request,env);return json(await resendMemberInvitation(request,env,c,userId));}); }
+export async function transferLicensingMember({request,env,userId}){ return run(async()=>{const c=await requireLicensingContext(request,env);const b=await request.json();return json(await transferMemberLicense(env,c,userId,b.target_user_id));}); }
+export async function createAccountPortal({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env,{includeMembers:false});return json({url:await createLicensingPortal(request,env,c)});}); }
+export async function acquireLease({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env,{includeMembers:false});return json(await acquireAppLease(request,env,c,await request.json()));}); }
+export async function refreshLease({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env,{includeMembers:false});return json(await refreshAppLease(request,env,c,await request.json()));}); }
+export async function releaseLease({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env,{includeMembers:false});return json(await releaseAppLease(env,c,await request.json()));}); }

@@ -1,106 +1,38 @@
-# NavoFlo Stripe + D1 V7.0 — Licensing
+# NavoFlo V8.0 — Stripe + D1 + Auth
 
-## Before deploying V7.0
+The Stripe billing flow remains the V7.2 flow: card subscriptions, manual provincial tax rates, Fast Track seat additions, D1 subscription sync. PAD stays disabled by default.
 
-Run `migrations/0003_licensing_v7.sql` once in:
+## Required existing bindings / variables
 
-Cloudflare → D1 → `navoflo-prod` → Console
+- `NAVOFLO_DB` -> D1 `navoflo-prod`
+- `PUBLIC_APP_URL=https://navoflo.com`
+- Stripe price variables and tax rate variables already configured
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
 
-This migration links subscriptions to organizations and adds the fields used by the licensing UI.
+## New migration
 
-## Existing bindings and secrets
+Run `migrations/0005_auth_floating_licenses.sql` once in D1 Console before using V8 auth.
 
-Keep the existing Stripe runtime variables/secrets unchanged.
+## First Owner activation
 
-Required D1 binding:
-- Binding: `NAVOFLO_DB`
-- Database: `navoflo-prod`
+Because the development site is still protected by Cloudflare Access, visit `/auth/setup/` after deploying V8. The endpoint reads the authenticated Cloudflare Access email, finds the existing NavoFlo user, hashes the new password, activates the account, and creates the first NavoFlo session.
 
-`wrangler.jsonc` already pins this binding.
+## Invitation email delivery (optional)
 
-PAD remains disabled unless `NAVOFLO_PAD_ENABLED=true` is explicitly added.
+V8 can send invitation emails through Resend if these are configured:
 
-## Authentication during development
+- Secret: `RESEND_API_KEY`
+- Text: `NAVOFLO_FROM_EMAIL` (example: `NavoFlo <noreply@navoflo.com>`)
 
-V7.0 uses Cloudflare Access as the identity provider. The Worker reads:
+If they are absent, the Owner receives the invitation URL in the portal and can copy it manually.
 
-`cf-access-authenticated-user-email`
+## Floating USER licenses
 
-The first person signing in with the Stripe billing email is bootstrapped as the organization owner and receives the first available license seat.
+The primary Owner assignment is migrated to `license_type=admin` and is non-transferable. Additional assignments are `license_type=user` and can be transferred only through the NavoFlo account portal.
 
-## Licensing endpoints
+## Workstation concurrency
 
-- `GET /api/licensing/me` — current user, organization, subscription, seats and entitlements
-- `POST /api/licensing/members` — owner/admin adds a user and assigns an available seat
-- `POST /api/licensing/members/:userId/license` — assign/revoke a seat
-- `DELETE /api/licensing/members/:userId` — remove a non-owner member
-- `POST /api/licensing/portal` — open Stripe Billing Portal for the organization
+V8 includes a 180-second application lease API. `public/js/license-lease.js` refreshes every 60 seconds. A second workstation receives `LICENSE_IN_USE` and can take over only after explicit confirmation; takeover revokes the prior workstation lease.
 
-## Account page
-
-FR: `/account/licenses/`
-EN: `/en/account/licenses/`
-
-NavoBase entitlements:
-- automation: yes
-- Navo2D: no
-- Navo3D: no
-
-NavoPro entitlements:
-- automation: yes
-- Navo2D: yes
-- Navo3D: yes
-
-NavoAnalyzer remains disabled until launch.
-
-## Optional enforcement
-
-By default V7.0 only reports entitlements. To make the Worker redirect unlicensed users away from Navo2D/Navo3D, add runtime variable:
-
-`NAVOFLO_ENFORCE_LICENSES=true`
-
-Keep it unset during development until the account/licensing flow has been validated.
-
-## Test with the existing Stripe subscription
-
-No new payment is required.
-
-1. Deploy V7.0 after migration 0003.
-2. Sign in to `navoflo.com` through Cloudflare Access with the same email used for the successful Stripe test subscription.
-3. Open `/account/licenses/`.
-4. The page lazily creates the owner/membership/license assignment from the existing organization + subscription rows.
-5. Verify D1:
-
-```sql
-SELECT * FROM users;
-SELECT * FROM memberships;
-SELECT * FROM license_assignments;
-SELECT stripe_subscription_id, organization_id, plan, seats, status, current_period_end
-FROM subscriptions;
-```
-
-If the current subscription has only one seat, seeing `1 / 1` with the Add User button disabled is expected.
-
-## V7.2 — Fast Track licence additionnelle
-
-Avant le premier test V7.2, exécuter dans `navoflo-prod` :
-
-```sql
-ALTER TABLE memberships ADD COLUMN pending_license INTEGER NOT NULL DEFAULT 0;
-CREATE INDEX IF NOT EXISTS idx_memberships_pending_license
-ON memberships(organization_id, pending_license, active);
-```
-
-La page `/account/licenses/` garde maintenant le bouton **Ajouter un utilisateur**
-actif même lorsque 0 siège est disponible. Elle affiche une confirmation d'achat,
-puis NavoFlo met à jour l'abonnement Stripe existant avec `proration_behavior=always_invoice`
-et `payment_behavior=pending_if_incomplete`. Si une authentification carte est requise,
-le client est envoyé vers la facture Stripe hébergée. Le siège est attribué dans D1
-uniquement après que Stripe confirme l'augmentation de l'abonnement.
-
-
-V7.2 Fast Track tax fix
-- Stripe pending updates no longer receive items[*][tax_rates].
-- Manual provincial tax rates are first saved as Subscription default_tax_rates.
-- New additional-seat items inherit those taxes while the seat change remains pending_if_incomplete + always_invoice.
-- No new D1 migration is required from V7.1.
+Keep `NAVOFLO_ENFORCE_LICENSES` disabled until the lease helper is wired directly into Navo2D/Navo3D startup.
