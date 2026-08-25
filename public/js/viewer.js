@@ -4,6 +4,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
+import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.3';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -70,7 +71,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.15.2';
+const WORKER_URL = '/js/step-worker.js?v=8.15.3';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -145,7 +146,8 @@ const cadNav = {
   pivot:new THREE.Vector3(),
   wheelFocus:new THREE.Vector3()
 };
-let dimensionLabel = null, dimensionLabelPoint = null;
+let dimensionLabel = null, dimensionLabelPoint = null, dimensionTether = null;
+let dimensionLabelOffset={x:0,y:0},dimensionLabelDrag=null;
 let worker = null, workerSeq = 0, workerPending = new Map();
 let meshObjectUrls = [];
 let baseMaterials = new Set();
@@ -217,6 +219,42 @@ async function saveCurrentModel(forceSaveAs=false){
     if(handle){const oldMain=doc.main;const writable=await handle.createWritable();await writable.write(await oldMain.arrayBuffer());await writable.close();const saved=await handle.getFile();doc.main=saved;doc.mainHandle=handle;doc.name=saved.name;doc.files=[saved,...doc.files.filter(f=>f!==oldMain&&f.name!==saved.name)];currentFile=saved;E.statusFile.textContent=saved.name;renderModelDocumentTabs();}
     else{const url=URL.createObjectURL(doc.main);const a=document.createElement('a');a.href=url;a.download=doc.main.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   }catch(error){if(error?.name!=='AbortError'){console.error('Navo3D save',error);showError(FR?'Impossible de sauvegarder ce modèle.':'Unable to save this model.');}}
+}
+
+function modelSessionSnapshot(){
+  captureActiveModelDocumentState();
+  return {
+    version:1,
+    activeModelDocumentId,
+    modelDocumentSeq,
+    documents:[...modelDocuments.values()].map(doc=>({
+      id:doc.id,name:doc.name,main:doc.main,mainHandle:doc.mainHandle||null,files:doc.files,
+      view:doc.view||null,lastFormat:doc.lastFormat||'',sheetMetal:doc.sheetMetal||null
+    }))
+  };
+}
+async function persistModelSession(){
+  if(!modelDocuments.size)return saveCadWorkspace('navo3d',{version:1,activeModelDocumentId:null,modelDocumentSeq,documents:[]});
+  let snapshot=modelSessionSnapshot();
+  if(await saveCadWorkspace('navo3d',snapshot))return true;
+  // Some browsers may refuse to clone FileSystemFileHandle. Preserve the files/tabs anyway.
+  snapshot={...snapshot,documents:snapshot.documents.map(doc=>({...doc,mainHandle:null}))};
+  return saveCadWorkspace('navo3d',snapshot);
+}
+async function restoreModelSession(){
+  const saved=await loadCadWorkspace('navo3d');
+  if(!saved?.documents?.length)return false;
+  modelDocuments.clear();
+  for(const raw of saved.documents){
+    if(!raw?.id||!raw?.main||!Array.isArray(raw.files))continue;
+    modelDocuments.set(raw.id,{...raw});
+  }
+  if(!modelDocuments.size)return false;
+  modelDocumentSeq=Math.max(Number(saved.modelDocumentSeq)||0,...[...modelDocuments.keys()].map(id=>Number(String(id).split('-').pop())||0));
+  renderModelDocumentTabs();
+  const target=modelDocuments.has(saved.activeModelDocumentId)?saved.activeModelDocumentId:modelDocuments.keys().next().value;
+  await activateModelDocument(target);
+  return true;
 }
 
 function restoreModelDocumentView(doc){
@@ -358,9 +396,11 @@ async function init() {
 
   createGrid(10);
   bindUI();
+  bindSuitePersistence(persistModelSession);
   updatePCCheck();
   resize();
   renderModelDocumentTabs();
+  await restoreModelSession();
   renderer.setAnimationLoop(render);
 }
 
@@ -2327,6 +2367,12 @@ function showSingleExact(d) {
     ]);
   }
 
+  if(Number.isFinite(d.diameter)&&d.diameter>0){
+    drawExactDiameterDimension(d,`Ø ${formatLength(d.diameter)}`);
+  }else if(Number.isFinite(d.radius)&&d.radius>0){
+    drawExactRadiusDimension(d,`R ${formatLength(d.radius)}`);
+  }
+
   if (d.hole?.diameter) {
     details.push([T.hole,`Ø ${formatLength(d.hole.diameter)}`]);
     if (isFinite(d.hole.depth)) details.push([T.depth,formatLength(d.hole.depth)]);
@@ -2481,6 +2527,32 @@ function showMeasureError(message) {
 }
 
 
+function exactRadialFrame(details){
+  if(!Array.isArray(details?.center)||details.center.length!==3)return null;
+  const center=new THREE.Vector3(...details.center),axis=new THREE.Vector3(...(details.axisDirection||[0,0,1]));
+  if(axis.lengthSq()<1e-12)axis.set(0,0,1);axis.normalize();
+  const click=selected[0]?.point?.clone?.();if(!click)return null;
+  const sectionCenter=center.clone().addScaledVector(axis,click.clone().sub(center).dot(axis));
+  let radial=click.clone().sub(sectionCenter);
+  if(radial.lengthSq()<1e-12){radial=axis.clone().cross(camera?.up||new THREE.Vector3(0,1,0));if(radial.lengthSq()<1e-12)radial=axis.clone().cross(new THREE.Vector3(1,0,0));}
+  radial.normalize();const tangent=axis.clone().cross(radial).normalize();return{center:sectionCenter,axis,radial,tangent};
+}
+function addLinearArrow3D(tip,direction,wingDir,size){
+  const d=direction.clone().normalize(),w=wingDir.clone().normalize(),back=tip.clone().addScaledVector(d,-size),wing=size*.42;
+  addMeasureSegment(tip,back.clone().addScaledVector(w,wing),0x35d39a,43);addMeasureSegment(tip,back.clone().addScaledVector(w,-wing),0x35d39a,43);
+}
+function drawExactDiameterDimension(details,labelText){
+  const radius=Number(details.radius)||Number(details.diameter)/2,frame=exactRadialFrame(details);if(!(radius>0)||!frame)return false;
+  const q1=frame.center.clone().addScaledVector(frame.radial,-radius),q2=frame.center.clone().addScaledVector(frame.radial,radius),arrow=Math.max(modelSize*.006,radius*.10);
+  addMeasureSegment(q1,q2);addLinearArrow3D(q1,frame.radial,frame.tangent,arrow);addLinearArrow3D(q2,frame.radial.clone().negate(),frame.tangent,arrow);addMeasureMarker(q1);addMeasureMarker(q2);
+  const labelPoint=q2.clone().addScaledVector(frame.radial,Math.max(radius*.48,modelSize*.018));addMeasureSegment(q2,labelPoint,0x35d39a,41);setDimensionLabel(labelText,labelPoint);return true;
+}
+function drawExactRadiusDimension(details,labelText){
+  const radius=Number(details.radius),frame=exactRadialFrame(details);if(!(radius>0)||!frame)return false;
+  const q=frame.center.clone().addScaledVector(frame.radial,radius),arrow=Math.max(modelSize*.006,radius*.10);addMeasureSegment(frame.center,q);addLinearArrow3D(q,frame.radial.clone().negate(),frame.tangent,arrow);addMeasureMarker(frame.center);addMeasureMarker(q);
+  const labelPoint=q.clone().addScaledVector(frame.radial,Math.max(radius*.42,modelSize*.018));addMeasureSegment(q,labelPoint,0x35d39a,41);setDimensionLabel(labelText,labelPoint);return true;
+}
+
 function addExactCenterMarker(point) {
   const radius=Math.max(modelSize*0.003,0.0001);
   const ringGeometry=new THREE.RingGeometry(radius*0.55,radius,28);
@@ -2514,53 +2586,37 @@ function addExactCenterMarker(point) {
   measureOverlayRoot.add(cross);
 }
 
+function ensureDimensionTether(){
+  if(dimensionTether)return dimensionTether;
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('cad-dimension-tether');svg.setAttribute('aria-hidden','true');
+  const line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('x1','0');line.setAttribute('y1','0');line.setAttribute('x2','0');line.setAttribute('y2','0');svg.append(line);E.workspace.append(svg);dimensionTether={svg,line};return dimensionTether;
+}
 function ensureDimensionLabel() {
   if (dimensionLabel) return dimensionLabel;
-
-  const label=document.createElement('div');
-  label.className='cad-dimension-label';
-  label.hidden=true;
-  E.workspace.appendChild(label);
-  dimensionLabel=label;
+  const label=document.createElement('div');label.className='cad-dimension-label';label.hidden=true;label.title=FR?'Glissez pour déplacer la cote':'Drag to move the dimension label';E.workspace.appendChild(label);dimensionLabel=label;ensureDimensionTether();
+  label.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();dimensionLabelDrag={pointerId:event.pointerId,startX:event.clientX,startY:event.clientY,offsetX:dimensionLabelOffset.x,offsetY:dimensionLabelOffset.y};label.setPointerCapture?.(event.pointerId);label.classList.add('dragging');});
+  label.addEventListener('pointermove',event=>{if(!dimensionLabelDrag||dimensionLabelDrag.pointerId!==event.pointerId)return;event.preventDefault();event.stopPropagation();dimensionLabelOffset.x=dimensionLabelDrag.offsetX+(event.clientX-dimensionLabelDrag.startX);dimensionLabelOffset.y=dimensionLabelDrag.offsetY+(event.clientY-dimensionLabelDrag.startY);updateDimensionLabelPosition();});
+  const endDrag=event=>{if(!dimensionLabelDrag||dimensionLabelDrag.pointerId!==event.pointerId)return;dimensionLabelDrag=null;label.classList.remove('dragging');};label.addEventListener('pointerup',endDrag);label.addEventListener('pointercancel',endDrag);
+  label.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();dimensionLabelOffset={x:0,y:0};updateDimensionLabelPosition();});
   return label;
 }
-
 function clearDimensionLabel() {
-  dimensionLabelPoint=null;
-  if(dimensionLabel){
-    dimensionLabel.hidden=true;
-    dimensionLabel.textContent='';
-  }
+  dimensionLabelPoint=null;dimensionLabelOffset={x:0,y:0};dimensionLabelDrag=null;
+  if(dimensionLabel){dimensionLabel.hidden=true;dimensionLabel.textContent='';dimensionLabel.classList.remove('dragging');}
+  if(dimensionTether?.svg)dimensionTether.svg.hidden=true;
 }
-
 function setDimensionLabel(text,point) {
   if(!text||!point)return clearDimensionLabel();
-
-  const label=ensureDimensionLabel();
-  dimensionLabelPoint=point.clone();
-  label.textContent=text;
-  label.hidden=false;
-  updateDimensionLabelPosition();
+  const label=ensureDimensionLabel();dimensionLabelPoint=point.clone();dimensionLabelOffset={x:0,y:0};label.textContent=text;label.hidden=false;updateDimensionLabelPosition();
 }
-
 function updateDimensionLabelPosition() {
   if(!dimensionLabel||dimensionLabel.hidden||!dimensionLabelPoint||!camera)return;
-
   const projected=dimensionLabelPoint.clone().project(camera);
-
-  // Hide if the annotation is behind the camera or outside the depth range.
-  if(projected.z < -1 || projected.z > 1){
-    dimensionLabel.style.visibility='hidden';
-    return;
-  }
-
-  const rect=E.workspace.getBoundingClientRect();
-  const x=(projected.x*0.5+0.5)*rect.width;
-  const y=(-projected.y*0.5+0.5)*rect.height;
-
-  dimensionLabel.style.visibility='visible';
-  dimensionLabel.style.left=`${x}px`;
-  dimensionLabel.style.top=`${y}px`;
+  if(projected.z < -1 || projected.z > 1){dimensionLabel.style.visibility='hidden';if(dimensionTether?.svg)dimensionTether.svg.hidden=true;return;}
+  const rect=E.workspace.getBoundingClientRect(),anchorX=(projected.x*0.5+0.5)*rect.width,anchorY=(-projected.y*0.5+0.5)*rect.height,x=anchorX+dimensionLabelOffset.x,y=anchorY+dimensionLabelOffset.y;
+  dimensionLabel.style.visibility='visible';dimensionLabel.style.left=`${x}px`;dimensionLabel.style.top=`${y}px`;
+  const tether=ensureDimensionTether(),moved=Math.hypot(dimensionLabelOffset.x,dimensionLabelOffset.y)>5;tether.svg.hidden=!moved;
+  if(moved){tether.line.setAttribute('x1',String(anchorX));tether.line.setAttribute('y1',String(anchorY));tether.line.setAttribute('x2',String(x));tether.line.setAttribute('y2',String(y));}
 }
 
 function drawMeasureLine(a,b,labelText='') {

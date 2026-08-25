@@ -1,6 +1,7 @@
 import DxfParser from 'https://cdn.jsdelivr.net/npm/dxf-parser@1.1.2/+esm';
 import AUTO_CAD_COLOR_INDEX from 'https://cdn.jsdelivr.net/npm/dxf-parser@1.1.2/dist/AutoCadColorIndex.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
+import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.3';
 
 const FR=document.documentElement.lang.toLowerCase().startsWith('fr');
 const T=FR?{
@@ -175,6 +176,32 @@ function closeDocument(id=activeDocumentId){
   else clearDrawingState();
   renderDocumentTabs();
 }
+
+function dxfSessionSnapshot(){
+  saveActiveDocumentState();
+  return {
+    version:1,activeDocumentId,documentSeq,untitledSeq,
+    documents:[...openDocuments.values()].map(doc=>({id:doc.id,name:doc.name,dirty:Boolean(doc.dirty||doc.state?.dirty),fileHandle:doc.fileHandle||null,state:doc.state}))
+  };
+}
+async function persistDxfSession(){
+  let snapshot=dxfSessionSnapshot();
+  if(await saveCadWorkspace('navo2d',snapshot))return true;
+  snapshot={...snapshot,documents:snapshot.documents.map(doc=>({...doc,fileHandle:null}))};
+  return saveCadWorkspace('navo2d',snapshot);
+}
+async function restoreDxfSession(){
+  const saved=await loadCadWorkspace('navo2d');
+  if(!saved?.documents?.length)return false;
+  openDocuments.clear();
+  for(const doc of saved.documents){if(doc?.id&&doc?.state)openDocuments.set(doc.id,{...doc});}
+  if(!openDocuments.size)return false;
+  documentSeq=Math.max(Number(saved.documentSeq)||0,...[...openDocuments.keys()].map(id=>Number(String(id).split('-').pop())||0));
+  untitledSeq=Math.max(Number(saved.untitledSeq)||0,untitledSeq);
+  activeDocumentId=openDocuments.has(saved.activeDocumentId)?saved.activeDocumentId:openDocuments.keys().next().value;
+  restoreDocumentState(openDocuments.get(activeDocumentId));renderDocumentTabs();return true;
+}
+
 async function openDxfFiles(items){
   const list=[...items].map(item=>item?.file?item:{file:item,handle:null}).filter(item=>/\.dxf$/i.test(item.file?.name||''));
   for(const item of list)await loadDxf(item.file,item.handle||null);
@@ -229,7 +256,10 @@ init();
 
 async function init(){
   applyNavo2DPreferences(await loadUserPreferences('navo2d',navo2dPreferenceSnapshot()));
-  bindUI();resize();setTool('select');requestAnimationFrame(frame);
+  bindUI();
+  bindSuitePersistence(persistDxfSession);
+  await restoreDxfSession();
+  resize();setTool('select');requestAnimationFrame(frame);
 }
 
 function bindUI(){
@@ -2217,7 +2247,7 @@ const COMMAND_ALIASES=new Map(Object.entries({
   S:'STRETCH',STRETCH:'STRETCH',AR:'ARRAY',ARRAY:'ARRAY',ARRAYRECT:'ARRAYRECT',ARRAYPOLAR:'ARRAYPOLAR',
   BR:'BREAK',BREAK:'BREAK',BREAKATPOINT:'BREAKATPOINT',LEN:'LENGTHEN',LENGTHEN:'LENGTHEN',PE:'PEDIT',PEDIT:'PEDIT',
   D:'DIMSTYLE',DIMSTYLE:'DIMSTYLE',DST:'DIMSTYLE',DIM:'DIM',DLI:'DIMLINEAR',DIMLINEAR:'DIMLINEAR',DAL:'DIMALIGNED',DIMALIGNED:'DIMALIGNED',
-  DRA:'DIMRADIUS',DIMRADIUS:'DIMRADIUS',DDI:'DIMDIAMETER',DIMDIAMETER:'DIMDIAMETER',DAN:'DIMANGULAR',DIMANGULAR:'DIMANGULAR',
+  DRA:'DIMRADIUS',DIMRADIUS:'DIMRADIUS',DDI:'DIMDIAMETER',DIMDIAMETER:'DIMDIAMETER',DAN:'DIMANGULAR',DIMANGULAR:'DIMANGULAR',CM:'CENTERMARK',CENTERMARK:'CENTERMARK',
   AIDIMFLIPARROW:'AIDIMFLIPARROW',DIMFLIPARROW:'AIDIMFLIPARROW',
   DI:'DIST',DIST:'DIST',DISTANCE:'DIST',ID:'ID',
   Z:'ZOOM',ZOOM:'ZOOM',ZE:'ZOOMEXTENTS',LA:'LAYER',LAYER:'LAYER',
@@ -2515,6 +2545,9 @@ function startCommand(rawName){
   }
   else if(name==='DIMANGULAR'){
     state.command.step='firstLine';setCommandPrompt(FR?'DIMANGULAR Sélectionnez la première ligne:':'DIMANGULAR Select first line:');
+  }
+  else if(name==='CENTERMARK'){
+    state.command.step='selectEntity';setCommandPrompt(FR?'CENTERMARK Sélectionnez un cercle ou un arc:':'CENTERMARK Select circle or arc:');
   }
   else if(name==='AIDIMFLIPARROW'){
     state.command.step='pickArrow';setCommandPrompt(FR?'AIDIMFLIPARROW Sélectionnez la flèche de cote à inverser:':'AIDIMFLIPARROW Select dimension arrow to flip:');
@@ -2884,6 +2917,12 @@ function commandPoint(point,event,fromKeyboard=false){
     flipDimensionArrow(hit.dimGroupId,index);finishCommand(false);return;
   }
 
+  if(c.name==='CENTERMARK'&&c.step==='selectEntity'){
+    const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+    if(!hit||!['CIRCLE','ARC'].includes(hit.type))return commandError(FR?'Sélectionnez un cercle ou un arc.':'Select a circle or arc.');
+    if(commitCenterMark(hit))finishCommand();return;
+  }
+
   if(c.name==='DIM'){
     if(c.step==='smartFirst'){
       const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
@@ -2910,9 +2949,17 @@ function commandPoint(point,event,fromKeyboard=false){
     if(c.step==='smartLineSecondOrPlace'){
       const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
       const first=state.entities.find(x=>x.id===c.data.firstId);
-      if(hit?.type==='LINE'&&first&&hit.id!==first.id&&infiniteLineIntersection(first.p1,first.p2,hit.p1,hit.p2)){
-        c.data.secondId=hit.id;c.data.secondPick=copyPoint(point);c.step='angularPlace';
-        setCommandPrompt(FR?'DIM Spécifiez la position de l’arc de cote:':'DIM Specify dimension arc line location:');return;
+      if(hit?.type==='LINE'&&first&&hit.id!==first.id){
+        const intersection=infiniteLineIntersection(first.p1,first.p2,hit.p1,hit.p2);
+        if(intersection){
+          c.data.secondId=hit.id;c.data.secondPick=copyPoint(point);c.step='angularPlace';
+          setCommandPrompt(FR?'DIM Spécifiez la position de l’arc de cote:':'DIM Specify dimension arc line location:');return;
+        }
+        const pair=parallelLineDimensionPoints(first,hit,c.data.firstPick,point);
+        if(pair){
+          c.data.p1=pair[0];c.data.p2=pair[1];c.data.dimType='aligned';c.data.parallelEdges=true;c.step='place';
+          setCommandPrompt(FR?'DIM Spécifiez la position de la cote entre les deux arêtes:':'DIM Specify the dimension location between the two edges:');return;
+        }
       }
       const items=c.data.dimType==='linear'?buildLinearDimension(c.data.p1,c.data.p2,point,'auto'):buildAlignedDimension(c.data.p1,c.data.p2,point);
       const meta=c.data.dimType==='linear'?{kind:'linear',p1:copyPoint(c.data.p1),p2:copyPoint(c.data.p2),location:copyPoint(point),orientation:'auto',arrowMode:state.dimArrowMode}:{kind:'aligned',p1:copyPoint(c.data.p1),p2:copyPoint(c.data.p2),location:copyPoint(point),arrowMode:state.dimArrowMode};
@@ -3210,6 +3257,7 @@ function commandNeedsPoint(c){
   if(c.name==='DIMLINEAR'||c.name==='DIMALIGNED')return ['first','second','place'].includes(c.step);
   if(c.name==='DIMRADIUS'||c.name==='DIMDIAMETER')return ['selectEntity','place'].includes(c.step);
   if(c.name==='DIMANGULAR')return ['firstLine','secondLine','place'].includes(c.step);
+  if(c.name==='CENTERMARK')return c.step==='selectEntity';
   if(c.name==='AIDIMFLIPARROW')return c.step==='pickArrow';
   if(c.name==='TEXT')return c.step==='insertion';
   if(c.name==='TEXTEDIT')return c.step==='selectEntity';
@@ -3472,6 +3520,32 @@ function addDimensionLineWithArrows(items,q1,q2,u,value,style,meta,groupId){
   let a=q1,b=q2;if(outside1)a={x:q1.x-u.x*style.arrow*1.45,y:q1.y-u.y*style.arrow*1.45};if(outside2)b={x:q2.x+u.x*style.arrow*1.45,y:q2.y+u.y*style.arrow*1.45};
   const dl=dimLine(a,b,groupId);if(dl)items.push(dl);dimArrow(items,q1,outside1?{x:-u.x,y:-u.y}:u,style.arrow,groupId);dimArrow(items,q2,outside2?u:{x:-u.x,y:-u.y},style.arrow,groupId);return mode;
 }
+function parallelLineDimensionPoints(a,b,pickA=null,pickB=null){
+  if(a?.type!=='LINE'||b?.type!=='LINE')return null;
+  const va={x:a.p2.x-a.p1.x,y:a.p2.y-a.p1.y},vb={x:b.p2.x-b.p1.x,y:b.p2.y-b.p1.y},la=Math.hypot(va.x,va.y),lb=Math.hypot(vb.x,vb.y);
+  if(la<1e-12||lb<1e-12)return null;const ua={x:va.x/la,y:va.y/la},ub={x:vb.x/lb,y:vb.y/lb};
+  if(Math.abs(ua.x*ub.x+ua.y*ub.y)<0.9995)return null;
+  const n={x:-ua.y,y:ua.x},seed=pickA||{x:(a.p1.x+a.p2.x)/2,y:(a.p1.y+a.p2.y)/2};
+  const p1=projectPointToLine(seed,a.p1,a.p2,false)||seed;
+  const signed=(b.p1.x-p1.x)*n.x+(b.p1.y-p1.y)*n.y;if(Math.abs(signed)<1e-10)return null;
+  const p2={x:p1.x+n.x*signed,y:p1.y+n.y*signed};return[p1,p2];
+}
+function buildCenterMarkDimension(e,groupId='preview',meta=null){
+  if(!e||!['CIRCLE','ARC'].includes(e.type)||!(e.radius>0))return[];
+  const c=e.center,r=e.radius,style=dimensionStyle(meta),half=Math.max(r*.12,Math.min(r*.32,style.textHeight*.9)),gap=Math.min(half*.22,r*.06),ext=Math.min(r*.16,half*.8),items=[];
+  const addAxis=(u)=>{
+    const n={x:-u.x,y:-u.y};
+    for(const sign of [-1,1]){
+      const a={x:c.x+u.x*gap*sign,y:c.y+u.y*gap*sign},b={x:c.x+u.x*(half+ext)*sign,y:c.y+u.y*(half+ext)*sign};
+      const line=dimLine(a,b,groupId);if(line)items.push(line);
+    }
+  };
+  addAxis({x:1,y:0});addAxis({x:0,y:1});return items;
+}
+function commitCenterMark(e){
+  const meta={kind:'centerMark',sourceEntityId:e.id,arrowMode:state.dimArrowMode};
+  return commitDimension(buildCenterMarkDimension(e,'preview',meta),meta);
+}
 function buildLinearDimension(p1,p2,location,orientation='auto',groupId='preview',meta=null){
   if(!p1||!p2||!location)return[];const style=dimensionStyle(meta),dx=p2.x-p1.x,dy=p2.y-p1.y,mid={x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2};let horizontal=orientation==='horizontal'?true:orientation==='vertical'?false:Math.abs(location.y-mid.y)>=Math.abs(location.x-mid.x);if(Math.abs(dx)<1e-12)horizontal=false;if(Math.abs(dy)<1e-12)horizontal=true;
   let q1,q2,measure,rotation,extDir;if(horizontal){q1={x:p1.x,y:location.y};q2={x:p2.x,y:location.y};measure=Math.abs(dx);rotation=0;extDir={x:0,y:Math.sign(location.y-mid.y)||1};}else{q1={x:location.x,y:p1.y};q2={x:location.x,y:p2.y};measure=Math.abs(dy);rotation=Math.PI/2;extDir={x:Math.sign(location.x-mid.x)||1,y:0};}
@@ -3517,7 +3591,7 @@ function buildAngularDimension(a,b,pickA,pickB,location,groupId='preview',meta=n
   items.push(dimText(value,tc,0,style,groupId));return items;
 }
 function buildDimensionFromMeta(meta,groupId='preview'){
-  if(!meta)return[];if(meta.kind==='linear')return buildLinearDimension(meta.p1,meta.p2,meta.location,meta.orientation||'auto',groupId,meta);if(meta.kind==='aligned')return buildAlignedDimension(meta.p1,meta.p2,meta.location,groupId,meta);if(meta.kind==='radius'||meta.kind==='diameter'){const e=state.entities.find(x=>x.id===meta.sourceEntityId);return meta.kind==='radius'?buildRadiusDimension(e,meta.location,groupId,meta):buildDiameterDimension(e,meta.location,groupId,meta);}if(meta.kind==='angular'){const a=state.entities.find(x=>x.id===meta.firstId),b=state.entities.find(x=>x.id===meta.secondId);return buildAngularDimension(a,b,meta.firstPick,meta.secondPick,meta.location,groupId,meta);}return[];
+  if(!meta)return[];if(meta.kind==='linear')return buildLinearDimension(meta.p1,meta.p2,meta.location,meta.orientation||'auto',groupId,meta);if(meta.kind==='aligned')return buildAlignedDimension(meta.p1,meta.p2,meta.location,groupId,meta);if(meta.kind==='radius'||meta.kind==='diameter'){const e=state.entities.find(x=>x.id===meta.sourceEntityId);return meta.kind==='radius'?buildRadiusDimension(e,meta.location,groupId,meta):buildDiameterDimension(e,meta.location,groupId,meta);}if(meta.kind==='angular'){const a=state.entities.find(x=>x.id===meta.firstId),b=state.entities.find(x=>x.id===meta.secondId);return buildAngularDimension(a,b,meta.firstPick,meta.secondPick,meta.location,groupId,meta);}if(meta.kind==='centerMark'){const e=state.entities.find(x=>x.id===meta.sourceEntityId);return buildCenterMarkDimension(e,groupId,meta);}return[];
 }
 function attachDimensionMeta(items,meta,groupId){for(const e of items){e.dimGenerated=true;e.dimGroupId=groupId;e.dimMeta=JSON.parse(JSON.stringify(meta));e.layer='DIMENSIONS';}}
 function rebuildDimensionGroup(groupId,meta){const items=buildDimensionFromMeta(meta,groupId).filter(Boolean);if(!items.length)return false;state.entities=state.entities.filter(e=>e.dimGroupId!==groupId);for(const src of items){const e=JSON.parse(JSON.stringify(src));e.id=nextEntityId();state.entities.push(e);}attachDimensionMeta(state.entities.filter(e=>e.dimGroupId===groupId),meta,groupId);return true;}
@@ -3971,7 +4045,14 @@ function drawCommandPreview(){
   if(!c||c.selecting){if(state.textEditorDraft?.draft){ctx.save();ctx.setLineDash([4,3]);drawEntity(state.textEditorDraft.draft,'#7bc4ff',1.7);ctx.restore();}return;}
   const p=state.cursorPoint||resolveDraftPoint(state.pointer.x,state.pointer.y);ctx.save();ctx.strokeStyle='#7bc4ff';ctx.fillStyle='#7bc4ff';ctx.lineWidth=1.2;ctx.setLineDash([6,4]);
   const line=(a,b)=>{const x=worldToScreen(a),y=worldToScreen(b);ctx.beginPath();ctx.moveTo(x.x,x.y);ctx.lineTo(y.x,y.y);ctx.stroke();};
-  if((c.name==='LINE'||c.name==='PLINE')&&c.points.length)line(c.points[c.points.length-1],p);
+  if(c.name==='LINE'&&c.points.length)line(c.points[c.points.length-1],p);
+  else if(c.name==='PLINE'&&c.points.length){
+    // Keep the already picked polyline segments visible during construction,
+    // then add the live rubber-band segment to the cursor.
+    ctx.save();ctx.setLineDash([]);ctx.strokeStyle='#7bc4ff';ctx.lineWidth=1.55;
+    for(let i=1;i<c.points.length;i++)line(c.points[i-1],c.points[i]);
+    ctx.restore();ctx.setLineDash([6,4]);line(c.points[c.points.length-1],p);
+  }
   else if(c.name==='CIRCLE'&&c.step==='radius'&&c.points[0]){const cc=worldToScreen(c.points[0]);ctx.beginPath();ctx.arc(cc.x,cc.y,dist(c.points[0],p)*state.view.scale,0,Math.PI*2);ctx.stroke();}
   else if(c.name==='RECTANG'&&c.points[0]){const a=c.points[0],pts=[a,{x:p.x,y:a.y},p,{x:a.x,y:p.y},a];for(let i=0;i<4;i++)line(pts[i],pts[i+1]);}
   else if(c.name==='ARC'&&c.points.length===1)line(c.points[0],p);

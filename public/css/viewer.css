@@ -1032,3 +1032,22 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
 .tool-button,.file-tool,.tool-select,.segmented button{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:12px;font-weight:650;letter-spacing:.005em}
 .segmented button{font-size:11px}.tool-select{font-size:11.5px}.view-popover button{font-size:11.5px}
 .cad-statusbar{font-size:9px}.drawer-stats dt,.drawer-stats dd{font-size:10.5px}.selection-summary{font-size:10.5px}
+
+/* V8.15.3 — movable but tethered 3D dimension labels */
+.cad-dimension-label{
+  pointer-events:auto;
+  cursor:grab;
+  touch-action:none;
+}
+.cad-dimension-label.dragging{cursor:grabbing;box-shadow:0 5px 18px rgba(0,0,0,.55),0 0 0 1px rgba(53,211,154,.14)}
+.cad-dimension-tether{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  z-index:43;
+  pointer-events:none;
+  overflow:visible;
+}
+.cad-dimension-tether[hidden]{display:none}
+.cad-dimension-tether line{stroke:#35d39a;stroke-width:1.2;stroke-dasharray:4 3;opacity:.82;vector-effect:non-scaling-stroke}

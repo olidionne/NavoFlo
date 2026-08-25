@@ -206,6 +206,12 @@ function exactRef(selection) {
   };
 }
 
+function transformVector(vector,m){
+  const x=Number(vector?.[0])||0,y=Number(vector?.[1])||0,z=Number(vector?.[2])||0;
+  const out=[m[0]*x+m[4]*y+m[8]*z,m[1]*x+m[5]*y+m[9]*z,m[2]*x+m[6]*y+m[10]*z];
+  const len=Math.hypot(...out)||1;return out.map(v=>v/len);
+}
+
 function transformPoint(point, m) {
   const x=point[0], y=point[1], z=point[2];
   return [
@@ -233,13 +239,15 @@ function inspectSelection(occt, selection) {
     out.diameter = radius.diameter;
     out.localCenter = radius.localCenter;
     out.center = transformPoint(radius.localCenter, r.transform);
-    out.axisDirection = radius.localAxisDirection;
+    out.localAxisDirection = radius.localAxisDirection;
+    out.axisDirection = transformVector(radius.localAxisDirection, r.transform);
   } else {
     const center = occt.MeasureExactCenter(r.exactModelId, r.exactShapeHandle, r.kind, r.elementId);
     if (center?.ok) {
       out.localCenter = center.localCenter;
       out.center = transformPoint(center.localCenter, r.transform);
-      out.axisDirection = center.localAxisDirection;
+      out.localAxisDirection = center.localAxisDirection;
+      out.axisDirection = transformVector(center.localAxisDirection, r.transform);
     }
   }
 
