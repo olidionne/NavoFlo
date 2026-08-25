@@ -490,6 +490,22 @@ export async function purchaseSeatForMember(request, env, context, payload = {})
   const targetSeats = 1 + currentExtraSeats + 1;
   const province = String(stripeSub.metadata?.navoflo_tax_province || '').toUpperCase();
 
+  // Stripe pending updates only support price/quantity/discounts under items.
+  // Put the manual provincial taxes on the Subscription first so any newly
+  // created seat item inherits them without sending items[*][tax_rates] in
+  // the pending update itself. Existing items with explicit tax_rates keep
+  // their own tax configuration.
+  if (province) {
+    const taxRates = taxRatesForProvince(env, province);
+    const taxForm = {};
+    taxRates.forEach((rate, index) => { taxForm[`default_tax_rates[${index}]`] = rate; });
+    await stripeRequest(env, `/subscriptions/${encodeURIComponent(subId)}`, {
+      method: 'POST',
+      form: taxForm,
+      idempotencyKey: `navoflo-seat-default-taxes-${subId}-${taxRates.join('-')}`
+    });
+  }
+
   const form = {
     payment_behavior: 'pending_if_incomplete',
     proration_behavior: 'always_invoice',
@@ -501,10 +517,6 @@ export async function purchaseSeatForMember(request, env, context, payload = {})
   } else {
     form['items[0][price]'] = plan.seatPrice;
     form['items[0][quantity]'] = 1;
-    if (province) {
-      const taxRates = taxRatesForProvince(env, province);
-      taxRates.forEach((rate, index) => { form[`items[0][tax_rates][${index}]`] = rate; });
-    }
   }
 
   try {

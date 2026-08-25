@@ -81,9 +81,9 @@ FROM subscriptions;
 
 If the current subscription has only one seat, seeing `1 / 1` with the Add User button disabled is expected.
 
-## V7.1 — Fast Track licence additionnelle
+## V7.2 — Fast Track licence additionnelle
 
-Avant le premier test V7.1, exécuter dans `navoflo-prod` :
+Avant le premier test V7.2, exécuter dans `navoflo-prod` :
 
 ```sql
 ALTER TABLE memberships ADD COLUMN pending_license INTEGER NOT NULL DEFAULT 0;
@@ -97,3 +97,10 @@ puis NavoFlo met à jour l'abonnement Stripe existant avec `proration_behavior=a
 et `payment_behavior=pending_if_incomplete`. Si une authentification carte est requise,
 le client est envoyé vers la facture Stripe hébergée. Le siège est attribué dans D1
 uniquement après que Stripe confirme l'augmentation de l'abonnement.
+
+
+V7.2 Fast Track tax fix
+- Stripe pending updates no longer receive items[*][tax_rates].
+- Manual provincial tax rates are first saved as Subscription default_tax_rates.
+- New additional-seat items inherit those taxes while the seat change remains pending_if_incomplete + always_invoice.
+- No new D1 migration is required from V7.1.

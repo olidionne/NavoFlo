@@ -1,7 +1,7 @@
-NavoFlo Stripe Workers V7.1 — Licensing Fast Track
+NavoFlo Stripe Workers V7.2 — Licensing Fast Track
 ==================================================
 
-V7.1 ajoute le parcours rapide d'achat d'une licence additionnelle depuis
+V7.2 ajoute le parcours rapide d'achat d'une licence additionnelle depuis
 /account/licenses/.
 
 Quand toutes les licences sont utilisées :
@@ -18,7 +18,14 @@ Quand toutes les licences sont utilisées :
    automatiquement la nouvelle licence au membre en attente.
 
 Important : exécuter migrations/0004_fast_track_seats.sql UNE FOIS dans D1
-avant de tester V7.1.
+avant de tester V7.2.
 
 Aucune nouvelle variable Cloudflare requise.
 PAD demeure désactivé par défaut.
+
+
+V7.2 Fast Track tax fix
+- Stripe pending updates no longer receive items[*][tax_rates].
+- Manual provincial tax rates are first saved as Subscription default_tax_rates.
+- New additional-seat items inherit those taxes while the seat change remains pending_if_incomplete + always_invoice.
+- No new D1 migration is required from V7.1.
