@@ -65,22 +65,31 @@
   function loading(message){ card(`<div class="nlg-spinner"></div><h2>${fr?'Validation de la licence':'Checking license'}</h2><p>${message|| (fr?'NavoFlo vérifie votre licence et ce poste…':'NavoFlo is checking your license and this device…')}</p>`); }
   function unlock(){ gate.hidden=true; document.body.classList.remove('navoflo-license-locked'); locked=false; }
 
-  async function post(path, body) {
+  async function post(path, body, timeoutMs=12000) {
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),timeoutMs);
     let r;
-    try { r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}); }
-    catch (cause) { const e=new Error(fr?'Connexion au serveur impossible.':'Unable to reach the server.'); e.network=true; e.cause=cause; throw e; }
+    try { r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:controller.signal}); }
+    catch (cause) {
+      const timedOut=cause?.name==='AbortError';
+      const e=new Error(timedOut
+        ? (fr?'Le serveur de licences met trop de temps à répondre.':'The license server is taking too long to respond.')
+        : (fr?'Connexion au serveur impossible.':'Unable to reach the server.'));
+      e.network=true; e.timeout=timedOut; e.cause=cause; throw e;
+    } finally { clearTimeout(timer); }
     const d=await r.json().catch(()=>({}));
     if(!r.ok){const e=new Error(d.error||'License request failed');e.code=d.code;e.details=d.details;e.status=r.status;throw e;}
     return d;
   }
 
   function stopTimers(){ clearInterval(heartbeatTimer); clearInterval(expiryTimer); heartbeatTimer=null; expiryTimer=null; }
-  function lockLease(message){
-    if(locked && !started) return;
+  function lockLease(message,{moved=false}={}){
     stopTimers(); leaseToken='';
-    card(`<div class="nlg-kicker">NAVOFLO · ${product.toUpperCase()}</div><h2>${fr?'Licence interrompue':'License interrupted'}</h2><p>${message|| (fr?'Cette session n’a plus de licence active.':'This session no longer has an active license.')}</p><div class="nlg-actions"><a href="${accountUrl()}">${fr?'Mon compte':'My account'}</a><button class="primary" data-retry>${fr?'Réessayer':'Retry'}</button></div>`);
-    gate.querySelector('[data-retry]')?.addEventListener('click',()=>acquire(false));
-    window.dispatchEvent(new CustomEvent('navoflo:lease-lost',{detail:{product}}));
+    const title=moved?(fr?'Licence déplacée vers un autre poste':'License moved to another device'):(fr?'Licence interrompue':'License interrupted');
+    const action=moved?(fr?'Reprendre sur ce poste':'Use this device again'):(fr?'Réessayer':'Retry');
+    card(`<div class="nlg-kicker">NAVOFLO · ${product.toUpperCase()}</div><h2>${title}</h2><p>${message|| (fr?'Cette session n’a plus de licence active.':'This session no longer has an active license.')}</p><div class="nlg-actions"><a href="${accountUrl()}">${fr?'Mon compte':'My account'}</a><button class="primary" data-retry>${action}</button></div>`);
+    gate.querySelector('[data-retry]')?.addEventListener('click',()=>acquire(moved));
+    window.dispatchEvent(new CustomEvent('navoflo:lease-lost',{detail:{product,moved}}));
   }
 
   async function heartbeat(){
@@ -92,7 +101,7 @@
       window.dispatchEvent(new CustomEvent('navoflo:lease-refreshed',{detail:d}));
     }catch(e){
       if(e.network){ return; } // hard expiry timer will close the app if connectivity does not return.
-      lockLease(fr?'La licence a été libérée, transférée ou utilisée sur un autre poste.':'The license was released, transferred, or moved to another device.');
+      lockLease(fr?'Cette licence vient d’être transférée ou reprise sur un autre poste. Navo2D a été verrouillé sur ce poste.':'This license was just transferred or taken over on another device. Navo2D has been locked on this device.',{moved:e.code==='LEASE_INVALID'});
     }
   }
 

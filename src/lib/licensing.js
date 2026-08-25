@@ -484,6 +484,13 @@ export async function acquireAppLease(request,env,context,payload={}){
     await logAudit(env,{organizationId:context.organization.id,actorUserId:context.user.id,action:'license.device_takeover',targetUserId:context.user.id,details:{from_device:conflicting.device_identifier,to_device:deviceIdentifier}});
   }
 
+  // A reload or a second tab on the same workstation receives a fresh token.
+  // Revoke older tokens from this same workstation first so a seat has one canonical live lease.
+  await env.NAVOFLO_DB.prepare(`
+    UPDATE app_leases SET revoked_at=datetime('now')
+    WHERE license_assignment_id=? AND device_id=? AND revoked_at IS NULL
+  `).bind(assignment.id,device.id).run();
+
   const rawToken=randomToken(32), tokenHash=await sha256(rawToken), expiresAt=new Date(Date.now()+LEASE_SECONDS*1000).toISOString();
   await env.NAVOFLO_DB.prepare(`
     INSERT INTO app_leases (license_assignment_id,user_id,device_id,product,lease_token_hash,expires_at)
