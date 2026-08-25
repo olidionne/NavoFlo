@@ -532,7 +532,7 @@ export async function releaseAppLease(env,context,payload={}){
 export async function featureAuthorized(request,env,feature){
   const email=await identityEmail(request,env); if(!email)return false;
   const context=await licensingContext(env,email,{includeMembers:false,touchLogin:true});
-  return Boolean(context?.entitlements?.[feature]);
+  return Boolean(context?.user?.licensed && context?.entitlements?.[feature]);
 }
 
 export function licensingJsonError(error){

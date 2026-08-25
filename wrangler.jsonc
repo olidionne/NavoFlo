@@ -5,7 +5,18 @@
   "compatibility_date": "2026-08-24",
   "assets": {
     "directory": "./public",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
+    "run_worker_first": [
+      "/api/*",
+      "/navo2d",
+      "/navo2d/*",
+      "/navo3d",
+      "/navo3d/*",
+      "/en/navo2d",
+      "/en/navo2d/*",
+      "/en/navo3d",
+      "/en/navo3d/*"
+    ]
   },
   "d1_databases": [
     {
