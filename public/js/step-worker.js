@@ -8,6 +8,7 @@ let exactModelId = null;
 let bindingByGeometry = new Map();
 let topologyByGeometry = new Map();
 let logicalFaceGroupCache = new Map();
+let logicalEdgeGroupCache = new Map();
 
 function getOcct() {
   if (!occtPromise) {
@@ -29,6 +30,7 @@ function releaseCurrent(occt) {
   bindingByGeometry = new Map();
   topologyByGeometry = new Map();
   logicalFaceGroupCache = new Map();
+  logicalEdgeGroupCache = new Map();
 }
 
 function plainNode(node) {
@@ -119,12 +121,22 @@ function sameCylinder(a,b){
   const perp=Math.hypot(d[0]-proj*ua[0],d[1]-proj*ua[1],d[2]-proj*ua[2]);
   return perp<=tol*2;
 }
+function exactGeometrySignature(occt,selection){
+  const r=exactRef(selection),out={family:'other'};
+  const type=occt.GetExactGeometryType(r.exactModelId,r.exactShapeHandle,r.kind,r.elementId);if(type?.ok)out.family=type.family;
+  const family=String(out.family||'').toLowerCase();
+  if(!['circle','circular','cylinder','cylindrical'].includes(family))return out;
+  const radius=occt.MeasureExactRadius(r.exactModelId,r.exactShapeHandle,r.kind,r.elementId);
+  if(radius?.ok){out.radius=radius.radius;out.localCenter=radius.localCenter;out.axisDirection=radius.localAxisDirection;}
+  else{const center=occt.MeasureExactCenter(r.exactModelId,r.exactShapeHandle,r.kind,r.elementId);if(center?.ok){out.localCenter=center.localCenter;out.axisDirection=center.localAxisDirection;}}
+  return out;
+}
 function logicalFaceGroup(occt,selection){
   const gid=String(selection.geometryId),fid=Number(selection.elementId),cacheKey=`${gid}:${fid}`;
   if(logicalFaceGroupCache.has(cacheKey))return logicalFaceGroupCache.get(cacheKey);
   const topo=topologyByGeometry.get(gid);
   if(!topo){const out=[fid];logicalFaceGroupCache.set(cacheKey,out);return out;}
-  const base=inspectSelection(occt,{...selection,kind:'face',elementId:fid,elementIds:undefined});
+  const base=exactGeometrySignature(occt,{...selection,kind:'face',elementId:fid,elementIds:undefined});
   if(!isCylinderFamily(base)){const out=[fid];logicalFaceGroupCache.set(cacheKey,out);return out;}
   const edgeToFaces=new Map();
   for(const face of topo.faces){for(const edge of face.edgeIndices||[]){const k=Number(edge);if(!edgeToFaces.has(k))edgeToFaces.set(k,[]);edgeToFaces.get(k).push(Number(face.id));}}
@@ -134,11 +146,45 @@ function logicalFaceGroup(occt,selection){
     const id=queue.shift(),face=byId.get(id);if(!face)continue;
     const neighbors=new Set();for(const edge of face.edgeIndices||[])for(const n of edgeToFaces.get(Number(edge))||[])if(n!==id)neighbors.add(n);
     for(const n of neighbors){if(group.has(n))continue;
-      const info=inspectSelection(occt,{...selection,kind:'face',elementId:n,elementIds:undefined});
+      const info=exactGeometrySignature(occt,{...selection,kind:'face',elementId:n,elementIds:undefined});
       if(sameCylinder(base,info)){group.add(n);queue.push(n);}
     }
   }
   const out=[...group].sort((a,b)=>a-b);for(const id of out)logicalFaceGroupCache.set(`${gid}:${id}`,out);return out;
+}
+
+function isCircleFamily(info){return ['circle','circular'].includes(String(info?.family||'').toLowerCase());}
+function sameCircle(a,b){
+  if(!isCircleFamily(a)||!isCircleFamily(b))return false;
+  const ra=Number(a.radius),rb=Number(b.radius),ca=vec3(a.localCenter),cb=vec3(b.localCenter),aa=vec3(a.axisDirection),ab=vec3(b.axisDirection);
+  if(!Number.isFinite(ra)||!Number.isFinite(rb)||!ca||!cb||!aa||!ab)return false;
+  const tol=Math.max(Math.abs(ra),Math.abs(rb),1)*1e-5;if(Math.abs(ra-rb)>tol)return false;
+  if(Math.hypot(ca[0]-cb[0],ca[1]-cb[1],ca[2]-cb[2])>tol*2)return false;
+  const la=Math.hypot(...aa),lb=Math.hypot(...ab);if(la<1e-12||lb<1e-12)return false;
+  return Math.abs((aa[0]*ab[0]+aa[1]*ab[1]+aa[2]*ab[2])/(la*lb))>=0.99999;
+}
+function logicalEdgeGroup(occt,selection){
+  const gid=String(selection.geometryId),eid=Number(selection.elementId),cacheKey=`${gid}:${eid}`;
+  if(logicalEdgeGroupCache.has(cacheKey))return logicalEdgeGroupCache.get(cacheKey);
+  const topo=topologyByGeometry.get(gid),base=exactGeometrySignature(occt,{...selection,kind:'edge',elementId:eid,elementIds:undefined});
+  if(!topo||!isCircleFamily(base)){const out=[eid];logicalEdgeGroupCache.set(cacheKey,out);return out;}
+  const group=[];for(const edge of topo.edges||[]){const id=Number(edge.id);const info=exactGeometrySignature(occt,{...selection,kind:'edge',elementId:id,elementIds:undefined});if(sameCircle(base,info))group.push(id);}
+  const out=[...new Set(group.length?group:[eid])].sort((a,b)=>a-b);for(const id of out)logicalEdgeGroupCache.set(`${gid}:${id}`,out);return out;
+}
+function allLogicalFaceGroups(occt){
+  const groups=[];
+  for(const [geometryId,topo] of topologyByGeometry){
+    const seen=new Set();
+    for(const face of topo.faces||[]){
+      const fid=Number(face.id);if(seen.has(fid))continue;
+      const faceIds=logicalFaceGroup(occt,{geometryId,elementId:fid,kind:'face'});for(const id of faceIds)seen.add(id);
+      if(faceIds.length<2)continue;
+      const faceSet=new Set(faceIds),seamEdgeIds=[];
+      for(const edge of topo.edges||[]){const owners=(edge.ownerFaceIds||[]).filter(id=>faceSet.has(Number(id)));if(owners.length>=2)seamEdgeIds.push(Number(edge.id));}
+      groups.push({geometryId,faceIds,seamEdgeIds:[...new Set(seamEdgeIds)]});
+    }
+  }
+  return groups;
 }
 
 function shapeHandle(geometryId) {
@@ -198,8 +244,9 @@ function inspectSelection(occt, selection) {
   }
 
   if (r.kind === 'edge') {
-    const length = occt.MeasureExactEdgeLength(r.exactModelId, r.exactShapeHandle, r.kind, r.elementId);
-    if (length?.ok) out.length = length.value;
+    const ids=faceIdsForSelection(selection);let lengthSum=0,lengthOk=false;
+    for(const edgeId of ids){const length=occt.MeasureExactEdgeLength(r.exactModelId,r.exactShapeHandle,r.kind,edgeId);if(length?.ok&&Number.isFinite(length.value)){lengthSum+=length.value;lengthOk=true;}}
+    if(lengthOk)out.length=lengthSum;if(ids.length>1)out.logicalEdgeIds=ids;
   }
 
   if (r.kind === 'face') {
@@ -320,8 +367,9 @@ self.onmessage = async (event) => {
       bindingByGeometry = new Map(
         Array.from(raw.exactGeometryBindings ?? []).map(b => [String(b.geometryId), Number(b.exactShapeHandle)])
       );
-      topologyByGeometry = new Map(Array.from(raw.geometries ?? []).map(g=>[String(g.id),{faces:Array.from(g.faces??[]).map(f=>({id:Number(f.id),edgeIndices:Array.from(f.edgeIndices??[]).map(Number)}))}]));
+      topologyByGeometry = new Map(Array.from(raw.geometries ?? []).map(g=>[String(g.id),{faces:Array.from(g.faces??[]).map(f=>({id:Number(f.id),edgeIndices:Array.from(f.edgeIndices??[]).map(Number)})),edges:Array.from(g.edges??[]).map(e=>({id:Number(e.id),ownerFaceIds:Array.from(e.ownerFaceIds??[]).map(Number)}))}]));
       logicalFaceGroupCache = new Map();
+  logicalEdgeGroupCache = new Map();
 
       const result = {
         success: true,
@@ -350,6 +398,15 @@ self.onmessage = async (event) => {
     if (action === 'logical-face-group') {
       const faceIds=logicalFaceGroup(occt,payload.selection);
       self.postMessage({id,ok:true,result:{faceIds}});
+      return;
+    }
+    if (action === 'logical-edge-group') {
+      const edgeIds=logicalEdgeGroup(occt,payload.selection);
+      self.postMessage({id,ok:true,result:{edgeIds}});
+      return;
+    }
+    if (action === 'logical-face-groups') {
+      self.postMessage({id,ok:true,result:{groups:allLogicalFaceGroups(occt)}});
       return;
     }
 

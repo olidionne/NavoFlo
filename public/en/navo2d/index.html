@@ -8,8 +8,8 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/navo2d.css?v=8.15.1">
-  <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.1">
+  <link rel="stylesheet" href="/css/navo2d.css?v=8.15.2">
+  <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.2">
 </head>
 <body class="navo2d-page">
 <header class="n2-appbar">
@@ -33,7 +33,8 @@
       <section class="n2-ribbon-group n2-group-file">
         <div class="n2-ribbon-layout n2-file-layout">
           <label class="n2-tool n2-tool-large n2-open"><input id="n2-file" type="file" accept=".dxf" multiple hidden><span class="n2-icon">＋</span><span>Open</span></label>
-          <button id="n2-export" class="n2-tool n2-tool-large primary" type="button" disabled><span class="n2-icon">⇩</span><span>DXF</span></button>
+          <div class="n2-ribbon-stack n2-file-save-stack"><button id="n2-save" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">⌁</span><span>Save</span></button><button id="n2-save-as" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">⇩</span><span>Save As…</span></button></div>
+          <button id="n2-export" class="n2-tool n2-tool-large primary" type="button" disabled title="Export a DXF copy"><span class="n2-icon">⇩</span><span>DXF</span></button>
         </div><small>FILE</small>
       </section>
       <section class="n2-ribbon-group n2-group-draw">
@@ -157,6 +158,6 @@
     </div>
   </div>
 </main>
-<script src="/js/license-lease-v89.js?v=8.15.1" data-product="navo2d" data-module="/js/navo2d.js?v=8.15.1"></script>
+<script src="/js/license-lease-v89.js?v=8.15.2" data-product="navo2d" data-module="/js/navo2d.js?v=8.15.2"></script>
 </body>
 </html>

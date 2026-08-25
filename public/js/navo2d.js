@@ -9,14 +9,14 @@ const T=FR?{
   selected:'sélectionnée(s)', noSelection:'Aucune sélection', deleted:'Entité(s) supprimée(s).', moved:'Entité(s) déplacée(s).', exported:'DXF exporté.',
   analysisDone:'Analyse terminée.', openContours:'Contours ouverts', duplicates:'Doublons potentiels', unsupported:'Entités non prises en charge', approx:'Entités approximées', layers:'Layers',
   clean:'Aucun problème évident détecté.', chooseSelection:'Sélectionnez au moins une entité.', parser:'Moteur DXF', normalized:'DXF normalisé', snap:'Snap',
-  unused:'INUTILISÉ', frozen:'GELÉ', off:'OFF', window:'FENÊTRE', crossing:'CROSSING', selectAdded:'Sélection ajoutée', selectRemoved:'Sélection retirée', closeDirty:'Ce dessin contient des modifications non exportées. Fermer quand même ?',
+  unused:'INUTILISÉ', frozen:'GELÉ', off:'OFF', window:'FENÊTRE', crossing:'CROSSING', selectAdded:'Sélection ajoutée', selectRemoved:'Sélection retirée', closeDirty:'Ce dessin contient des modifications non enregistrées. Fermer quand même ?',
 }: {
   noDxf:'No DXF', entities:'entities', units:'Units', unitless:'unitless', loadFail:'Unable to read this DXF.',
   firstPoint:'Click the first point.', secondPoint:'Click the second point.', moveBase:'Click the base point.', moveTarget:'Click the target point.',
   selected:'selected', noSelection:'No selection', deleted:'Entity/entities deleted.', moved:'Entity/entities moved.', exported:'DXF exported.',
   analysisDone:'Analysis complete.', openContours:'Open contours', duplicates:'Potential duplicates', unsupported:'Unsupported entities', approx:'Approximated entities', layers:'Layers',
   clean:'No obvious issue detected.', chooseSelection:'Select at least one entity.', parser:'DXF engine', normalized:'Normalized DXF', snap:'Snap',
-  unused:'UNUSED', frozen:'FROZEN', off:'OFF', window:'WINDOW', crossing:'CROSSING', selectAdded:'Selection added', selectRemoved:'Selection removed', closeDirty:'This drawing has unexported changes. Close it anyway?',
+  unused:'UNUSED', frozen:'FROZEN', off:'OFF', window:'WINDOW', crossing:'CROSSING', selectAdded:'Selection added', selectRemoved:'Selection removed', closeDirty:'This drawing has unsaved changes. Close it anyway?',
  };
 
 const CMDT=FR?{
@@ -56,7 +56,7 @@ const CMDT=FR?{
 const $=id=>document.getElementById(id);
 const E={
   workspace:$('n2-workspace'),canvas:$('n2-canvas'),file:$('n2-file'),empty:$('n2-empty'),fullscreen:$('n2-fullscreen'),
-  select:$('n2-select'),measure:$('n2-measure'),move:$('n2-move'),del:$('n2-delete'),undo:$('n2-undo'),redo:$('n2-redo'),fit:$('n2-fit'),grid:null,snap:null,layers:$('n2-layers'),analyze:$('n2-analyze'),props:$('n2-properties'),export:$('n2-export'),close:$('n2-close'),
+  select:$('n2-select'),measure:$('n2-measure'),move:$('n2-move'),del:$('n2-delete'),undo:$('n2-undo'),redo:$('n2-redo'),fit:$('n2-fit'),grid:null,snap:null,layers:$('n2-layers'),analyze:$('n2-analyze'),props:$('n2-properties'),export:$('n2-export'),save:$('n2-save'),saveAs:$('n2-save-as'),close:$('n2-close'),
   layerDrawer:$('n2-layer-drawer'),propDrawer:$('n2-prop-drawer'),layerList:$('n2-layer-list'),layersAll:$('n2-layers-all'),layersNone:$('n2-layers-none'),
   propFile:$('n2-prop-file'),propUnits:$('n2-prop-units'),propEntities:$('n2-prop-entities'),propLayers:$('n2-prop-layers'),propSize:$('n2-prop-size'),selectionInfo:$('n2-selection-info'),analysisInfo:$('n2-analysis-info'),
   measureCard:$('n2-measure-card'),measureMain:$('n2-measure-main'),measureDx:$('n2-measure-dx'),measureDy:$('n2-measure-dy'),measureHelp:$('n2-measure-help'),measureClear:$('n2-measure-clear'),
@@ -98,6 +98,9 @@ let toastTimer=0;
 // each tab owns its own edit/history/view state while drafting preferences remain per user.
 const openDocuments=new Map();
 let activeDocumentId=null,documentSeq=0,untitledSeq=0;
+let navoEntityClipboard=null;
+const FSA_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
+const FSA_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
 function nextDocumentId(){return`n2doc-${++documentSeq}`;}
 function captureDocumentState(){
   return{
@@ -129,9 +132,9 @@ function restoreDocumentState(doc){
   resetTransientDocumentState();
   syncUI();renderLayerList();renderProperties();syncDraftingUI();resize();
 }
-function registerCurrentDocument(name=state.file?.name||`Drawing${++untitledSeq}.dxf`){
+function registerCurrentDocument(name=state.file?.name||`Drawing${++untitledSeq}.dxf`,fileHandle=null){
   const id=nextDocumentId();
-  const doc={id,name,state:captureDocumentState(),dirty:Boolean(state.dirty)};
+  const doc={id,name,state:captureDocumentState(),dirty:Boolean(state.dirty),fileHandle:fileHandle||null};
   openDocuments.set(id,doc);activeDocumentId=id;renderDocumentTabs();return id;
 }
 function renderDocumentTabs(){
@@ -172,9 +175,17 @@ function closeDocument(id=activeDocumentId){
   else clearDrawingState();
   renderDocumentTabs();
 }
-async function openDxfFiles(files){
-  const list=[...files].filter(file=>/\.dxf$/i.test(file.name));
-  for(const file of list)await loadDxf(file);
+async function openDxfFiles(items){
+  const list=[...items].map(item=>item?.file?item:{file:item,handle:null}).filter(item=>/\.dxf$/i.test(item.file?.name||''));
+  for(const item of list)await loadDxf(item.file,item.handle||null);
+}
+async function pickDxfFiles(){
+  if(!FSA_OPEN_SUPPORTED){E.file.click();return;}
+  try{
+    const handles=await window.showOpenFilePicker({multiple:true,types:[{description:'DXF',accept:{'application/dxf':['.dxf'],'text/plain':['.dxf']}}]});
+    const items=[];for(const handle of handles)items.push({handle,file:await handle.getFile()});
+    if(items.length)await openDxfFiles(items);
+  }catch(error){if(error?.name!=='AbortError'){console.warn('Navo2D file picker',error);E.file.click();}}
 }
 
 
@@ -224,6 +235,7 @@ async function init(){
 function bindUI(){
   addEventListener('resize',resize);
   E.file.addEventListener('change',()=>{const files=[...(E.file.files||[])];if(files.length)openDxfFiles(files);E.file.value='';});
+  document.querySelectorAll('.n2-open,[data-n2-open-picker],label[for="n2-file"]').forEach(el=>el.addEventListener('click',event=>{if(!FSA_OPEN_SUPPORTED)return;event.preventDefault();pickDxfFiles();}));
   ['dragenter','dragover'].forEach(type=>E.workspace.addEventListener(type,e=>{e.preventDefault();E.workspace.classList.add('drag-over');}));
   ['dragleave','drop'].forEach(type=>E.workspace.addEventListener(type,e=>{e.preventDefault();E.workspace.classList.remove('drag-over');}));
   E.workspace.addEventListener('drop',e=>{const files=[...(e.dataTransfer?.files||[])].filter(x=>/\.dxf$/i.test(x.name));if(files.length)openDxfFiles(files);});
@@ -245,8 +257,10 @@ function bindUI(){
   E.props.addEventListener('click',()=>toggleDrawer('properties'));
   E.analyze.addEventListener('click',runAnalysis);
   E.export.addEventListener('click',exportDxf);
+  E.save?.addEventListener('click',()=>saveDxf(false));
+  E.saveAs?.addEventListener('click',()=>saveDxf(true));
   E.close.addEventListener('click',()=>closeDocument());
-  E.docTabAdd?.addEventListener('click',()=>E.file.click());
+  E.docTabAdd?.addEventListener('click',pickDxfFiles);
   E.fullscreen?.addEventListener('click',toggleFullscreen);
   E.layersAll.addEventListener('click',()=>setAllLayers(true));
   E.layersNone.addEventListener('click',()=>setAllLayers(false));
@@ -312,7 +326,7 @@ function bindUI(){
   renderDocumentTabs();
 }
 
-async function loadDxf(file){
+async function loadDxf(file,fileHandle=null){
   const previousId=activeDocumentId;
   try{
     const text=await file.text();
@@ -327,7 +341,7 @@ async function loadDxf(file){
     state.view={scale:1,cx:0,cy:0};resetTransientDocumentState();
     cancelCommand(false);
     rebuildLayers();recomputeBounds();fitView();syncUI();renderLayerList();renderProperties();syncDraftingUI();
-    E.empty.hidden=true;registerCurrentDocument(file.name);toast(`${file.name} · ${state.entities.length} ${T.entities}`);
+    E.empty.hidden=true;registerCurrentDocument(file.name,fileHandle);toast(`${file.name} · ${state.entities.length} ${T.entities}`);
   }catch(err){
     console.error(err);toast(T.loadFail);
     if(previousId&&openDocuments.has(previousId)){activeDocumentId=previousId;restoreDocumentState(openDocuments.get(previousId));renderDocumentTabs();}
@@ -1934,6 +1948,39 @@ function deleteSelected(){cancelGripEdit(false);if(!state.selected.size)return;p
 function translateSelected(dx,dy){for(const e of state.entities)if(state.selected.has(e.id))translateEntity(e,dx,dy);recomputeBounds();syncUI();}
 function translateEntity(e,dx,dy){const mv=q=>{q.x+=dx;q.y+=dy;};if(e.type==='LINE'){mv(e.p1);mv(e.p2);}else if(e.type==='POLYLINE'){for(const q of e.points)mv(q);}else if(e.type==='CIRCLE'||e.type==='ARC')mv(e.center);else if(e.type==='POINT'||e.type==='TEXT')mv(e.point);}
 
+function clipboardEntityPayload(){
+  const entities=selectedEntities().map(e=>{const n=cloneEntity(e,false);delete n.id;return n;});
+  if(!entities.length)return null;
+  const layerNames=[...new Set(entities.map(e=>e.layer).filter(Boolean))],layers={};for(const name of layerNames){const def=state.layerDefinitions.get(name);if(def)layers[name]=JSON.parse(JSON.stringify(def));}
+  return{version:1,kind:'navoflo-2d-entities',unitCode:state.unitCode,unitLabel:state.unitLabel,layers,entities};
+}
+async function copySelectedEntitiesToClipboard(){
+  const payload=clipboardEntityPayload();if(!payload)return;
+  navoEntityClipboard=payload;
+  const text=`NAVOFLO_DXF_CLIPBOARD_V1\n${JSON.stringify(payload)}`;
+  try{await navigator.clipboard?.writeText?.(text);}catch{}
+  toast(FR?`${payload.entities.length} entité(s) copiée(s).`:`${payload.entities.length} entity/entities copied.`);
+}
+function importClipboardDxfText(text){
+  try{
+    if(!/SECTION/i.test(text)||!/ENTITIES/i.test(text))return null;
+    const dxf=new DxfParser().parseSync(text);if(!dxf)return null;
+    const beforeUnsupported=state.unsupported;state.unsupported=[];const entities=normalizeDxf(dxf);state.unsupported=beforeUnsupported;return entities.map(e=>{const n=cloneEntity(e,false);delete n.id;return n;});
+  }catch{return null;}
+}
+async function pasteEntitiesFromClipboard(){
+  let payload=navoEntityClipboard;
+  try{
+    const text=await navigator.clipboard?.readText?.();
+    if(text?.startsWith('NAVOFLO_DXF_CLIPBOARD_V1\n')){const parsed=JSON.parse(text.slice(text.indexOf('\n')+1));if(parsed?.kind==='navoflo-2d-entities'&&Array.isArray(parsed.entities))payload=parsed;}
+    else if(text){const imported=importClipboardDxfText(text);if(imported?.length)payload={version:1,kind:'navoflo-2d-entities',entities:imported};}
+  }catch{}
+  if(!payload?.entities?.length)return toast(FR?'Presse-papiers CAD vide ou non pris en charge.':'CAD clipboard is empty or unsupported.');
+  pushHistory();const created=[];
+  for(const [name,def] of Object.entries(payload.layers||{}))if(!state.layerDefinitions.has(name))state.layerDefinitions.set(name,{...def,name});
+  for(const src of payload.entities){const e=JSON.parse(JSON.stringify(src));e.id=nextEntityId();if(!e.layer)e.layer=state.activeLayer||'0';ensureLayerDefinition(e.layer);state.entities.push(e);created.push(e.id);}
+  state.selected=new Set(created);afterGeometryChange();toast(FR?`${created.length} entité(s) collée(s).`:`${created.length} entity/entities pasted.`);
+}
 function runAnalysis(){
   const open=state.entities.filter(e=>e.type==='POLYLINE'&&!e.closed).length,approx=state.entities.filter(e=>e.approx).length,duplicates=countDuplicates(),unsupported=state.unsupported.length;
   state.analysis={open,duplicates,unsupported,approx};renderAnalysis();toggleDrawer('properties',true);toast(T.analysisDone);
@@ -1952,21 +1999,42 @@ function syncSelectionUI(){
   syncLayerPicker();
 }
 function syncHistoryButtons(){E.undo.disabled=!state.history.length;E.redo.disabled=!state.future.length;}
-function syncUI(){const has=Boolean(state.file);for(const b of[E.select,E.measure,E.fit,E.grid,E.snap,E.layers,E.analyze,E.props,E.export,E.close,E.layerSelect].filter(Boolean))b.disabled=!has;E.statusFile.textContent=state.file?.name||T.noDxf;E.statusEntities.textContent=has?`${state.entities.length} ${T.entities}`:'—';E.statusUnits.textContent=has?state.unitLabel:'—';if(E.currentLayer)E.currentLayer.textContent=has?`Layer: ${state.activeLayer||'0'}`:'Layer: —';E.empty.hidden=has;syncHistoryButtons();renderProperties();syncDraftingUI();syncLayerPicker();updateCommandPrompt();renderDocumentTabs();}
+function syncUI(){const has=Boolean(state.file);for(const b of[E.select,E.measure,E.fit,E.grid,E.snap,E.layers,E.analyze,E.props,E.export,E.save,E.saveAs,E.close,E.layerSelect].filter(Boolean))b.disabled=!has;E.statusFile.textContent=state.file?.name||T.noDxf;E.statusEntities.textContent=has?`${state.entities.length} ${T.entities}`:'—';E.statusUnits.textContent=has?state.unitLabel:'—';if(E.currentLayer)E.currentLayer.textContent=has?`Layer: ${state.activeLayer||'0'}`:'Layer: —';E.empty.hidden=has;syncHistoryButtons();renderProperties();syncDraftingUI();syncLayerPicker();updateCommandPrompt();renderDocumentTabs();}
 function clearFile(){closeDocument();}
 function toggleDrawer(which,force){const el=which==='layers'?E.layerDrawer:E.propDrawer,other=which==='layers'?E.propDrawer:E.layerDrawer;const show=force??el.hidden;el.hidden=!show;if(show)other.hidden=true;if(which==='properties'&&show)renderProperties();}
 
+function validatedDxfText(){
+  const result=writeDxf();
+  const check=validateExportDxf(result.text);
+  if(result.written!==state.entities.length||check.entities!==result.written)throw new Error(`DXF entity mismatch: model=${state.entities.length}, written=${result.written}, parsed=${check.entities}`);
+  if(check.layers<state.layers.size)throw new Error(`DXF layer mismatch: model=${state.layers.size}, parsed=${check.layers}`);
+  return result;
+}
+async function saveDxf(forceSaveAs=false){
+  if(!state.file)return;
+  try{
+    const result=validatedDxfText();
+    const doc=activeDocumentId?openDocuments.get(activeDocumentId):null;
+    let handle=!forceSaveAs?doc?.fileHandle:null;
+    if(!handle&&FSA_SAVE_SUPPORTED){
+      handle=await window.showSaveFilePicker({suggestedName:state.file?.name||'Drawing.dxf',types:[{description:'DXF',accept:{'application/dxf':['.dxf']}}]});
+    }
+    if(handle){
+      const writable=await handle.createWritable();await writable.write(new Blob([result.text],{type:'application/dxf'}));await writable.close();
+      const savedFile=await handle.getFile();state.file=savedFile;if(doc){doc.fileHandle=handle;doc.name=savedFile.name;}
+    }else{
+      const name=state.file?.name||'Drawing.dxf';downloadBlob(result.text,name,'application/dxf');
+    }
+    state.rawText=result.text;state.dirty=false;saveActiveDocumentState();renderDocumentTabs();syncUI();
+    commandLog(`${forceSaveAs?'SAVEAS':'QSAVE'} OK · ${result.written}/${state.entities.length} ${T.entities}`);toast(FR?'DXF sauvegardé.':'DXF saved.');
+  }catch(error){
+    if(error?.name==='AbortError')return;console.error('Navo2D save failed',error);commandLog(`DXF SAVE ERROR · ${error?.message||error}`);toast(FR?'Sauvegarde DXF annulée.':'DXF save canceled.');
+  }
+}
 function exportDxf(){
   if(!state.file)return;
   try{
-    const result=writeDxf();
-    const check=validateExportDxf(result.text);
-    if(result.written!==state.entities.length||check.entities!==result.written){
-      throw new Error(`DXF entity mismatch: model=${state.entities.length}, written=${result.written}, parsed=${check.entities}`);
-    }
-    if(check.layers<state.layers.size){
-      throw new Error(`DXF layer mismatch: model=${state.layers.size}, parsed=${check.layers}`);
-    }
+    const result=validatedDxfText();
     const name=(state.file.name.replace(/\.dxf$/i,'')||'navo2d')+'-Navo2D.dxf';
     downloadBlob(result.text,name,'application/dxf');
     state.dirty=false;saveActiveDocumentState();renderDocumentTabs();
@@ -2142,7 +2210,7 @@ function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':
 const COMMAND_ALIASES=new Map(Object.entries({
   L:'LINE',LINE:'LINE',PL:'PLINE',PLINE:'PLINE',C:'CIRCLE',CIRCLE:'CIRCLE',A:'ARC',ARC:'ARC',
   REC:'RECTANG',RECTANG:'RECTANG',RECTANGLE:'RECTANG',
-  M:'MOVE',MOVE:'MOVE',CO:'COPY',CP:'COPY',COPY:'COPY',RO:'ROTATE',ROTATE:'ROTATE',MI:'MIRROR',MIRROR:'MIRROR',
+  M:'MOVE',MOVE:'MOVE',CO:'COPY',CP:'COPY',COPY:'COPY',COPYCLIP:'COPYCLIP',PASTECLIP:'PASTECLIP',RO:'ROTATE',ROTATE:'ROTATE',MI:'MIRROR',MIRROR:'MIRROR',
   SC:'SCALE',SCALE:'SCALE',O:'OFFSET',OFFSET:'OFFSET',E:'ERASE',ERASE:'ERASE',DEL:'ERASE',
   X:'EXPLODE',EXPLODE:'EXPLODE',J:'JOIN',JOIN:'JOIN',
   TR:'TRIM',TRIM:'TRIM',EX:'EXTEND',EXTEND:'EXTEND',F:'FILLET',FILLET:'FILLET',CHA:'CHAMFER',CHAMFER:'CHAMFER',
@@ -2156,7 +2224,7 @@ const COMMAND_ALIASES=new Map(Object.entries({
   U:'UNDO',UNDO:'UNDO',REDO:'REDO',
   OS:'OSNAP',OSNAP:'OSNAP',SNAP:'SNAP',ORTHO:'ORTHO',POLAR:'POLAR',
   T:'TEXT',TEXT:'TEXT',DT:'TEXT',DTEXT:'TEXT',ED:'TEXTEDIT',DDEDIT:'TEXTEDIT',TEXTEDIT:'TEXTEDIT',
-  NEW:'NEW',QNEW:'NEW',QSAVE:'SAVE',SAVE:'SAVE',OPEN:'OPEN',CLOSE:'CLOSE',PR:'PROPERTIES',CH:'PROPERTIES',PROPERTIES:'PROPERTIES',RE:'REGEN',REGEN:'REGEN'
+  NEW:'NEW',QNEW:'NEW',QSAVE:'SAVE',SAVE:'SAVE',SAVEAS:'SAVEAS',OPEN:'OPEN',CLOSE:'CLOSE',PR:'PROPERTIES',CH:'PROPERTIES',PROPERTIES:'PROPERTIES',RE:'REGEN',REGEN:'REGEN'
 }));
 
 const KNOWN_UNIMPLEMENTED=new Set([
@@ -2284,8 +2352,10 @@ function handleGlobalKeyDown(event){
     if(state.selected.size){event.preventDefault();startCommand('ERASE');}
     return;
   }
-  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='s'){event.preventDefault();if(state.file)exportDxf();return;}
-  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='o'){event.preventDefault();E.file.click();return;}
+  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='s'){event.preventDefault();if(state.file)saveDxf(event.shiftKey);return;}
+  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='o'){event.preventDefault();pickDxfFiles();return;}
+  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='c'&&state.selected.size){event.preventDefault();copySelectedEntitiesToClipboard();return;}
+  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='v'&&state.file){event.preventDefault();pasteEntitiesFromClipboard();return;}
   if((event.ctrlKey||event.metaKey)&&event.key==='1'){event.preventDefault();if(state.file)toggleDrawer('properties',true);return;}
   if((event.ctrlKey||event.metaKey)&&event.key==='0'){event.preventDefault();toggleFullscreen();return;}
   if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='g'){event.preventDefault();toggleDraftSetting('grid');return;}
@@ -2370,6 +2440,8 @@ function startCommand(rawName){
     commandLog(`${name} — ${CMDT.notYet}`);toast(`${name}: ${CMDT.notYet}`);return;
   }
 
+  if(name==='COPYCLIP'){if(state.selected.size)copySelectedEntitiesToClipboard();state.lastCommand='COPYCLIP';commandLog('COPYCLIP');return;}
+  if(name==='PASTECLIP'){if(state.file)pasteEntitiesFromClipboard();state.lastCommand='PASTECLIP';commandLog('PASTECLIP');return;}
   if(name==='UNDO'){undo();state.lastCommand='UNDO';commandLog('UNDO');return;}
   if(name==='REDO'){redo();state.lastCommand='REDO';commandLog('REDO');return;}
   if(name==='LAYER'){if(!state.file)ensureDrawing();toggleDrawer('layers',true);state.lastCommand='LAYER';commandLog('LAYER');return;}
@@ -2379,8 +2451,9 @@ function startCommand(rawName){
   if(name==='SNAP'){toggleDraftSetting('gridSnap');state.lastCommand='SNAP';return;}
   if(name==='ZOOM'||name==='ZOOMEXTENTS'){if(!state.file)return;fitView();state.lastCommand='ZOOM';commandLog('ZOOM Extents');return;}
   if(name==='NEW'){createBlankDrawing();state.lastCommand='NEW';return;}
-  if(name==='SAVE'){if(state.file)exportDxf();state.lastCommand='SAVE';commandLog('QSAVE');return;}
-  if(name==='OPEN'){E.file.click();state.lastCommand='OPEN';commandLog('OPEN');return;}
+  if(name==='SAVE'){if(state.file)saveDxf(false);state.lastCommand='SAVE';commandLog('QSAVE');return;}
+  if(name==='SAVEAS'){if(state.file)saveDxf(true);state.lastCommand='SAVEAS';commandLog('SAVEAS');return;}
+  if(name==='OPEN'){pickDxfFiles();state.lastCommand='OPEN';commandLog('OPEN');return;}
   if(name==='CLOSE'){if(state.file)clearFile();state.lastCommand='CLOSE';commandLog('CLOSE');return;}
   if(name==='PROPERTIES'){if(state.file)toggleDrawer('properties',true);state.lastCommand='PROPERTIES';commandLog('PROPERTIES');return;}
   if(name==='DIMSTYLE'){if(!state.file)ensureDrawing();openDimensionStyleEditor();state.lastCommand='DIMSTYLE';commandLog('DIMSTYLE');return;}
@@ -2472,6 +2545,7 @@ function afterSelectionConfirmed(name){
   if(name==='JOIN'){joinSelected();finishCommand();return;}
   if(name==='PEDIT'){peditSelection();finishCommand();return;}
   if(name==='MOVE'||name==='COPY'||name==='ROTATE'||name==='SCALE'||name==='STRETCH'){
+    state.command.data.sourceIds=[...state.selected];
     if(name==='STRETCH'&&!state.command.data.stretchRect&&state.lastCrossingRect)state.command.data.stretchRect={...state.lastCrossingRect};
     if(name==='ROTATE')Object.assign(state.command.data,{copy:false,referenceAngle:null,refP1:null,newAngleP1:null});
     if(name==='COPY')Object.assign(state.command.data,{sourceIds:[...state.selected],copyBatches:[],lastCopyIds:[]});
@@ -2479,6 +2553,7 @@ function afterSelectionConfirmed(name){
     state.command.step='base';setCommandPrompt(`${name} ${CMDT.basePoint}:`);return;
   }
   if(name==='MIRROR'){
+    state.command.data.sourceIds=[...state.selected];
     state.command.step='mirror1';setCommandPrompt(`${name} ${CMDT.mirrorFirst}:`);return;
   }
   if(name==='ARRAY'){state.command.step='arrayType';setCommandPrompt(FR?'ARRAY Type [Rectangulaire/Polaire] <Rectangulaire>:' :'ARRAY Type [Rectangular/Polar] <Rectangular>:');return;}
@@ -2813,10 +2888,10 @@ function commandPoint(point,event,fromKeyboard=false){
     if(c.step==='smartFirst'){
       const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
       if(hit?.type==='LINE'){
-        c.data.p1=copyPoint(hit.p1);c.data.p2=copyPoint(hit.p2);
+        c.data.firstId=hit.id;c.data.firstPick=copyPoint(point);c.data.p1=copyPoint(hit.p1);c.data.p2=copyPoint(hit.p2);
         const dx=Math.abs(hit.p2.x-hit.p1.x),dy=Math.abs(hit.p2.y-hit.p1.y),L=Math.hypot(dx,dy);
-        c.data.dimType=(Math.min(dx,dy)<=L*Math.sin(5*Math.PI/180))?'linear':'aligned';c.step='place';
-        setCommandPrompt(FR?'DIM Spécifiez la position de la ligne de cote:':'DIM Specify dimension line location:');return;
+        c.data.dimType=(Math.min(dx,dy)<=L*Math.sin(5*Math.PI/180))?'linear':'aligned';c.step='smartLineSecondOrPlace';
+        setCommandPrompt(FR?'DIM Sélectionnez une deuxième ligne pour une cote angulaire, ou placez la cote de longueur:':'DIM Select a second line for an angular dimension, or place the length dimension:');return;
       }
       if(hit?.type==='CIRCLE'||hit?.type==='ARC'){
         c.data.entityId=hit.id;c.data.dimType=hit.type==='CIRCLE'?'diameter':'radius';c.step='curvePlace';
@@ -2831,6 +2906,22 @@ function commandPoint(point,event,fromKeyboard=false){
       const dx=Math.abs(point.x-c.data.p1.x),dy=Math.abs(point.y-c.data.p1.y),L=Math.hypot(dx,dy);
       c.data.dimType=(Math.min(dx,dy)<=L*Math.sin(5*Math.PI/180))?'linear':'aligned';
       c.step='place';setCommandPrompt(FR?'DIM Spécifiez la position de la ligne de cote:':'DIM Specify dimension line location:');return;
+    }
+    if(c.step==='smartLineSecondOrPlace'){
+      const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+      const first=state.entities.find(x=>x.id===c.data.firstId);
+      if(hit?.type==='LINE'&&first&&hit.id!==first.id&&infiniteLineIntersection(first.p1,first.p2,hit.p1,hit.p2)){
+        c.data.secondId=hit.id;c.data.secondPick=copyPoint(point);c.step='angularPlace';
+        setCommandPrompt(FR?'DIM Spécifiez la position de l’arc de cote:':'DIM Specify dimension arc line location:');return;
+      }
+      const items=c.data.dimType==='linear'?buildLinearDimension(c.data.p1,c.data.p2,point,'auto'):buildAlignedDimension(c.data.p1,c.data.p2,point);
+      const meta=c.data.dimType==='linear'?{kind:'linear',p1:copyPoint(c.data.p1),p2:copyPoint(c.data.p2),location:copyPoint(point),orientation:'auto',arrowMode:state.dimArrowMode}:{kind:'aligned',p1:copyPoint(c.data.p1),p2:copyPoint(c.data.p2),location:copyPoint(point),arrowMode:state.dimArrowMode};
+      if(commitDimension(items,meta))finishCommand();return;
+    }
+    if(c.step==='angularPlace'){
+      const a=state.entities.find(x=>x.id===c.data.firstId),b=state.entities.find(x=>x.id===c.data.secondId);if(!a||!b)return cancelCommand(true);
+      const items=buildAngularDimension(a,b,c.data.firstPick,c.data.secondPick,point);
+      if(commitDimension(items,{kind:'angular',firstId:a.id,secondId:b.id,firstPick:copyPoint(c.data.firstPick),secondPick:copyPoint(c.data.secondPick),location:copyPoint(point),arrowMode:state.dimArrowMode}))finishCommand();return;
     }
     if(c.step==='place'){
       const items=c.data.dimType==='linear'?buildLinearDimension(c.data.p1,c.data.p2,point,'auto'):buildAlignedDimension(c.data.p1,c.data.p2,point);
@@ -3115,7 +3206,7 @@ function commandPoint(point,event,fromKeyboard=false){
 function commandNeedsPoint(c){
   if(!c||c.selecting)return false;
   if(['LINE','PLINE','ARC','RECTANG','DIST','ID'].includes(c.name))return true;
-  if(c.name==='DIM')return ['smartFirst','smartSecond','place','curvePlace'].includes(c.step);
+  if(c.name==='DIM')return ['smartFirst','smartSecond','smartLineSecondOrPlace','angularPlace','place','curvePlace'].includes(c.step);
   if(c.name==='DIMLINEAR'||c.name==='DIMALIGNED')return ['first','second','place'].includes(c.step);
   if(c.name==='DIMRADIUS'||c.name==='DIMDIAMETER')return ['selectEntity','place'].includes(c.step);
   if(c.name==='DIMANGULAR')return ['firstLine','secondLine','place'].includes(c.step);
@@ -3402,10 +3493,28 @@ function buildDiameterDimension(e,location,groupId='preview',meta=null){
   if(L>e.radius+style.textHeight*1.5){addDoglegLeader(items,q2,label,style,groupId,meta,1);items.push(dimText(value,label,0,style,groupId));return items;}
   addDimensionLineWithArrows(items,q1,q2,u,value,style,meta,groupId);items.push(dimText(value,c,Math.atan2(u.y,u.x),style,groupId));return items;
 }
+function positiveAngleSpan(start,end){let span=(end-start)%(Math.PI*2);if(span<0)span+=Math.PI*2;return span;}
+function angleFallsInSpan(angle,start,span){return positiveAngleSpan(start,angle)<=span+1e-9;}
 function buildAngularDimension(a,b,pickA,pickB,location,groupId='preview',meta=null){
-  if(a?.type!=='LINE'||b?.type!=='LINE')return[];const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);if(!I)return[];const d1=branchDirection(a,I,pickA),d2=branchDirection(b,I,pickB);if(!d1||!d2)return[];const dot=Math.max(-1,Math.min(1,d1.x*d2.x+d1.y*d2.y)),theta=Math.acos(dot);if(theta<1e-7||Math.PI-theta<1e-7)return[];const style=dimensionStyle(meta),minR=style.textHeight*2.4,r=Math.max(dist(I,location),minR),cross=d1.x*d2.y-d1.y*d2.x,sdir=cross>=0?d1:d2,edir=cross>=0?d2:d1,start=Math.atan2(sdir.y,sdir.x),end=Math.atan2(edir.y,edir.x),items=[],value=`${dimensionNumber(theta*180/Math.PI,meta)}°`;
-  const arc=dimArc(I,r,start,end,groupId);if(arc)items.push(arc);const ps={x:I.x+sdir.x*r,y:I.y+sdir.y*r},pe={x:I.x+edir.x*r,y:I.y+edir.y*r},ts={x:-sdir.y,y:sdir.x},te={x:-edir.y,y:edir.x},mode=resolvedArrowMode(meta,r*theta,dimensionTextWidth(value,style),style),baseOutside=mode==='outside',outside1=baseOutside!==Boolean(meta?.arrow1Flipped),outside2=baseOutside!==Boolean(meta?.arrow2Flipped);dimArrow(items,ps,outside1?{x:-ts.x,y:-ts.y}:ts,style.arrow,groupId);dimArrow(items,pe,outside2?te:{x:-te.x,y:-te.y},style.arrow,groupId);
-  const es1=dimLine({x:I.x+sdir.x*(r-style.textHeight*.65),y:I.y+sdir.y*(r-style.textHeight*.65)},{x:I.x+sdir.x*(r+style.extBeyond),y:I.y+sdir.y*(r+style.extBeyond)},groupId),es2=dimLine({x:I.x+edir.x*(r-style.textHeight*.65),y:I.y+edir.y*(r-style.textHeight*.65)},{x:I.x+edir.x*(r+style.extBeyond),y:I.y+edir.y*(r+style.extBeyond)},groupId);if(es1)items.push(es1);if(es2)items.push(es2);const midA=start+theta/2,tc={x:I.x+Math.cos(midA)*(r+style.textHeight*.62),y:I.y+Math.sin(midA)*(r+style.textHeight*.62)};items.push(dimText(value,tc,0,style,groupId));return items;
+  if(a?.type!=='LINE'||b?.type!=='LINE'||!location)return[];
+  const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);if(!I)return[];
+  const d1=branchDirection(a,I,pickA),d2=branchDirection(b,I,pickB);if(!d1||!d2)return[];
+  let startDir=d1,endDir=d2,start=Math.atan2(d1.y,d1.x),end=Math.atan2(d2.y,d2.x);
+  const ccw=positiveAngleSpan(start,end),locAngle=Math.atan2(location.y-I.y,location.x-I.x);
+  if(!angleFallsInSpan(locAngle,start,ccw)){startDir=d2;endDir=d1;start=Math.atan2(d2.y,d2.x);end=Math.atan2(d1.y,d1.x);}
+  const theta=positiveAngleSpan(start,end);if(theta<1e-7||Math.PI*2-theta<1e-7)return[];
+  const style=dimensionStyle(meta),minR=style.textHeight*2.4,r=Math.max(dist(I,location),minR),items=[],value=`${dimensionNumber(theta*180/Math.PI,meta)}°`;
+  const arc=dimArc(I,r,start,end,groupId);if(arc)items.push(arc);
+  const ps={x:I.x+startDir.x*r,y:I.y+startDir.y*r},pe={x:I.x+endDir.x*r,y:I.y+endDir.y*r};
+  const ts={x:-startDir.y,y:startDir.x},te={x:-endDir.y,y:endDir.x};
+  const mode=resolvedArrowMode(meta,r*theta,dimensionTextWidth(value,style),style),baseOutside=mode==='outside',outside1=baseOutside!==Boolean(meta?.arrow1Flipped),outside2=baseOutside!==Boolean(meta?.arrow2Flipped);
+  dimArrow(items,ps,outside1?{x:-ts.x,y:-ts.y}:ts,style.arrow,groupId);
+  dimArrow(items,pe,outside2?te:{x:-te.x,y:-te.y},style.arrow,groupId);
+  for(const dir of [startDir,endDir]){
+    const line=dimLine({x:I.x+dir.x*style.extGap,y:I.y+dir.y*style.extGap},{x:I.x+dir.x*(r+style.extBeyond),y:I.y+dir.y*(r+style.extBeyond)},groupId);if(line)items.push(line);
+  }
+  const midA=start+theta/2,tc={x:I.x+Math.cos(midA)*(r+style.textHeight*.68),y:I.y+Math.sin(midA)*(r+style.textHeight*.68)};
+  items.push(dimText(value,tc,0,style,groupId));return items;
 }
 function buildDimensionFromMeta(meta,groupId='preview'){
   if(!meta)return[];if(meta.kind==='linear')return buildLinearDimension(meta.p1,meta.p2,meta.location,meta.orientation||'auto',groupId,meta);if(meta.kind==='aligned')return buildAlignedDimension(meta.p1,meta.p2,meta.location,groupId,meta);if(meta.kind==='radius'||meta.kind==='diameter'){const e=state.entities.find(x=>x.id===meta.sourceEntityId);return meta.kind==='radius'?buildRadiusDimension(e,meta.location,groupId,meta):buildDiameterDimension(e,meta.location,groupId,meta);}if(meta.kind==='angular'){const a=state.entities.find(x=>x.id===meta.firstId),b=state.entities.find(x=>x.id===meta.secondId);return buildAngularDimension(a,b,meta.firstPick,meta.secondPick,meta.location,groupId,meta);}return[];
@@ -3417,7 +3526,7 @@ function commitDimension(items,meta=null){
   for(const src of valid){const e=JSON.parse(JSON.stringify(src));e.id=nextEntityId();e.layer='DIMENSIONS';e.dimGenerated=true;e.dimGroupId=gid;if(m)e.dimMeta=JSON.parse(JSON.stringify(m));state.entities.push(e);}state.selected.clear();afterGeometryChange();toast(FR?'Cote créée.':'Dimension created.');return true;
 }
 function dimensionPreviewForCommand(c,p){
-  if(!c||!p)return[];if((c.name==='DIM'||c.name==='DIMLINEAR'||c.name==='DIMALIGNED')&&c.step==='place'){if(c.name==='DIMLINEAR'||c.data.dimType==='linear')return buildLinearDimension(c.data.p1,c.data.p2,p,'auto');return buildAlignedDimension(c.data.p1,c.data.p2,p);}if(c.name==='DIM'&&c.step==='curvePlace'){const e=state.entities.find(x=>x.id===c.data.entityId);return c.data.dimType==='diameter'?buildDiameterDimension(e,p):buildRadiusDimension(e,p);}if((c.name==='DIMRADIUS'||c.name==='DIMDIAMETER')&&c.step==='place'){const e=state.entities.find(x=>x.id===c.data.entityId);return c.name==='DIMRADIUS'?buildRadiusDimension(e,p):buildDiameterDimension(e,p);}if(c.name==='DIMANGULAR'&&c.step==='place'){const a=state.entities.find(x=>x.id===c.data.firstId),b=state.entities.find(x=>x.id===c.data.secondId);return buildAngularDimension(a,b,c.data.firstPick,c.data.secondPick,p);}return[];
+  if(!c||!p)return[];if(c.name==='DIM'&&c.step==='smartLineSecondOrPlace'){if(c.data.dimType==='linear')return buildLinearDimension(c.data.p1,c.data.p2,p,'auto');return buildAlignedDimension(c.data.p1,c.data.p2,p);}if(c.name==='DIM'&&c.step==='angularPlace'){const a=state.entities.find(x=>x.id===c.data.firstId),b=state.entities.find(x=>x.id===c.data.secondId);return buildAngularDimension(a,b,c.data.firstPick,c.data.secondPick,p);}if((c.name==='DIM'||c.name==='DIMLINEAR'||c.name==='DIMALIGNED')&&c.step==='place'){if(c.name==='DIMLINEAR'||c.data.dimType==='linear')return buildLinearDimension(c.data.p1,c.data.p2,p,'auto');return buildAlignedDimension(c.data.p1,c.data.p2,p);}if(c.name==='DIM'&&c.step==='curvePlace'){const e=state.entities.find(x=>x.id===c.data.entityId);return c.data.dimType==='diameter'?buildDiameterDimension(e,p):buildRadiusDimension(e,p);}if((c.name==='DIMRADIUS'||c.name==='DIMDIAMETER')&&c.step==='place'){const e=state.entities.find(x=>x.id===c.data.entityId);return c.name==='DIMRADIUS'?buildRadiusDimension(e,p):buildDiameterDimension(e,p);}if(c.name==='DIMANGULAR'&&c.step==='place'){const a=state.entities.find(x=>x.id===c.data.firstId),b=state.entities.find(x=>x.id===c.data.secondId);return buildAngularDimension(a,b,c.data.firstPick,c.data.secondPick,p);}return[];
 }
 
 let dimensionEditorEl=null;
@@ -3440,13 +3549,14 @@ function openDimensionStyleEditor(){
 }
 
 function selectedEntities(){return state.entities.filter(e=>state.selected.has(e.id));}
+function commandSelectedEntities(c=state.command){const ids=Array.isArray(c?.data?.sourceIds)?new Set(c.data.sourceIds):state.selected;return state.entities.filter(e=>ids.has(e.id));}
 function cloneEntity(e,newId=true){const c=JSON.parse(JSON.stringify(e));if(newId)c.id=nextEntityId();return c;}
 function performCopy(dx,dy,sourceIds=null){pushHistory();const src=Array.isArray(sourceIds)?state.entities.filter(e=>sourceIds.includes(e.id)):selectedEntities(),copies=src.map(e=>{const c=cloneEntity(e,true);translateEntity(c,dx,dy);return c;});state.entities.push(...copies);state.selected=new Set(copies.map(e=>e.id));afterGeometryChange();return copies;}
 function performRotate(angle,copyMode=false){
   const c=state.command,base=c?.data?.base;if(!base||!Number.isFinite(angle))return false;
   pushHistory();
   if(copyMode){
-    const copies=selectedEntities().map(e=>{
+    const copies=commandSelectedEntities(c).map(e=>{
       const n=cloneEntity(e,true);
       transformEntityPoints(n,q=>rotatePoint(q,base,angle));
       if(n.type==='TEXT')n.rotation=(n.rotation||0)+angle*180/Math.PI;
@@ -3455,7 +3565,7 @@ function performRotate(angle,copyMode=false){
     state.entities.push(...copies);
     state.selected=new Set(copies.map(e=>e.id));
   }else{
-    for(const e of selectedEntities()){
+    for(const e of commandSelectedEntities(c)){
       transformEntityPoints(e,q=>rotatePoint(q,base,angle));
       if(e.type==='TEXT')e.rotation=(e.rotation||0)+angle*180/Math.PI;
     }
@@ -3465,10 +3575,10 @@ function performRotate(angle,copyMode=false){
   return true;
 }
 function performScale(factor,copyMode=false){
-  const c=state.command,base=c?.data?.base;if(!base||!(factor>0))return false;pushHistory();if(copyMode){const copies=selectedEntities().map(e=>{const n=cloneEntity(e,true);scaleEntity(n,base,factor);return n;});state.entities.push(...copies);state.selected=new Set(copies.map(e=>e.id));}else for(const e of selectedEntities())scaleEntity(e,base,factor);afterGeometryChange();toast(CMDT.scaled);return true;
+  const c=state.command,base=c?.data?.base;if(!base||!(factor>0))return false;pushHistory();if(copyMode){const copies=commandSelectedEntities(c).map(e=>{const n=cloneEntity(e,true);scaleEntity(n,base,factor);return n;});state.entities.push(...copies);state.selected=new Set(copies.map(e=>e.id));}else for(const e of commandSelectedEntities(c))scaleEntity(e,base,factor);afterGeometryChange();toast(CMDT.scaled);return true;
 }
 function performMirror(eraseSource){
-  const c=state.command,a=c?.data?.p1,b=c?.data?.p2;if(!a||!b)return;pushHistory();const originals=selectedEntities(),copies=originals.map(e=>{const n=cloneEntity(e,true);mirrorEntity(n,a,b);return n;});state.entities.push(...copies);if(eraseSource)state.entities=state.entities.filter(e=>!state.selected.has(e.id));state.selected=new Set(copies.map(e=>e.id));afterGeometryChange();toast(CMDT.mirrored);
+  const c=state.command,a=c?.data?.p1,b=c?.data?.p2;if(!a||!b)return;pushHistory();const originals=commandSelectedEntities(c),sourceIds=new Set(originals.map(e=>e.id)),copies=originals.map(e=>{const n=cloneEntity(e,true);mirrorEntity(n,a,b);return n;});state.entities.push(...copies);if(eraseSource)state.entities=state.entities.filter(e=>!sourceIds.has(e.id));state.selected=new Set(copies.map(e=>e.id));afterGeometryChange();toast(CMDT.mirrored);
 }
 function rotatePoint(q,base,ang){const x=q.x-base.x,y=q.y-base.y,c=Math.cos(ang),s=Math.sin(ang);return{x:base.x+x*c-y*s,y:base.y+x*s+y*c};}
 function transformEntityPoints(e,fn){
@@ -3853,6 +3963,9 @@ function polarArrayPreviewEntities(c){
 }
 function drawPreviewEntities(items){for(const e of items||[])drawEntity(e,'#7bc4ff',1.55);}
 
+function drawRotationGuide(base,target,angle){
+  if(!base||!target||!Number.isFinite(angle))return;const r=Math.max(dist(base,target)*.32,16/state.view.scale),c=worldToScreen(base);ctx.save();ctx.setLineDash([]);ctx.strokeStyle='#35d39a';ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(c.x,c.y,r*state.view.scale,0,-angle,true);ctx.stroke();ctx.restore();
+}
 function drawCommandPreview(){
   const c=state.command;if(!state.file)return;
   if(!c||c.selecting){if(state.textEditorDraft?.draft){ctx.save();ctx.setLineDash([4,3]);drawEntity(state.textEditorDraft.draft,'#7bc4ff',1.7);ctx.restore();}return;}
@@ -3897,7 +4010,7 @@ function drawCommandPreview(){
       a=normalizeAngle(target-(Number(c.data.referenceAngle)||0));
     }
     if(Number.isFinite(a)){
-      line(guideFrom,p);
+      line(guideFrom,p);drawRotationGuide(c.data.base,p,a);
       drawSelectedPreview(e=>{const n=cloneEntity(e,false);transformEntityPoints(n,q=>rotatePoint(q,c.data.base,a));if(n.type==='TEXT')n.rotation=(n.rotation||0)+a*180/Math.PI;return n;},false);
     }
   }
@@ -3918,7 +4031,7 @@ function drawCommandPreview(){
   if(state.textEditorDraft?.draft){ctx.save();ctx.setLineDash([4,3]);drawEntity(state.textEditorDraft.draft,'#7bc4ff',1.7);ctx.restore();}
 }
 function drawPreviewArc(e){const c=worldToScreen(e.center);ctx.save();ctx.translate(c.x,c.y);ctx.scale(1,-1);ctx.beginPath();ctx.arc(0,0,e.radius*state.view.scale,e.start,e.start+positiveSpan(e.start,e.end));ctx.stroke();ctx.restore();}
-function drawSelectedPreview(transform,dashed=true){ctx.save();ctx.globalAlpha=.78;ctx.setLineDash(dashed?[6,4]:[]);for(const e of selectedEntities())drawEntity(transform(e),'#7bc4ff',1.35);ctx.restore();}
+function drawSelectedPreview(transform,dashed=true){ctx.save();ctx.globalAlpha=.78;ctx.setLineDash(dashed?[6,4]:[]);for(const e of commandSelectedEntities())drawEntity(transform(e),'#7bc4ff',1.35);ctx.restore();}
 
 function openOsnapQuickMenu(clientX,clientY){
   closeContextMenu();const menu=document.createElement('div');menu.className='n2-context-menu';

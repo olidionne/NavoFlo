@@ -44,7 +44,7 @@ const $ = id => document.getElementById(id);
 const E = {
   workspace:$('cad-workspace'), canvas:$('viewer-canvas'), input:$('file-input'),
   empty:$('empty-drop'), loading:$('loading-overlay'), loadingLabel:$('loading-label'), loadingSub:$('loading-sub'),
-  clear:$('clear-model'), fit:$('fit-view'), edges:$('edges-toggle'), gridToggle:$('grid-toggle'), unitSelect:$('unit-select'),
+  clear:$('clear-model'), save:$('save-model'), saveAs:$('save-model-as'), openButton:$('open-model-button'), fit:$('fit-view'), edges:$('edges-toggle'), gridToggle:$('grid-toggle'), unitSelect:$('unit-select'),
   measure:$('measure-toggle'), measureType:$('measure-type'), measureClear:$('measure-clear'),
   measureCard:$('measure-card'), measureMain:$('measure-main'), measureDetails:$('measure-details'),
   measureBadge:$('measure-badge'), selectionSummary:$('selection-summary'),
@@ -70,7 +70,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.15.1';
+const WORKER_URL = '/js/step-worker.js?v=8.15.2';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -131,6 +131,7 @@ let modelBounds = null, modelSize = 1;
 let hoverRAF = 0, preselected = null, selectOtherMenu = null;
 let selectionEpoch = 0;
 let logicalFaceGroupCache = new Map();
+let logicalEdgeGroupCache = new Map();
 const cadNav = {
   active:false,
   pointerId:null,
@@ -154,6 +155,9 @@ let baseMaterials = new Set();
 // File objects and per-document camera/unit state stay local in the browser.
 const modelDocuments=new Map();
 let activeModelDocumentId=null,modelDocumentSeq=0,modelDocumentBusy=false,pendingModelDocumentId=null;
+const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
+const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
+const logicalHiddenEdgeKeys=new Set();
 function nextModelDocumentId(){return`n3doc-${++modelDocumentSeq}`;}
 function modelMainCandidates(files){return [...files].filter(file=>['step','stp','glb','gltf','stl','obj'].includes(ext(file.name)));}
 function captureActiveModelDocumentState(){
@@ -178,24 +182,43 @@ function renderModelDocumentTabs(){
   }
   requestAnimationFrame(()=>E.docTabList.querySelector('.cad-doc-tab.active')?.scrollIntoView({block:'nearest',inline:'nearest'}));
 }
-function buildModelDocumentSets(files){
+function buildModelDocumentSets(files,handleByName=null){
   const all=[...files];const mains=modelMainCandidates(all);if(!mains.length)return[];
-  if(mains.length===1)return[{main:mains[0],files:all}];
+  const withHandle=main=>({main,mainHandle:handleByName?.get?.(main.name)||null});
+  if(mains.length===1)return[{...withHandle(mains[0]),files:all}];
   const mainSet=new Set(mains),aux=all.filter(file=>!mainSet.has(file));
-  return mains.map(main=>({main,files:[main,...aux]}));
+  return mains.map(main=>({...withHandle(main),files:[main,...aux]}));
 }
-async function openModelDocuments(files){
-  const sets=buildModelDocumentSets(files);
+async function openModelDocuments(files,handleByName=null){
+  const sets=buildModelDocumentSets(files,handleByName);
   if(!sets.length)return showError(T.unsupported);
   const newIds=[];
   for(const set of sets){
     if(set.files.some(file=>file.size>MAX_FILE)){showError(T.tooLarge);continue;}
     if(set.files.reduce((sum,file)=>sum+file.size,0)>MAX_TOTAL){showError(T.totalTooLarge);continue;}
-    const id=nextModelDocumentId();modelDocuments.set(id,{id,name:set.main.name,main:set.main,files:set.files,view:null,lastFormat:ext(set.main.name).toUpperCase()});newIds.push(id);
+    const id=nextModelDocumentId();modelDocuments.set(id,{id,name:set.main.name,main:set.main,mainHandle:set.mainHandle||null,files:set.files,view:null,lastFormat:ext(set.main.name).toUpperCase()});newIds.push(id);
   }
   renderModelDocumentTabs();
   if(newIds.length)await activateModelDocument(newIds[0]);
 }
+async function pickModelFiles(){
+  if(!FSA3_OPEN_SUPPORTED){E.input.click();return;}
+  try{
+    const handles=await window.showOpenFilePicker({multiple:true,types:[{description:'CAD',accept:{'application/octet-stream':['.step','.stp','.stl','.obj','.glb','.gltf','.bin'],'image/*':['.png','.jpg','.jpeg','.webp']}}]});
+    const files=[],map=new Map();for(const handle of handles){const file=await handle.getFile();files.push(file);map.set(file.name,handle);}
+    if(files.length)await openModelDocuments(files,map);
+  }catch(error){if(error?.name!=='AbortError'){console.warn('Navo3D file picker',error);E.input.click();}}
+}
+async function saveCurrentModel(forceSaveAs=false){
+  const doc=activeModelDocumentId?modelDocuments.get(activeModelDocumentId):null;if(!doc?.main)return;
+  try{
+    let handle=!forceSaveAs?doc.mainHandle:null;
+    if(!handle&&FSA3_SAVE_SUPPORTED){const extension='.'+ext(doc.main.name);handle=await window.showSaveFilePicker({suggestedName:doc.main.name,types:[{description:`${extension.toUpperCase()} CAD`,accept:{'application/octet-stream':[extension]}}]});}
+    if(handle){const oldMain=doc.main;const writable=await handle.createWritable();await writable.write(await oldMain.arrayBuffer());await writable.close();const saved=await handle.getFile();doc.main=saved;doc.mainHandle=handle;doc.name=saved.name;doc.files=[saved,...doc.files.filter(f=>f!==oldMain&&f.name!==saved.name)];currentFile=saved;E.statusFile.textContent=saved.name;renderModelDocumentTabs();}
+    else{const url=URL.createObjectURL(doc.main);const a=document.createElement('a');a.href=url;a.download=doc.main.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  }catch(error){if(error?.name!=='AbortError'){console.error('Navo3D save',error);showError(FR?'Impossible de sauvegarder ce modèle.':'Unable to save this model.');}}
+}
+
 function restoreModelDocumentView(doc){
   const view=doc?.view;if(!view||!camera||!controls)return false;
   try{
@@ -349,6 +372,7 @@ function bindUI() {
     if (files.length) openModelDocuments(files);
     event.target.value = '';
   });
+  [E.openButton,...document.querySelectorAll('[data-n3-open-picker],label[for="file-input"]')].filter(Boolean).forEach(el=>el.addEventListener('click',event=>{if(!FSA3_OPEN_SUPPORTED)return;event.preventDefault();pickModelFiles();}));
 
   ['dragenter','dragover'].forEach(type => E.workspace.addEventListener(type, event => {
     event.preventDefault();
@@ -364,7 +388,9 @@ function bindUI() {
   });
 
   E.clear.addEventListener('click', () => closeModelDocument());
-  E.docTabAdd?.addEventListener('click',()=>E.input.click());
+  E.save?.addEventListener('click',()=>saveCurrentModel(false));
+  E.saveAs?.addEventListener('click',()=>saveCurrentModel(true));
+  E.docTabAdd?.addEventListener('click',pickModelFiles);
   E.fit.addEventListener('click', () => fitCamera('iso'));
   E.edges.addEventListener('click', toggleEdges);
   E.gridToggle.addEventListener('click', toggleGrid);
@@ -585,6 +611,12 @@ function bindUI() {
   addEventListener('keydown', event => {
     if (event.target && ['INPUT','SELECT','TEXTAREA'].includes(event.target.tagName)) return;
 
+    if ((event.ctrlKey||event.metaKey) && event.key.toLowerCase()==='s' && activeModelDocumentId) {
+      event.preventDefault();saveCurrentModel(event.shiftKey);return;
+    }
+    if ((event.ctrlKey||event.metaKey) && event.key.toLowerCase()==='o') {
+      event.preventDefault();pickModelFiles();return;
+    }
     if ((event.ctrlKey||event.metaKey) && event.key==='Tab' && modelDocuments.size>1) {
       event.preventDefault();cycleModelDocument(event.shiftKey?-1:1);return;
     }
@@ -1075,6 +1107,8 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
         renderStepCustomProperties();
       }).catch(error=>console.warn('[NavoFlo STEP metadata]',error));
       buildExactStepScene(result);
+      const loadedStepRef=result;
+      workerRequest('logical-face-groups',{}).then(info=>{if(currentStepResult===loadedStepRef)applyLogicalFaceCleanup(info?.groups||[]);}).catch(()=>{});
     } else {
       currentStepResult=null;
       currentUnit='u';
@@ -1552,13 +1586,20 @@ function pickSelectionCandidate(clientX,clientY) {
   return faceCandidate?.selection || edgeCandidate?.selection || vertexCandidate?.selection || null;
 }
 
+function selectionIncludesCandidate(grouped,candidate){
+  if(!grouped||!candidate||grouped.kind!==candidate.kind||String(grouped.geometryId)!==String(candidate.geometryId)||grouped.object?.parent!==candidate.object?.parent)return false;
+  if(grouped.kind==='face'&&Array.isArray(grouped.memberFaceIds))return grouped.memberFaceIds.map(Number).includes(Number(candidate.elementId));
+  if(grouped.kind==='edge'&&Array.isArray(grouped.memberEdgeIds))return grouped.memberEdgeIds.map(Number).includes(Number(candidate.elementId));
+  return Number(grouped.elementId)===Number(candidate.elementId);
+}
+
 function updatePreselection(clientX,clientY) {
   const candidate=pickSelectionCandidate(clientX,clientY);
   const key=candidate?selectionKey(candidate):'';
 
   // A committed selection must remain visually locked in blue.
   // Do not place the hover/preselection color over it.
-  if(candidate && selected.some(item=>selectionKey(item)===key)){
+  if(candidate && selected.some(item=>selectionKey(item)===key||selectionIncludesCandidate(item,candidate))){
     clearPreselection();
     return;
   }
@@ -2006,15 +2047,30 @@ async function expandLogicalFaceSelection(selection){
   const cacheKey=`${selection.geometryId}:${selection.elementId}`;
   let ids=logicalFaceGroupCache.get(cacheKey);
   if(!ids){
-    try{
-      const result=await workerRequest('logical-face-group',{selection:serialSelection(selection)});
-      ids=Array.isArray(result?.faceIds)&&result.faceIds.length?result.faceIds.map(Number):[Number(selection.elementId)];
-    }catch{ids=[Number(selection.elementId)];}
-    ids=[...new Set(ids)].sort((a,b)=>a-b);
-    for(const id of ids)logicalFaceGroupCache.set(`${selection.geometryId}:${id}`,ids);
+    try{const result=await workerRequest('logical-face-group',{selection:serialSelection(selection)});ids=Array.isArray(result?.faceIds)&&result.faceIds.length?result.faceIds.map(Number):[Number(selection.elementId)];}catch{ids=[Number(selection.elementId)];}
+    ids=[...new Set(ids)].sort((a,b)=>a-b);for(const id of ids)logicalFaceGroupCache.set(`${selection.geometryId}:${id}`,ids);
   }
-  if(ids.length>1)return {...selection,elementId:ids[0],memberFaceIds:ids};
+  if(ids.length>1){applyLogicalFaceCleanup([{geometryId:selection.geometryId,faceIds:ids,seamEdgeIds:internalSeamEdgesForFaceGroup(selection.def,ids)}]);return {...selection,elementId:ids[0],memberFaceIds:ids};}
   return selection;
+}
+async function expandLogicalEdgeSelection(selection){
+  if(selection?.kind!=='edge'||!currentStepResult)return selection;
+  const cacheKey=`${selection.geometryId}:${selection.elementId}`;let ids=logicalEdgeGroupCache.get(cacheKey);
+  if(!ids){try{const result=await workerRequest('logical-edge-group',{selection:serialSelection(selection)});ids=Array.isArray(result?.edgeIds)&&result.edgeIds.length?result.edgeIds.map(Number):[Number(selection.elementId)];}catch{ids=[Number(selection.elementId)];}
+    ids=[...new Set(ids)].sort((a,b)=>a-b);for(const id of ids)logicalEdgeGroupCache.set(`${selection.geometryId}:${id}`,ids);}
+  return ids.length>1?{...selection,elementId:ids[0],memberEdgeIds:ids}:selection;
+}
+async function expandLogicalSelection(selection){selection=await expandLogicalFaceSelection(selection);selection=await expandLogicalEdgeSelection(selection);return selection;}
+function internalSeamEdgesForFaceGroup(def,faceIds){
+  const set=new Set((faceIds||[]).map(Number)),ids=[];for(const edge of def?.source?.edges||[]){const owners=(edge.ownerFaceIds||[]).map(Number).filter(id=>set.has(id));if(owners.length>=2)ids.push(Number(edge.id));}return ids;
+}
+function applyLogicalFaceCleanup(groups){
+  for(const group of groups||[]){for(const edgeId of group.seamEdgeIds||[])logicalHiddenEdgeKeys.add(`${group.geometryId}:${Number(edgeId)}`);}
+  for(const line of edgeObjects){const key=`${line.userData?.geometryId}:${Number(line.userData?.elementId)}`;line.userData.logicalHidden=logicalHiddenEdgeKeys.has(key);line.visible=edgesVisible&&!line.userData.logicalHidden;}
+}
+function edgeObjectsForSelection(selection){
+  const ids=new Set(Array.isArray(selection?.memberEdgeIds)&&selection.memberEdgeIds.length?selection.memberEdgeIds:[Number(selection?.elementId)]);
+  const parent=selection?.object?.parent;return edgeObjects.filter(line=>line.parent===parent&&String(line.userData?.geometryId)===String(selection.geometryId)&&ids.has(Number(line.userData?.elementId)));
 }
 
 function faceIdsForHighlight(selection){
@@ -2036,7 +2092,7 @@ async function acceptSelection(selection, event={}) {
   // Once clicked, the hover overlay must get out of the way immediately.
   // The committed blue overlay is the only visual state until deselection.
   clearPreselection();
-  selection=await expandLogicalFaceSelection(selection);
+  selection=await expandLogicalSelection(selection);
 
   const key=selectionKey(selection);
   const existing=selected.findIndex(s=>selectionKey(s)===key);
@@ -2134,18 +2190,18 @@ async function acceptSelection(selection, event={}) {
 function serialSelection(s) {
   return {
     kind:s.kind,geometryId:s.geometryId,elementId:s.elementId,
-    elementIds:Array.isArray(s.memberFaceIds)?s.memberFaceIds:undefined,
+    elementIds:Array.isArray(s.memberFaceIds)?s.memberFaceIds:(Array.isArray(s.memberEdgeIds)?s.memberEdgeIds:undefined),
     transform:s.object.matrixWorld.toArray()
   };
 }
-function selectionKey(s){const faceKey=s.kind==='face'&&Array.isArray(s.memberFaceIds)?s.memberFaceIds.join(','):(s.elementId??'');return `${s.kind}:${s.geometryId||''}:${faceKey}:${s.object?.uuid||''}`}
+function selectionKey(s){const memberKey=s.kind==='face'&&Array.isArray(s.memberFaceIds)?s.memberFaceIds.join(','):s.kind==='edge'&&Array.isArray(s.memberEdgeIds)?s.memberEdgeIds.join(','):(s.elementId??'');return `${s.kind}:${s.geometryId||''}:${memberKey}:${s.object?.parent?.uuid||s.object?.uuid||''}`}
 
 function removeSelectionHighlight(key) {
   const group=selectionHighlightMap.get(key);
   if(!group)return;
 
-  const sourceObject=group.userData?.sourceObject;
-  if(sourceObject?.userData?.cadEdge) sourceObject.visible=edgesVisible;
+  const sourceObjects=group.userData?.sourceObjects||[group.userData?.sourceObject].filter(Boolean);
+  for(const sourceObject of sourceObjects)if(sourceObject?.userData?.cadEdge)sourceObject.visible=edgesVisible&&!sourceObject.userData.logicalHidden;
 
   selectionHighlightMap.delete(key);
   selectionRoot.remove(group);
@@ -2181,24 +2237,8 @@ function highlightSelection(s,index,parent=selectionRoot) {
   const faceColor=SELECTION_BLUE;
 
   if (s.kind==='edge') {
-    if(s.object?.userData?.cadEdge){
-      s.object.visible=false;
-      parent.userData.sourceObject=s.object;
-    }
-
-    const line=new THREE.Line(
-      s.object.geometry.clone(),
-      new THREE.LineBasicMaterial({
-        color,
-        depthTest:true,
-        depthWrite:false,
-        depthFunc:THREE.LessEqualDepth
-      })
-    );
-    line.matrix.copy(s.object.matrixWorld);
-    line.matrixAutoUpdate=false;
-    line.renderOrder=40;
-    parent.add(line);
+    const sources=edgeObjectsForSelection(s);parent.userData.sourceObjects=sources;
+    for(const source of sources){source.visible=false;const line=new THREE.Line(source.geometry.clone(),new THREE.LineBasicMaterial({color,depthTest:true,depthWrite:false,depthFunc:THREE.LessEqualDepth}));line.matrix.copy(source.matrixWorld);line.matrixAutoUpdate=false;line.renderOrder=40;parent.add(line);}
 
   } else if (s.kind==='vertex'||s.kind==='point') {
     const radius=Math.max(modelSize*0.0024,0.0001);
@@ -2314,6 +2354,44 @@ function getMeasureAnnotationPoints(result) {
   return [null,null];
 }
 
+function faceFacePerpendicularAnnotation(result){
+  if(selected.length!==2||selected[0]?.kind!=='face'||selected[1]?.kind!=='face')return null;
+  const n1=getSelectedFaceNormal(selected[0]),n2=getSelectedFaceNormal(selected[1]);if(!n1||!n2||Math.abs(n1.dot(n2))<0.9995)return null;
+  const a=selected[0].point?.clone?.(),b=selected[1].point?.clone?.();if(!a||!b)return null;
+  const sign=Math.sign(n1.dot(b.clone().sub(a)))||1,mag=Number(result?.value);if(!Number.isFinite(mag))return null;
+  const q=a.clone().addScaledVector(n1,sign*mag);return[a.toArray(),q.toArray()];
+}
+function addMeasureSegment(a,b,color=0x35d39a,order=40){
+  const line=new THREE.Line(new THREE.BufferGeometry().setFromPoints([a,b]),new THREE.LineBasicMaterial({color,depthTest:false,depthWrite:false}));line.renderOrder=order;measureOverlayRoot.add(line);return line;
+}
+function planeIntersectionAnchor(pointA,normalA,pointB,normalB,near){
+  const dir=normalA.clone().cross(normalB),denom=dir.lengthSq();if(denom<1e-12)return null;
+  const d1=normalA.dot(pointA),d2=normalB.dot(pointB);
+  const term1=normalB.clone().cross(dir).multiplyScalar(d1),term2=dir.clone().cross(normalA).multiplyScalar(d2),x=term1.add(term2).divideScalar(denom);
+  const t=dir.dot(near.clone().sub(x))/denom;return{x:x.addScaledVector(dir,t),dir:dir.normalize()};
+}
+function addAngularArrow(tip,tangent,radial,size){
+  const back=tip.clone().addScaledVector(tangent,-size),wing=size*.42;
+  addMeasureSegment(tip,back.clone().addScaledVector(radial,wing),0x35d39a,43);addMeasureSegment(tip,back.clone().addScaledVector(radial,-wing),0x35d39a,43);
+}
+function drawAngleDimension(labelText=''){
+  if(selected.length!==2)return false;const a=selected[0],b=selected[1];
+  if(a.kind!=='face'||b.kind!=='face')return false;
+  const n1=getSelectedFaceNormal(a),n2=getSelectedFaceNormal(b),p1=a.point?.clone?.(),p2=b.point?.clone?.();if(!n1||!n2||!p1||!p2)return false;
+  const hit=planeIntersectionAnchor(p1,n1,p2,n2,p1.clone().add(p2).multiplyScalar(.5));if(!hit)return false;
+  const axis=hit.dir,origin=hit.x;let r1=axis.clone().cross(n1).normalize(),r2=axis.clone().cross(n2).normalize();
+  if(r1.dot(p1.clone().sub(origin))<0)r1.negate();if(r2.dot(p2.clone().sub(origin))<0)r2.negate();
+  let signed=Math.atan2(axis.dot(r1.clone().cross(r2)),THREE.MathUtils.clamp(r1.dot(r2),-1,1));if(Math.abs(signed)<1e-6)return false;
+  if(signed>Math.PI)signed-=Math.PI*2;if(signed<-Math.PI)signed+=Math.PI*2;
+  const clickR=Math.min(p1.distanceTo(origin),p2.distanceTo(origin)),radius=Math.max(modelSize*.025,Math.min(modelSize*.16,clickR*.58||modelSize*.07)),points=[],steps=42;
+  for(let i=0;i<=steps;i++){const q=r1.clone().applyAxisAngle(axis,signed*i/steps);points.push(origin.clone().addScaledVector(q,radius));}
+  const arc=new THREE.Line(new THREE.BufferGeometry().setFromPoints(points),new THREE.LineBasicMaterial({color:0x35d39a,depthTest:false,depthWrite:false}));arc.renderOrder=42;measureOverlayRoot.add(arc);
+  const start=points[0],end=points[points.length-1],ext0=origin.clone().addScaledVector(r1,radius*1.12),ext1=origin.clone().addScaledVector(r2,radius*1.12);addMeasureSegment(origin.clone().addScaledVector(r1,radius*.14),ext0);addMeasureSegment(origin.clone().addScaledVector(r2,radius*.14),ext1);
+  const sign=Math.sign(signed),tanStart=axis.clone().cross(r1).multiplyScalar(sign).normalize(),tanEnd=axis.clone().cross(r2).multiplyScalar(sign).normalize(),arrow=Math.max(modelSize*.006,radius*.085);
+  addAngularArrow(start,tanStart,r1,arrow);addAngularArrow(end,tanEnd.negate(),r2,arrow);addMeasureMarker(start);addMeasureMarker(end);
+  const midDir=r1.clone().applyAxisAngle(axis,signed*.5),labelPoint=origin.clone().addScaledVector(midDir,radius*1.10);setDimensionLabel(labelText,labelPoint);return true;
+}
+
 function showPairExact(r) {
   if (
     r?.kind==='angle' &&
@@ -2338,7 +2416,7 @@ function showPairExact(r) {
 
     // Always show the angular value in the viewport, even when OCCT did not
     // provide witness points for the exact angle calculation.
-    drawMeasureLine(annotationA,annotationB,label);
+    if(!drawAngleDimension(label))drawMeasureLine(annotationA,annotationB,label);
 
   } else if (r.kind==='center-center') {
     const label=formatLength(r.value);
@@ -2358,8 +2436,9 @@ function showPairExact(r) {
 
     E.measureMain.textContent=label;
 
-    const a=annotationA;
-    const b=annotationB;
+    const perpendicular=faceFacePerpendicularAnnotation(r);
+    const a=perpendicular?.[0]||annotationA;
+    const b=perpendicular?.[1]||annotationB;
     const dx=a&&b?Math.abs(b[0]-a[0]):null;
     const dy=a&&b?Math.abs(b[1]-a[1]):null;
     const dz=a&&b?Math.abs(b[2]-a[2]):null;
@@ -2557,17 +2636,9 @@ function labelSelection(s){return s.meshOnly?T.point:`${labelKind(s.kind)} #${s.
 
 function applyEdgesVisibility() {
   blackEdgeMaterial.visible=edgesVisible;
-
-  const selectedSourceEdges=new Set(
-    [...selectionHighlightMap.values()]
-      .map(group=>group.userData?.sourceObject)
-      .filter(Boolean)
-  );
-
-  visualEdges.forEach(object=>{
-    object.visible=edgesVisible && !selectedSourceEdges.has(object);
-    if(object.material===blackEdgeMaterial) object.material.visible=edgesVisible;
-  });
+  const selectedSourceEdges=new Set();
+  for(const group of selectionHighlightMap.values())for(const object of (group.userData?.sourceObjects||[group.userData?.sourceObject].filter(Boolean)))selectedSourceEdges.add(object);
+  visualEdges.forEach(object=>{object.visible=edgesVisible&&!object.userData?.logicalHidden&&!selectedSourceEdges.has(object);if(object.material===blackEdgeMaterial)object.material.visible=edgesVisible;});
 }
 
 function toggleEdges() {
@@ -2838,7 +2909,7 @@ async function clearModel(showMessage=true) {
     modelRoot.remove(child);disposeObject(child);
   }
   modelRoot.position.set(0,0,0);
-  surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();
+  surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();logicalEdgeGroupCache=new Map();logicalHiddenEdgeKeys.clear();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];
   resetSheetMetalForModel();
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;
@@ -2869,7 +2940,7 @@ function clearGroup(group) {
 function revokeObjectUrls(){meshObjectUrls.forEach(u=>{try{URL.revokeObjectURL(u)}catch{}});meshObjectUrls=[]}
 
 function enableTools(on) {
-  [E.clear,E.fit,E.edges,E.gridToggle,E.unitSelect,E.measure,E.section,E.viewButton,E.props].forEach(el=>el.disabled=!on);
+  [E.clear,E.save,E.saveAs,E.fit,E.edges,E.gridToggle,E.unitSelect,E.measure,E.section,E.viewButton,E.props].filter(Boolean).forEach(el=>el.disabled=!on);
   document.querySelectorAll('[data-select-mode]').forEach(el=>el.disabled=!on);
   E.measureType.disabled=!on||!measureEnabled;
   E.sheetMetal.disabled=!on||!currentStepResult;

@@ -366,3 +366,7 @@ body.n2-focus-mode{overflow:hidden}
 .n2-ribbon .n2-tool.n2-tool-small .n2-icon{font-size:12px}.n2-ribbon-group>small{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:7.5px;font-weight:700;letter-spacing:.09em}
 .n2-layer-select{font-size:11px}
 @media(max-width:1050px){.n2-ribbon-group>small{font-size:7px}}
+
+/* V8.15.2 — native Save / Save As controls */
+.n2-file-save-stack{min-width:92px}
+@media(max-width:1500px){.n2-file-save-stack{min-width:36px}}

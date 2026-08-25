@@ -8,8 +8,8 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/viewer.css?v=8.15.1">
-  <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.1">
+  <link rel="stylesheet" href="/css/viewer.css?v=8.15.2">
+  <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.2">
   <script type="importmap">
   {
     "imports": {
@@ -40,10 +40,12 @@
     <canvas id="viewer-canvas" aria-label="Navo3D"></canvas>
 
     <div class="cad-toolbar" role="toolbar">
-      <label class="tool-button file-tool">
+      <label id="open-model-button" class="tool-button file-tool">
         <input id="file-input" type="file" hidden accept=".step,.stp,.stl,.obj,.glb,.gltf,.bin,.png,.jpg,.jpeg,.webp" multiple>
         <span class="tool-icon">＋</span><span>Ouvrir</span>
       </label>
+      <button id="save-model" class="tool-button" type="button" disabled title="Enregistrer dans le fichier source"><span class="tool-icon">⌁</span><span>Enregistrer</span></button>
+      <button id="save-model-as" class="tool-button" type="button" disabled title="Enregistrer une copie"><span class="tool-icon">⇩</span><span>Sous…</span></button>
 
       <div class="tool-divider"></div>
 
@@ -126,7 +128,7 @@
     </div>
 
     <div id="empty-drop" class="empty-drop">
-      <label for="file-input" class="empty-drop-inner">
+      <label for="file-input" class="empty-drop-inner" data-n3-open-picker>
         <span class="drop-cube">N</span>
         <strong>Déposez votre modèle CAD</strong>
         <p>STEP · STP · STL · OBJ · GLB · GLTF</p>
@@ -283,6 +285,6 @@
 </section>
 </main>
 
-<script type="module" src="/js/viewer.js?v=8.15.1"></script>
+<script type="module" src="/js/viewer.js?v=8.15.2"></script>
 </body>
 </html>
