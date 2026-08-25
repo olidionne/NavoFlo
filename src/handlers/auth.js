@@ -5,7 +5,10 @@ import {
   bootstrapAccount,
   invitationInfo,
   login,
-  logout
+  logout,
+  passwordResetInfo,
+  requestPasswordReset,
+  resetPassword
 } from '../lib/auth.js';
 
 async function safe(fn) {
@@ -16,6 +19,9 @@ async function safe(fn) {
 export async function getAuthStatus({ request, env }) { return safe(() => authStatus(request, env)); }
 export async function postLogin({ request, env }) { return safe(() => login(request, env)); }
 export async function postLogout({ request, env }) { return safe(() => logout(request, env)); }
+export async function postForgotPassword({ request, env }) { return safe(() => requestPasswordReset(request, env)); }
+export async function getPasswordReset({ request, env }) { return safe(() => passwordResetInfo(request, env)); }
+export async function postResetPassword({ request, env }) { return safe(() => resetPassword(request, env)); }
 export async function postBootstrap({ request, env }) { return safe(() => bootstrapAccount(request, env)); }
 export async function getInvitation({ request, env }) { return safe(() => invitationInfo(request, env)); }
 export async function postAcceptInvitation({ request, env }) { return safe(() => acceptInvitation(request, env)); }

@@ -2,6 +2,8 @@ import { json, safeOrigin } from './stripe.js';
 
 const SESSION_COOKIE = 'navoflo_session';
 const SESSION_DAYS = 30;
+const PASSWORD_RESET_TTL_MINUTES = 60;
+const PASSWORD_RESET_COOLDOWN_SECONDS = 60;
 // Cloudflare Workers WebCrypto currently rejects PBKDF2 deriveBits calls above 100,000 iterations.
 const PBKDF2_ITERATIONS = 100000;
 
@@ -104,6 +106,30 @@ function clearSessionCookie(request, env) {
 async function requestIpHash(request) {
   const ip = request.headers.get('cf-connecting-ip') || '';
   return ip ? sha256(ip) : null;
+}
+
+function escapeEmailHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[ch]));
+}
+
+async function sendTransactionalEmail(env, { to, subject, html }) {
+  const apiKey = String(env?.RESEND_API_KEY || '').trim();
+  const from = String(env?.NAVOFLO_FROM_EMAIL || '').trim();
+  if (!apiKey || !from) return { sent:false, error:'Email delivery is not configured.' };
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method:'POST',
+      headers:{ 'authorization':`Bearer ${apiKey}`, 'content-type':'application/json' },
+      body:JSON.stringify({ from, to:[to], subject, html })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return { sent:false, error:`Email provider returned ${response.status}.` };
+    return { sent:true, id:payload?.id || null };
+  } catch (error) {
+    return { sent:false, error:error?.message || 'Email delivery failed.' };
+  }
 }
 
 export async function createSession(request, env, userId) {
@@ -251,6 +277,180 @@ export async function bootstrapAccount(request, env) {
   return session.cookie ? json({ ok:true }, 200, { 'set-cookie':session.cookie }) : json({ ok:true });
 }
 
+
+function passwordResetEmailHtml(url) {
+  const safeUrl = escapeEmailHtml(url);
+  return `<p>Une demande de réinitialisation du mot de passe NavoFlo a été reçue.</p>
+<p><a href="${safeUrl}">Réinitialiser mon mot de passe</a></p>
+<p>Ce lien expire dans ${PASSWORD_RESET_TTL_MINUTES} minutes et ne peut être utilisé qu'une seule fois.</p>
+<p>Si vous n'avez pas fait cette demande, vous pouvez ignorer ce courriel.</p>
+<hr>
+<p>A NavoFlo password reset was requested for your account.</p>
+<p><a href="${safeUrl}">Reset my password</a></p>
+<p>This link expires in ${PASSWORD_RESET_TTL_MINUTES} minutes and can only be used once.</p>
+<p>If you did not request this, you can ignore this email.</p>`;
+}
+
+export async function requestPasswordReset(request, env) {
+  if (!env?.NAVOFLO_DB) throw authError('NavoFlo database is unavailable.', 503, 'DB_UNAVAILABLE');
+  if (!String(env?.RESEND_API_KEY || '').trim() || !String(env?.NAVOFLO_FROM_EMAIL || '').trim()) {
+    throw authError('Password reset email delivery is not configured.', 503, 'EMAIL_NOT_CONFIGURED');
+  }
+
+  const body = await request.json().catch(() => ({}));
+  const email = normalizeEmail(body.email);
+  if (!email || email.length > 320 || !/^\S+@\S+\.\S+$/.test(email)) {
+    throw authError('A valid email address is required.', 400, 'INVALID_EMAIL');
+  }
+
+  // Always return the same public response whether the account exists or not.
+  const response = () => json({ ok:true }, 200, { 'cache-control':'no-store' });
+  const user = await env.NAVOFLO_DB.prepare(`
+    SELECT u.id, u.email, u.status, u.password_hash,
+      (SELECT m.organization_id FROM memberships m WHERE m.user_id=u.id AND m.active=1 ORDER BY m.id LIMIT 1) AS organization_id
+    FROM users u
+    WHERE u.email=? COLLATE NOCASE
+    LIMIT 1
+  `).bind(email).first();
+
+  if (!user || user.status !== 'active' || !user.password_hash) return response();
+
+  const recent = await env.NAVOFLO_DB.prepare(`
+    SELECT id FROM password_reset_tokens
+    WHERE user_id=?
+      AND consumed_at IS NULL
+      AND revoked_at IS NULL
+      AND datetime(created_at) > datetime('now', '-' || ? || ' seconds')
+    ORDER BY id DESC LIMIT 1
+  `).bind(user.id, PASSWORD_RESET_COOLDOWN_SECONDS).first();
+  if (recent) return response();
+
+  const rawToken = randomToken(32);
+  const tokenHash = await sha256(rawToken);
+  const expires = new Date(Date.now() + PASSWORD_RESET_TTL_MINUTES * 60 * 1000).toISOString();
+
+  await env.NAVOFLO_DB.batch([
+    env.NAVOFLO_DB.prepare(`
+      UPDATE password_reset_tokens
+      SET revoked_at=COALESCE(revoked_at, datetime('now'))
+      WHERE user_id=? AND consumed_at IS NULL AND revoked_at IS NULL
+    `).bind(user.id),
+    env.NAVOFLO_DB.prepare(`
+      INSERT INTO password_reset_tokens (
+        user_id, token_hash, expires_at, requested_ip_hash, user_agent
+      ) VALUES (?, ?, ?, ?, ?)
+    `).bind(
+      user.id,
+      tokenHash,
+      expires,
+      await requestIpHash(request),
+      String(request.headers.get('user-agent') || '').slice(0, 500) || null
+    )
+  ]);
+
+  const origin = safeOrigin(request, env);
+  const url = `${origin}/reset-password/?token=${encodeURIComponent(rawToken)}`;
+  const emailResult = await sendTransactionalEmail(env, {
+    to:user.email,
+    subject:'Réinitialisation du mot de passe NavoFlo / NavoFlo password reset',
+    html:passwordResetEmailHtml(url)
+  });
+
+  if (!emailResult.sent) {
+    await env.NAVOFLO_DB.prepare(`
+      UPDATE password_reset_tokens SET revoked_at=datetime('now') WHERE token_hash=?
+    `).bind(tokenHash).run();
+    await logAudit(env, {
+      organization_id:user.organization_id || null,
+      target_user_id:user.id,
+      action:'auth.password_reset_email_failed',
+      details:{ reason:emailResult.error || 'email_delivery_failed' }
+    });
+    return response();
+  }
+
+  await logAudit(env, {
+    organization_id:user.organization_id || null,
+    target_user_id:user.id,
+    action:'auth.password_reset_requested',
+    details:{ email_provider:'resend' }
+  });
+  return response();
+}
+
+export async function passwordResetInfo(request, env) {
+  if (!env?.NAVOFLO_DB) throw authError('NavoFlo database is unavailable.', 503, 'DB_UNAVAILABLE');
+  const token = new URL(request.url).searchParams.get('token') || '';
+  if (!token) throw authError('Password reset token is required.', 400, 'RESET_TOKEN_REQUIRED');
+  const tokenHash = await sha256(token);
+  const row = await env.NAVOFLO_DB.prepare(`
+    SELECT pr.expires_at
+    FROM password_reset_tokens pr
+    JOIN users u ON u.id=pr.user_id
+    WHERE pr.token_hash=?
+      AND pr.consumed_at IS NULL
+      AND pr.revoked_at IS NULL
+      AND datetime(pr.expires_at) > datetime('now')
+      AND u.status='active'
+    LIMIT 1
+  `).bind(tokenHash).first();
+  if (!row) throw authError('This password reset link is invalid or expired.', 410, 'RESET_TOKEN_EXPIRED');
+  return json({ valid:true, expires_at:row.expires_at }, 200, { 'cache-control':'no-store' });
+}
+
+export async function resetPassword(request, env) {
+  if (!env?.NAVOFLO_DB) throw authError('NavoFlo database is unavailable.', 503, 'DB_UNAVAILABLE');
+  const body = await request.json().catch(() => ({}));
+  const token = String(body.token || '');
+  if (!token) throw authError('Password reset token is required.', 400, 'RESET_TOKEN_REQUIRED');
+
+  const tokenHash = await sha256(token);
+  const reset = await env.NAVOFLO_DB.prepare(`
+    SELECT pr.id, pr.user_id, pr.expires_at, u.email, u.status,
+      (SELECT m.organization_id FROM memberships m WHERE m.user_id=u.id AND m.active=1 ORDER BY m.id LIMIT 1) AS organization_id
+    FROM password_reset_tokens pr
+    JOIN users u ON u.id=pr.user_id
+    WHERE pr.token_hash=?
+      AND pr.consumed_at IS NULL
+      AND pr.revoked_at IS NULL
+      AND datetime(pr.expires_at) > datetime('now')
+      AND u.status='active'
+    LIMIT 1
+  `).bind(tokenHash).first();
+  if (!reset) throw authError('This password reset link is invalid or expired.', 410, 'RESET_TOKEN_EXPIRED');
+
+  const passwordHash = await hashPassword(body.password);
+  await env.NAVOFLO_DB.batch([
+    env.NAVOFLO_DB.prepare(`
+      UPDATE users
+      SET password_hash=?, failed_login_count=0, locked_until=NULL, updated_at=datetime('now')
+      WHERE id=?
+    `).bind(passwordHash, reset.user_id),
+    env.NAVOFLO_DB.prepare(`
+      UPDATE password_reset_tokens SET consumed_at=datetime('now') WHERE id=?
+    `).bind(reset.id),
+    env.NAVOFLO_DB.prepare(`
+      UPDATE password_reset_tokens
+      SET revoked_at=COALESCE(revoked_at, datetime('now'))
+      WHERE user_id=? AND id<>? AND consumed_at IS NULL AND revoked_at IS NULL
+    `).bind(reset.user_id, reset.id),
+    env.NAVOFLO_DB.prepare(`
+      UPDATE auth_sessions SET revoked_at=datetime('now') WHERE user_id=? AND revoked_at IS NULL
+    `).bind(reset.user_id),
+    env.NAVOFLO_DB.prepare(`
+      UPDATE app_leases SET revoked_at=datetime('now') WHERE user_id=? AND revoked_at IS NULL
+    `).bind(reset.user_id)
+  ]);
+
+  await logAudit(env, {
+    organization_id:reset.organization_id || null,
+    actor_user_id:reset.user_id,
+    target_user_id:reset.user_id,
+    action:'auth.password_reset_completed'
+  });
+  return json({ ok:true }, 200, { 'set-cookie':clearSessionCookie(request, env), 'cache-control':'no-store' });
+}
+
 export async function createInvitation(env, { organizationId, userId, email, createdByUserId, request } = {}) {
   const normalized = normalizeEmail(email);
   if (!env?.NAVOFLO_DB || !organizationId || !userId || !normalized) throw authError('Unable to create invitation.', 500, 'INVITE_CREATE_FAILED');
@@ -273,23 +473,12 @@ export async function createInvitation(env, { organizationId, userId, email, cre
 }
 
 async function sendInvitationEmail(env, { to, url }) {
-  const apiKey = String(env?.RESEND_API_KEY || '');
-  const from = String(env?.NAVOFLO_FROM_EMAIL || '');
-  if (!apiKey || !from) return { sent:false, error:'Email delivery is not configured.' };
-  try {
-    const response = await fetch('https://api.resend.com/emails', {
-      method:'POST',
-      headers:{ 'authorization':`Bearer ${apiKey}`, 'content-type':'application/json' },
-      body:JSON.stringify({
-        from, to:[to], subject:'Invitation NavoFlo',
-        html:`<p>Vous avez été invité à rejoindre une organisation NavoFlo.</p><p><a href="${url}">Créer votre compte NavoFlo</a></p><p>Ce lien expire dans 7 jours.</p>`
-      })
-    });
-    if (!response.ok) return { sent:false, error:`Email provider returned ${response.status}.` };
-    return { sent:true };
-  } catch (error) {
-    return { sent:false, error:error?.message || 'Email delivery failed.' };
-  }
+  const safeUrl = escapeEmailHtml(url);
+  return sendTransactionalEmail(env, {
+    to,
+    subject:'Invitation NavoFlo',
+    html:`<p>Vous avez été invité à rejoindre une organisation NavoFlo.</p><p><a href="${safeUrl}">Créer votre compte NavoFlo</a></p><p>Ce lien expire dans 7 jours.</p><hr><p>You have been invited to join a NavoFlo organization.</p><p><a href="${safeUrl}">Create your NavoFlo account</a></p><p>This link expires in 7 days.</p>`
+  });
 }
 
 export async function invitationInfo(request, env) {
@@ -355,5 +544,6 @@ export async function revokeAllUserSessions(env, userId) {
 }
 
 export function authJsonError(error) {
-  return json({ error:error.message || 'Authentication request failed.', code:error.code || 'AUTH_ERROR' }, error.status || 500);
+  return json({ error:error.message || 'Authentication request failed.', code:error.code || 'AUTH_ERROR' }, error.status || 500, { 'cache-control':'no-store' });
 }
+

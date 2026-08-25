@@ -19,10 +19,13 @@ import {
 import {
   getAuthStatus,
   getInvitation,
+  getPasswordReset,
   postAcceptInvitation,
   postBootstrap,
+  postForgotPassword,
   postLogin,
-  postLogout
+  postLogout,
+  postResetPassword
 } from './handlers/auth.js';
 import { licensingContext } from './lib/licensing.js';
 import { sessionUser } from './lib/auth.js';
@@ -35,6 +38,8 @@ const API = Object.freeze({
   '/api/auth/me': { GET:getAuthStatus },
   '/api/auth/login': { POST:postLogin },
   '/api/auth/logout': { POST:postLogout },
+  '/api/auth/forgot-password': { POST:postForgotPassword },
+  '/api/auth/reset-password': { GET:getPasswordReset, POST:postResetPassword },
   '/api/auth/bootstrap': { POST:postBootstrap },
   '/api/auth/invitation': { GET:getInvitation },
   '/api/auth/accept-invitation': { POST:postAcceptInvitation },
