@@ -1,24 +1,70 @@
 import {
+  ensureOrganization,
   json,
+  markWebhookEventProcessed,
+  padEnabled,
   planConfig,
   requireEnv,
   stripeRequest,
+  subscriptionPeriodEnd,
   taxRatesForProvince,
   upsertSubscription,
-  verifyStripeSignature
+  verifyStripeSignature,
+  webhookEventAlreadyProcessed
 } from '../lib/stripe.js';
+
+function objectId(value) {
+  return typeof value === 'string' ? value : value?.id || null;
+}
+
+async function organizationForCustomer(env, customerId, hints = {}) {
+  if (!customerId || !env?.NAVOFLO_DB) return null;
+
+  let customer = null;
+  if (!hints.name || !hints.billing_email) {
+    try {
+      customer = await stripeRequest(env, `/customers/${encodeURIComponent(customerId)}`);
+    } catch (error) {
+      console.warn('stripe-customer-fetch', customerId, error?.message || error);
+    }
+  }
+
+  return ensureOrganization(env, {
+    stripe_customer_id: customerId,
+    name: hints.name || customer?.name || null,
+    billing_email: hints.billing_email || customer?.email || null
+  });
+}
+
+async function syncSubscription(env, subscription, hints = {}) {
+  if (!subscription?.id) return;
+
+  const customerId = objectId(subscription.customer) || hints.stripe_customer_id || null;
+  const organization = customerId
+    ? await organizationForCustomer(env, customerId, {
+        name: hints.organization_name || null,
+        billing_email: hints.customer_email || null
+      })
+    : null;
+
+  await upsertSubscription(env, {
+    stripe_subscription_id: subscription.id,
+    stripe_customer_id: customerId,
+    customer_email: hints.customer_email || null,
+    plan: subscription.metadata?.navoflo_plan || hints.plan || null,
+    seats: Number(subscription.metadata?.navoflo_seats || hints.seats || 1),
+    status: subscription.status || hints.status || 'unknown',
+    current_period_end: subscriptionPeriodEnd(subscription),
+    cancel_at_period_end: Boolean(subscription.cancel_at_period_end),
+    organization_id: organization?.id || null
+  });
+}
 
 async function payPadInitialInvoice(env, setupIntent, subscription, paymentMethod) {
   const latest = subscription?.latest_invoice;
-  const invoiceId = typeof latest === 'string' ? latest : latest?.id;
+  const invoiceId = objectId(latest);
   if (!invoiceId) throw new Error('PAD subscription is missing the first invoice.');
 
-  // This is the API equivalent of clicking “Pay / Régler” in the Stripe Dashboard.
-  // The SetupIntent already created a reusable Billing mandate with
-  // default_for=[invoice, subscription]. Passing that mandate again here conflicts
-  // with the mandate information Stripe already carries in the invoice/payment
-  // method options. Reuse only the verified PaymentMethod and let Stripe reuse the
-  // existing mandate automatically.
   return stripeRequest(env, `/invoices/${encodeURIComponent(invoiceId)}/pay`, {
     method: 'POST',
     form: { payment_method: paymentMethod },
@@ -27,11 +73,13 @@ async function payPadInitialInvoice(env, setupIntent, subscription, paymentMetho
 }
 
 async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
+  if (!padEnabled(env)) return null;
+
   const meta = setupIntent?.metadata || {};
   if (meta.navoflo_payment_method !== 'pad') return null;
 
-  const customer = typeof setupIntent.customer === 'string' ? setupIntent.customer : setupIntent.customer?.id;
-  const paymentMethod = typeof setupIntent.payment_method === 'string' ? setupIntent.payment_method : setupIntent.payment_method?.id;
+  const customer = objectId(setupIntent.customer);
+  const paymentMethod = objectId(setupIntent.payment_method);
   if (!customer || !paymentMethod) throw new Error('PAD setup is missing customer or payment method.');
 
   const plan = planConfig(env, meta.navoflo_plan);
@@ -39,7 +87,6 @@ async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
   const province = String(meta.navoflo_tax_province || '').toUpperCase();
   const taxRates = taxRatesForProvince(env, province);
 
-  // Make the verified PAD method the default for future invoice/subscription debits.
   await stripeRequest(env, `/customers/${encodeURIComponent(customer)}`, {
     method: 'POST',
     form: { 'invoice_settings[default_payment_method]': paymentMethod },
@@ -76,29 +123,14 @@ async function createPadSubscriptionFromSetupIntent(env, setupIntent) {
   }
 
   let subscription = await stripeRequest(env, '/subscriptions', {
-    method: 'POST', form,
+    method: 'POST',
+    form,
     idempotencyKey: `navoflo-pad-subscription-${setupIntent.id}`
   });
 
-  // The subscription is intentionally created incomplete. The PAD mandate was
-  // collected first in Checkout setup mode. Pay the finalized first invoice with
-  // the existing PaymentMethod + Mandate — the same action as Stripe Dashboard's
-  // “Régler / Pay invoice” button — so Stripe starts the asynchronous bank debit.
   await payPadInitialInvoice(env, setupIntent, subscription, paymentMethod);
-
-  // Refresh so D1 (when enabled) reflects Stripe's post-payment-attempt status.
   subscription = await stripeRequest(env, `/subscriptions/${encodeURIComponent(subscription.id)}`);
-
-  await upsertSubscription(env, {
-    stripe_subscription_id: subscription.id,
-    stripe_customer_id: customer,
-    plan: plan.code,
-    seats,
-    status: subscription.status,
-    current_period_end: subscription.current_period_end || null,
-    cancel_at_period_end: Boolean(subscription.cancel_at_period_end)
-  });
-
+  await syncSubscription(env, subscription);
   return subscription;
 }
 
@@ -106,66 +138,91 @@ export async function handleWebhook({ request, env }) {
   const raw = await request.text();
   const signature = request.headers.get('stripe-signature');
   const secret = requireEnv(env, 'STRIPE_WEBHOOK_SECRET');
-  if (!(await verifyStripeSignature(raw, signature, secret))) return json({ error: 'Invalid signature.' }, 400);
+  if (!(await verifyStripeSignature(raw, signature, secret))) {
+    return json({ error: 'Invalid signature.' }, 400);
+  }
 
   const event = JSON.parse(raw);
+
   try {
+    if (await webhookEventAlreadyProcessed(env, event.id)) {
+      return json({ received: true, duplicate: true });
+    }
+
     if (event.type === 'setup_intent.succeeded') {
       await createPadSubscriptionFromSetupIntent(env, event.data.object);
     }
 
-    if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
-      const s = event.data.object;
-      await upsertSubscription(env, {
-        stripe_subscription_id: s.id,
-        stripe_customer_id: typeof s.customer === 'string' ? s.customer : s.customer?.id,
-        plan: s.metadata?.navoflo_plan || null,
-        seats: Number(s.metadata?.navoflo_seats || 1),
-        status: s.status,
-        current_period_end: s.current_period_end || null,
-        cancel_at_period_end: Boolean(s.cancel_at_period_end)
-      });
+    if (
+      event.type === 'customer.subscription.created' ||
+      event.type === 'customer.subscription.updated' ||
+      event.type === 'customer.subscription.deleted'
+    ) {
+      await syncSubscription(env, event.data.object);
     }
 
     if (event.type === 'checkout.session.completed') {
-      const s = event.data.object;
+      const session = event.data.object;
+      const customerId = objectId(session.customer);
+      const email = session.customer_details?.email || session.customer_email || null;
+      const organizationName =
+        session.customer_details?.business_name ||
+        session.collected_information?.business_name ||
+        session.customer_details?.name ||
+        null;
 
-      // Card Checkout already created the subscription for us.
-      if (s.subscription) {
-        await upsertSubscription(env, {
-          stripe_subscription_id: typeof s.subscription === 'string' ? s.subscription : s.subscription?.id,
-          stripe_customer_id: typeof s.customer === 'string' ? s.customer : s.customer?.id,
-          customer_email: s.customer_details?.email || s.customer_email || null,
-          plan: s.metadata?.navoflo_plan || null,
-          seats: Number(s.metadata?.navoflo_seats || 1),
-          status: s.payment_status === 'paid' ? 'active' : 'pending_payment'
+      if (customerId) {
+        await organizationForCustomer(env, customerId, {
+          name: organizationName,
+          billing_email: email
         });
       }
 
-      // PAD Checkout runs in setup mode. Some Stripe webhook destinations may not
-      // subscribe to setup_intent.succeeded, so also finish the PAD subscription
-      // from checkout.session.completed. The subscription creation uses an
-      // idempotency key based on the SetupIntent, so receiving both events is safe.
-      if (!s.subscription && s.mode === 'setup' && s.setup_intent) {
-        const setupIntentId = typeof s.setup_intent === 'string' ? s.setup_intent : s.setup_intent?.id;
-        if (setupIntentId) {
-          const setupIntent = await stripeRequest(env, `/setup_intents/${encodeURIComponent(setupIntentId)}`);
-          if (setupIntent.status === 'succeeded') {
-            await createPadSubscriptionFromSetupIntent(env, setupIntent);
-          }
+      // Card Checkout creates the Subscription itself. Retrieve the full object so
+      // we store the real Stripe status and the billing period from subscription items.
+      const subscriptionId = objectId(session.subscription);
+      if (subscriptionId) {
+        const subscription = await stripeRequest(env, `/subscriptions/${encodeURIComponent(subscriptionId)}`);
+        await syncSubscription(env, subscription, {
+          stripe_customer_id: customerId,
+          customer_email: email,
+          organization_name: organizationName,
+          plan: session.metadata?.navoflo_plan || null,
+          seats: Number(session.metadata?.navoflo_seats || 1)
+        });
+      }
+
+      // Keep legacy PAD setup events harmless while PAD is disabled.
+      if (!subscriptionId && session.mode === 'setup' && session.setup_intent && padEnabled(env)) {
+        const setupIntentId = objectId(session.setup_intent);
+        const setupIntent = await stripeRequest(env, `/setup_intents/${encodeURIComponent(setupIntentId)}`);
+        if (setupIntent.status === 'succeeded') {
+          await createPadSubscriptionFromSetupIntent(env, setupIntent);
         }
       }
     }
 
     if (event.type === 'invoice.paid' || event.type === 'invoice.payment_failed') {
       const invoice = event.data.object;
-      const subscriptionId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
-      if (subscriptionId && env?.NAVOFLO_DB) {
-        await env.NAVOFLO_DB.prepare(`UPDATE subscriptions SET status=?, updated_at=datetime('now') WHERE stripe_subscription_id=?`)
-          .bind(event.type === 'invoice.paid' ? 'active' : 'past_due', subscriptionId).run();
+      const subscriptionId = objectId(invoice.subscription);
+      if (subscriptionId) {
+        // Fetch the subscription because in current Stripe API versions the billing
+        // period is stored on subscription items rather than on the subscription root.
+        const subscription = await stripeRequest(env, `/subscriptions/${encodeURIComponent(subscriptionId)}`);
+        await syncSubscription(env, subscription, {
+          customer_email: invoice.customer_email || null,
+          status: event.type === 'invoice.paid' ? 'active' : 'past_due'
+        });
+
+        if (event.type === 'invoice.payment_failed' && env?.NAVOFLO_DB) {
+          await env.NAVOFLO_DB.prepare(
+            `UPDATE subscriptions SET status='past_due', updated_at=datetime('now') WHERE stripe_subscription_id=?`
+          ).bind(subscriptionId).run();
+        }
       }
     }
 
+    await markWebhookEventProcessed(env, event);
     return json({ received: true });
   } catch (error) {
     console.error('stripe-webhook-handler', event.type, error);

@@ -7,5 +7,12 @@
     "directory": "./public",
     "binding": "ASSETS"
   },
+  "d1_databases": [
+    {
+      "binding": "NAVOFLO_DB",
+      "database_name": "navoflo-prod",
+      "database_id": "049d0b7d-cd2c-4dd6-af23-1ccd3634d737"
+    }
+  ],
   "keep_vars": true
 }

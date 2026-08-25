@@ -136,6 +136,57 @@ function constantTimeEqual(a, b) {
   return diff === 0;
 }
 
+export function subscriptionPeriodEnd(subscription) {
+  const itemEnds = subscription?.items?.data
+    ?.map(item => Number(item?.current_period_end || 0))
+    .filter(Boolean) || [];
+  if (itemEnds.length) return Math.max(...itemEnds);
+  return Number(subscription?.current_period_end || 0) || null;
+}
+
+export function padEnabled(env) {
+  return String(env?.NAVOFLO_PAD_ENABLED || '').toLowerCase() === 'true';
+}
+
+export async function ensureOrganization(env, row = {}) {
+  if (!env?.NAVOFLO_DB || !row.stripe_customer_id) return null;
+  await env.NAVOFLO_DB.prepare(`
+    INSERT INTO organizations (
+      stripe_customer_id, name, billing_email, updated_at
+    ) VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(stripe_customer_id) DO UPDATE SET
+      name=COALESCE(excluded.name, organizations.name),
+      billing_email=COALESCE(excluded.billing_email, organizations.billing_email),
+      updated_at=datetime('now')
+  `).bind(
+    row.stripe_customer_id,
+    row.name || null,
+    row.billing_email || null
+  ).run();
+
+  return env.NAVOFLO_DB.prepare(`
+    SELECT id, stripe_customer_id, name, billing_email
+    FROM organizations
+    WHERE stripe_customer_id=?
+  `).bind(row.stripe_customer_id).first();
+}
+
+export async function webhookEventAlreadyProcessed(env, eventId) {
+  if (!env?.NAVOFLO_DB || !eventId) return false;
+  const row = await env.NAVOFLO_DB.prepare(
+    `SELECT stripe_event_id FROM webhook_events WHERE stripe_event_id=?`
+  ).bind(eventId).first();
+  return Boolean(row);
+}
+
+export async function markWebhookEventProcessed(env, event) {
+  if (!env?.NAVOFLO_DB || !event?.id) return;
+  await env.NAVOFLO_DB.prepare(`
+    INSERT OR IGNORE INTO webhook_events (stripe_event_id, event_type, processed_at)
+    VALUES (?, ?, datetime('now'))
+  `).bind(event.id, event.type || null).run();
+}
+
 export async function upsertSubscription(env, row) {
   if (!env?.NAVOFLO_DB || !row?.stripe_subscription_id) return;
   await env.NAVOFLO_DB.prepare(`
@@ -149,7 +200,7 @@ export async function upsertSubscription(env, row) {
       plan=COALESCE(excluded.plan, subscriptions.plan),
       seats=COALESCE(excluded.seats, subscriptions.seats),
       status=excluded.status,
-      current_period_end=excluded.current_period_end,
+      current_period_end=COALESCE(excluded.current_period_end, subscriptions.current_period_end),
       cancel_at_period_end=excluded.cancel_at_period_end,
       updated_at=datetime('now')
   `).bind(
