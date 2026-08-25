@@ -249,6 +249,7 @@ export async function addMember(request, env, context, payload = {}) {
       ON CONFLICT(organization_id,user_id) DO UPDATE SET active=1,assigned_at=datetime('now'),revoked_at=NULL,
         subscription_id=excluded.subscription_id,license_type='user'
     `).bind(context.organization.id,user.id,fresh.subscription.id).run();
+    await logAudit(env,{organizationId:context.organization.id,actorUserId:context.user.id,action:'license.assigned',targetUserId:user.id,details:{license_type:'user',source:'invitation'}});
   }
   const invitation = await createInvitation(env, { organizationId:context.organization.id, userId:user.id, email:user.email,
     createdByUserId:context.user.id, request });
@@ -285,12 +286,14 @@ export async function setMemberLicense(env, context, userId, active) {
         subscription_id=excluded.subscription_id,license_type='user'
     `).bind(context.organization.id,targetId,fresh.subscription?.id||null).run();
     await env.NAVOFLO_DB.prepare(`UPDATE memberships SET pending_license=0,updated_at=datetime('now') WHERE organization_id=? AND user_id=?`).bind(context.organization.id,targetId).run();
+    await logAudit(env,{organizationId:context.organization.id,actorUserId:context.user.id,action:'license.assigned',targetUserId:targetId,details:{license_type:'user'}});
   }else{
     await revokeUserLeases(env,targetId);
     await env.NAVOFLO_DB.batch([
       env.NAVOFLO_DB.prepare(`UPDATE license_assignments SET active=0,revoked_at=datetime('now') WHERE organization_id=? AND user_id=? AND license_type='user'`).bind(context.organization.id,targetId),
       env.NAVOFLO_DB.prepare(`UPDATE memberships SET pending_license=0,updated_at=datetime('now') WHERE organization_id=? AND user_id=?`).bind(context.organization.id,targetId)
     ]);
+    await logAudit(env,{organizationId:context.organization.id,actorUserId:context.user.id,action:'license.revoked',targetUserId:targetId,details:{license_type:'user'}});
   }
   return licensingContext(env,context.user.email,{includeMembers:true});
 }
@@ -374,6 +377,7 @@ export async function assignPendingLicenses(env,organizationId,subscription=null
       `).bind(organizationId,row.user_id,sub.stripe_subscription_id||sub.id||null),
       env.NAVOFLO_DB.prepare(`UPDATE memberships SET pending_license=0,updated_at=datetime('now') WHERE organization_id=? AND user_id=?`).bind(organizationId,row.user_id)
     ]);
+    await logAudit(env,{organizationId,action:'license.assigned',targetUserId:row.user_id,details:{license_type:'user',source:'stripe_webhook'}});
     available--; assigned++;
   }
   return assigned;
@@ -418,7 +422,9 @@ export async function purchaseSeatForMember(request,env,context,payload={}){
     const updated=await stripeRequest(env,`/subscriptions/${encodeURIComponent(subId)}`,{method:'POST',form,idempotencyKey:`navoflo-seat-fasttrack-${subId}-${user.id}-${targetSeats}`});
     const invoice=typeof updated.latest_invoice==='object'?updated.latest_invoice:null;
     const paid=invoice?.status==='paid';
-    return {state:await licensingContext(env,context.user.email,{includeMembers:true}),purchase:{requested:true,target_seats:targetSeats,status:paid?'paid':(updated.pending_update?'pending_payment':'processing'),billing_url:!paid?(invoice?.hosted_invoice_url||null):null},invitation};
+    const purchaseStatus=paid?'paid':(updated.pending_update?'pending_payment':'processing');
+    await logAudit(env,{organizationId:context.organization.id,actorUserId:context.user.id,action:'billing.seat_fast_track_requested',targetUserId:user.id,details:{target_seats:targetSeats,status:purchaseStatus}});
+    return {state:await licensingContext(env,context.user.email,{includeMembers:true}),purchase:{requested:true,target_seats:targetSeats,status:purchaseStatus,billing_url:!paid?(invoice?.hosted_invoice_url||null):null},invitation};
   }catch(error){
     await env.NAVOFLO_DB.prepare(`UPDATE memberships SET pending_license=0,updated_at=datetime('now') WHERE organization_id=? AND user_id=?`).bind(context.organization.id,user.id).run();
     throw error;

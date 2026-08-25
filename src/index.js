@@ -36,6 +36,7 @@ import {
 } from './handlers/auth.js';
 import { licensingContext } from './lib/licensing.js';
 import { sessionUser } from './lib/auth.js';
+import { getOrganizationAudit } from './handlers/audit.js';
 
 const API = Object.freeze({
   '/api/stripe/create-checkout': { POST:createCheckout },
@@ -53,6 +54,7 @@ const API = Object.freeze({
   '/api/auth/resend-activation': { POST:postResendAccountActivation },
   '/api/auth/invitation': { GET:getInvitation },
   '/api/auth/accept-invitation': { POST:postAcceptInvitation },
+  '/api/audit': { GET:getOrganizationAudit },
   '/api/licensing/me': { GET:getLicensingMe },
   '/api/licensing/devices': { GET:getLicensingDevices },
   '/api/licensing/members': { POST:createLicensingMember },

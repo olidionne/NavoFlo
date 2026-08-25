@@ -236,15 +236,29 @@ export async function login(request, env) {
     UPDATE users SET failed_login_count=0, locked_until=NULL, last_login_at=datetime('now'), updated_at=datetime('now') WHERE id=?
   `).bind(user.id).run();
   const session = await createSession(request, env, user.id);
-  await logAudit(env, { actor_user_id: user.id, action: 'auth.login' });
+  await logAudit(env, {
+    organization_id:await organizationIdForUser(env, user.id),
+    actor_user_id:user.id,
+    target_user_id:user.id,
+    action:'auth.login'
+  });
   return json({ ok: true, user: { id:user.id, email:user.email, display_name:user.display_name } }, 200, { 'set-cookie': session.cookie });
 }
 
 export async function logout(request, env) {
+  const user = await sessionUser(request, env, { touch:false });
   const token = cookieValue(request, SESSION_COOKIE);
   if (token && env?.NAVOFLO_DB) {
     const tokenHash = await sha256(token);
     await env.NAVOFLO_DB.prepare(`UPDATE auth_sessions SET revoked_at=datetime('now') WHERE token_hash=?`).bind(tokenHash).run();
+  }
+  if (user) {
+    await logAudit(env, {
+      organization_id:await organizationIdForUser(env, user.id),
+      actor_user_id:user.id,
+      target_user_id:user.id,
+      action:'auth.logout'
+    });
   }
   return json({ ok: true }, 200, { 'set-cookie': clearSessionCookie(request, env) });
 }

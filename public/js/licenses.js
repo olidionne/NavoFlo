@@ -6,6 +6,7 @@
   const currentDeviceId = localStorage.getItem('navoflo_device_id') || '';
   let state = null;
   let security = { sessions: [], devices: [] };
+  let audit = { events: [], has_more: false, next_before_id: null, loading: false, error: '', filters: { category: '', user_id: '', from: '', to: '' } };
   let banner = '';
 
   const t = {
@@ -53,7 +54,23 @@
     expires: fr ? 'Expire' : 'Expires',
     created: fr ? 'Créée' : 'Created',
     noSessions: fr ? 'Aucune session active.' : 'No active sessions.',
-    noDevices: fr ? 'Aucun poste Navo2D/Navo3D enregistré pour ce compte.' : 'No Navo2D/Navo3D device is registered for this account.'
+    noDevices: fr ? 'Aucun poste Navo2D/Navo3D enregistré pour ce compte.' : 'No Navo2D/Navo3D device is registered for this account.',
+    audit: fr ? 'Journal d’audit' : 'Audit log',
+    auditIntro: fr ? 'Historique des connexions, invitations, licences et actions de sécurité de votre organisation.' : 'History of sign-ins, invitations, licensing and security actions for your organization.',
+    auditAll: fr ? 'Toutes les activités' : 'All activity',
+    auditAuth: fr ? 'Connexion et sécurité' : 'Sign-in & security',
+    auditMembers: fr ? 'Équipe et invitations' : 'Team & invitations',
+    auditLicenses: fr ? 'Licences et postes' : 'Licenses & devices',
+    auditBilling: fr ? 'Facturation' : 'Billing',
+    auditAllUsers: fr ? 'Tous les utilisateurs' : 'All users',
+    auditFrom: fr ? 'Du' : 'From',
+    auditTo: fr ? 'Au' : 'To',
+    auditFilter: fr ? 'Filtrer' : 'Filter',
+    auditReset: fr ? 'Réinitialiser' : 'Reset',
+    auditRefresh: fr ? 'Actualiser' : 'Refresh',
+    auditMore: fr ? 'Afficher plus' : 'Show more',
+    auditEmpty: fr ? 'Aucune activité ne correspond à ces filtres.' : 'No activity matches these filters.',
+    auditError: fr ? 'Impossible de charger le journal d’audit.' : 'Unable to load the audit log.'
   };
 
   async function api(path, options = {}) {
@@ -145,6 +162,7 @@
         const result = await api('/api/licensing/members', { method: 'POST', body: JSON.stringify({ email, display_name: displayName, assign_license: false }) });
         state = result.state;
         modal.remove();
+        await refreshAuditIfManager();
         render();
         inviteDialog(result.invitation, email);
       } catch (error) {
@@ -159,6 +177,7 @@
       try {
         const result = await api('/api/licensing/fast-track-seat', { method: 'POST', body: JSON.stringify({ email, display_name: displayName }) });
         state = result.state || state;
+        await refreshAuditIfManager();
         if (result.purchase?.billing_url) {
           location.href = result.purchase.billing_url;
           return;
@@ -185,6 +204,7 @@
         const member = (next.members || []).find(item => String(item.email).toLowerCase() === String(email).toLowerCase());
         if (Number(member?.licensed)) {
           banner = fr ? `Licence attribuée à ${email}.` : `License assigned to ${email}.`;
+          await refreshAuditIfManager();
           render();
           return;
         }
@@ -211,6 +231,7 @@
         banner = fr ? 'Licence transférée avec succès.' : 'License transferred successfully.';
         modal.remove();
         await loadSecurity();
+        await refreshAuditIfManager();
         render();
       } catch (error) {
         alert(error.message);
@@ -254,6 +275,108 @@
     </section>`;
   }
 
+  const auditPerson = person => person ? (person.display_name || person.email || (fr ? 'Utilisateur' : 'User')) : (fr ? 'Système NavoFlo' : 'NavoFlo system');
+  const memberNameById = id => {
+    const member = (state?.members || []).find(item => Number(item.user_id) === Number(id));
+    return member ? (member.display_name || member.email) : (fr ? `Utilisateur #${id}` : `User #${id}`);
+  };
+
+  function auditPresentation(event) {
+    const action = String(event.action || '');
+    const actor = auditPerson(event.actor);
+    const target = auditPerson(event.target);
+    const d = event.details || {};
+    const map = {
+      'auth.login': () => ({ title: fr ? `${actor} s’est connecté à NavoFlo.` : `${actor} signed in to NavoFlo.` }),
+      'auth.logout': () => ({ title: fr ? `${actor} s’est déconnecté de NavoFlo.` : `${actor} signed out of NavoFlo.` }),
+      'auth.password_reset_requested': () => ({ title: fr ? `Réinitialisation du mot de passe demandée pour ${target}.` : `Password reset requested for ${target}.` }),
+      'auth.password_reset_completed': () => ({ title: fr ? `${target} a réinitialisé son mot de passe.` : `${target} reset their password.` }),
+      'auth.password_reset_email_failed': () => ({ title: fr ? `Échec d’envoi du courriel de réinitialisation pour ${target}.` : `Password reset email failed for ${target}.` }),
+      'auth.activation_email_sent': () => ({ title: fr ? `Courriel d’activation ADMIN envoyé à ${target}.` : `ADMIN activation email sent to ${target}.` }),
+      'auth.activation_email_failed': () => ({ title: fr ? `Échec d’envoi du courriel d’activation ADMIN pour ${target}.` : `ADMIN activation email failed for ${target}.` }),
+      'auth.activation_completed': () => ({ title: fr ? `${target} a activé son compte ADMIN.` : `${target} activated their ADMIN account.` }),
+      'auth.session_revoked': () => ({ title: d.current ? (fr ? `${actor} a fermé sa session Web courante.` : `${actor} signed out the current Web session.`) : (fr ? `${actor} a révoqué une session Web.` : `${actor} revoked a Web session.`) }),
+      'auth.other_sessions_revoked': () => ({ title: fr ? `${actor} a révoqué ${Number(d.count || 0)} autre(s) session(s) Web.` : `${actor} revoked ${Number(d.count || 0)} other Web session(s).` }),
+      'member.invited': () => ({ title: fr ? `${actor} a invité ${target}.` : `${actor} invited ${target}.`, detail: d.email_sent === false ? (fr ? 'Lien créé, mais le courriel n’a pas été envoyé.' : 'Link created, but the email was not sent.') : null }),
+      'member.invitation_accepted': () => ({ title: fr ? `${target} a accepté l’invitation NavoFlo.` : `${target} accepted the NavoFlo invitation.` }),
+      'member.removed': () => ({ title: fr ? `${actor} a retiré ${target} de l’organisation.` : `${actor} removed ${target} from the organization.` }),
+      'license.assigned': () => ({ title: fr ? `${actor} a attribué une licence USER à ${target}.` : `${actor} assigned a USER license to ${target}.`, detail: d.source === 'stripe_webhook' ? (fr ? 'Attribution automatique après confirmation Stripe.' : 'Automatically assigned after Stripe confirmation.') : null }),
+      'license.revoked': () => ({ title: fr ? `${actor} a retiré la licence USER de ${target}.` : `${actor} revoked ${target}’s USER license.` }),
+      'license.transferred': () => ({ title: fr ? `${actor} a transféré une licence de ${memberNameById(d.from_user_id)} vers ${target}.` : `${actor} transferred a license from ${memberNameById(d.from_user_id)} to ${target}.` }),
+      'license.device_takeover': () => ({ title: fr ? `${actor} a utilisé sa licence sur un autre poste.` : `${actor} moved the license to another device.` }),
+      'license.device_disconnected': () => ({ title: fr ? `${actor} a déconnecté ${d.device_name || 'un poste NavoFlo'}.` : `${actor} disconnected ${d.device_name || 'a NavoFlo device'}.` }),
+      'billing.seat_fast_track_requested': () => ({ title: fr ? `${actor} a demandé une licence additionnelle pour ${target}.` : `${actor} requested an additional license for ${target}.`, detail: d.status ? (fr ? `Statut Stripe : ${d.status}` : `Stripe status: ${d.status}`) : null })
+    };
+    const value = map[action]?.() || { title: action.replaceAll('.', ' · ') || (fr ? 'Activité NavoFlo' : 'NavoFlo activity') };
+    return value;
+  }
+
+  function auditKind(action) {
+    if (String(action).startsWith('auth.')) return { cls:'auth', label:'S' };
+    if (String(action).startsWith('member.')) return { cls:'member', label:'U' };
+    if (String(action).startsWith('license.')) return { cls:'license', label:'L' };
+    if (String(action).startsWith('billing.')) return { cls:'billing', label:'$' };
+    return { cls:'other', label:'N' };
+  }
+
+  function auditQuery(beforeId = null) {
+    const params = new URLSearchParams({ limit:'50' });
+    const f = audit.filters || {};
+    if (f.category) params.set('category', f.category);
+    if (f.user_id) params.set('user_id', f.user_id);
+    if (f.from) params.set('from', f.from);
+    if (f.to) params.set('to', f.to);
+    if (beforeId) params.set('before_id', beforeId);
+    return params.toString();
+  }
+
+  async function loadAudit({ append = false } = {}) {
+    if (!state || !['owner', 'admin'].includes(state.user?.role)) return;
+    audit.loading = true;
+    audit.error = '';
+    try {
+      const data = await api('/api/audit?' + auditQuery(append ? audit.next_before_id : null));
+      audit.events = append ? [...audit.events, ...(data.events || [])] : (data.events || []);
+      audit.has_more = Boolean(data.has_more);
+      audit.next_before_id = data.next_before_id || null;
+    } catch (error) {
+      audit.error = error.message || t.auditError;
+      if (!append) audit.events = [];
+      audit.has_more = false;
+      audit.next_before_id = null;
+    } finally {
+      audit.loading = false;
+    }
+  }
+
+  async function refreshAuditIfManager() {
+    if (state && ['owner', 'admin'].includes(state.user?.role)) await loadAudit();
+  }
+
+  function auditHtml() {
+    const filters = audit.filters || {};
+    const members = state?.members || [];
+    const options = members.map(member => `<option value="${member.user_id}" ${String(filters.user_id) === String(member.user_id) ? 'selected' : ''}>${esc(member.display_name || member.email)}</option>`).join('');
+    const events = audit.events || [];
+    return `<section class="license-panel audit-panel">
+      <div class="license-panel-head audit-heading"><div><h2>${t.audit}</h2><p>${t.auditIntro}</p></div><button class="button secondary audit-refresh" type="button" data-audit-refresh ${audit.loading ? 'disabled' : ''}>${t.auditRefresh}</button></div>
+      <form class="audit-filters" data-audit-filters>
+        <label><span>${fr ? 'Type' : 'Type'}</span><select name="category"><option value="">${t.auditAll}</option><option value="auth" ${filters.category === 'auth' ? 'selected' : ''}>${t.auditAuth}</option><option value="member" ${filters.category === 'member' ? 'selected' : ''}>${t.auditMembers}</option><option value="license" ${filters.category === 'license' ? 'selected' : ''}>${t.auditLicenses}</option><option value="billing" ${filters.category === 'billing' ? 'selected' : ''}>${t.auditBilling}</option></select></label>
+        <label><span>${fr ? 'Utilisateur' : 'User'}</span><select name="user_id"><option value="">${t.auditAllUsers}</option>${options}</select></label>
+        <label><span>${t.auditFrom}</span><input type="date" name="from" value="${esc(filters.from || '')}"></label>
+        <label><span>${t.auditTo}</span><input type="date" name="to" value="${esc(filters.to || '')}"></label>
+        <div class="audit-filter-actions"><button class="button" type="submit">${t.auditFilter}</button><button class="button secondary" type="button" data-audit-reset>${t.auditReset}</button></div>
+      </form>
+      ${audit.error ? `<div class="audit-error">${esc(audit.error)}</div>` : ''}
+      <div class="audit-list">${events.length ? events.map(event => {
+        const view = auditPresentation(event);
+        const kind = auditKind(event.action);
+        return `<article class="audit-row"><div class="audit-kind ${kind.cls}" aria-hidden="true">${kind.label}</div><div class="audit-main"><strong>${esc(view.title)}</strong>${view.detail ? `<span>${esc(view.detail)}</span>` : ''}<small>${esc(fmtDateTime(event.created_at))} · ${esc(event.action)}</small></div></article>`;
+      }).join('') : `<p class="license-muted">${audit.loading ? (fr ? 'Chargement du journal…' : 'Loading audit log…') : t.auditEmpty}</p>`}</div>
+      ${audit.has_more ? `<div class="audit-more"><button class="button secondary" type="button" data-audit-more ${audit.loading ? 'disabled' : ''}>${t.auditMore}</button></div>` : ''}
+    </section>`;
+  }
+
   function render() {
     if (!state) return;
     const manager = ['owner', 'admin'].includes(state.user.role);
@@ -264,6 +387,7 @@
       <section class="license-stats"><article><span>${t.plan}</span><strong>${planLabel(state.subscription?.plan)}</strong></article><article><span>${t.status}</span><strong>${statusLabel(state.subscription?.status)}</strong></article><article><span>${t.renewal}</span><strong>${fmtDate(state.subscription?.current_period_end)}</strong></article><article><span>${t.seats}</span><strong>${state.seats.used} / ${state.seats.purchased}</strong><small>${state.seats.available} ${t.available}</small></article></section>
       <section class="license-panel"><h2>${t.access}</h2><div class="entitlement-grid"><div class="${entitlements.automation ? 'yes' : 'no'}"><strong>Automatisation</strong><span>${entitlements.automation ? '✓' : '—'}</span></div><div class="${entitlements.navo2d ? 'yes' : 'no'}"><strong>Navo2D</strong><span>${entitlements.navo2d ? '✓' : '—'}</span></div><div class="${entitlements.navo3d ? 'yes' : 'no'}"><strong>Navo3D</strong><span>${entitlements.navo3d ? '✓' : '—'}</span></div><div class="${entitlements.navoanalyzer ? 'yes' : 'no'}"><strong>NavoAnalyzer</strong><span>${fr ? 'À venir' : 'Coming soon'}</span></div></div></section>
       ${securityHtml()}
+      ${manager ? auditHtml() : ''}
       ${manager ? `<section class="license-panel"><div class="license-panel-head"><div><h2>${fr ? 'Équipe et licences' : 'Team & licenses'}</h2><p>${state.seats.used} / ${state.seats.purchased} ${fr ? 'licences utilisées' : 'licenses used'}</p></div></div><form class="license-add-form" data-add-member><input name="email" type="email" required placeholder="${t.email}"><input name="display_name" placeholder="${t.name}"><button class="button" type="submit">${t.add}</button></form>${state.seats.available <= 0 ? `<p class="license-seat-note">${fr ? `Aucune licence libre. NavoFlo proposera le Fast Track pour ajouter automatiquement une licence ${planLabel(state.subscription?.plan)}.` : `No free license. NavoFlo will offer Fast Track to add an additional ${planLabel(state.subscription?.plan)} license.`}</p>` : ''}<div class="license-members">${members.map(member => {
         const pending = Number(member.pending_license) && !Number(member.licensed);
         const isAdmin = member.license_type === 'admin' || member.role === 'owner';
@@ -291,6 +415,7 @@
         const result = await api('/api/auth/sessions/revoke-others', { method: 'POST', body: '{}' });
         banner = fr ? `${result.revoked || 0} autre(s) session(s) révoquée(s).` : `${result.revoked || 0} other session(s) revoked.`;
         await loadSecurity();
+        await refreshAuditIfManager();
         render();
       } catch (error) {
         alert(error.message);
@@ -312,6 +437,7 @@
         }
         banner = fr ? 'Session révoquée.' : 'Session revoked.';
         await loadSecurity();
+        await refreshAuditIfManager();
         render();
       } catch (error) {
         alert(error.message);
@@ -327,6 +453,7 @@
         await api(`/api/licensing/devices/${button.dataset.disconnectDevice}/disconnect`, { method: 'POST', body: '{}' });
         banner = fr ? `${name} a été déconnecté.` : `${name} was disconnected.`;
         await loadSecurity();
+        await refreshAuditIfManager();
         render();
       } catch (error) {
         alert(error.message);
@@ -345,6 +472,7 @@
       try {
         const result = await api('/api/licensing/members', { method: 'POST', body: JSON.stringify({ email, display_name: displayName }) });
         state = result.state;
+        await refreshAuditIfManager();
         render();
         inviteDialog(result.invitation, email);
       } catch (error) {
@@ -358,6 +486,7 @@
       try {
         state = await api(`/api/licensing/members/${button.dataset.licenseUser}/license`, { method: 'POST', body: JSON.stringify({ active }) });
         await loadSecurity();
+        await refreshAuditIfManager();
         render();
       } catch (error) {
         alert(error.message);
@@ -370,6 +499,7 @@
       try {
         const result = await api(`/api/licensing/members/${button.dataset.inviteUser}/invite`, { method: 'POST', body: '{}' });
         state = result.state;
+        await refreshAuditIfManager();
         render();
         const member = state.members.find(item => Number(item.user_id) === Number(button.dataset.inviteUser));
         inviteDialog(result.invitation, member?.email || '');
@@ -383,12 +513,40 @@
       button.disabled = true;
       try {
         state = await api(`/api/licensing/members/${button.dataset.removeUser}`, { method: 'DELETE' });
+        await refreshAuditIfManager();
         render();
       } catch (error) {
         alert(error.message);
         button.disabled = false;
       }
     }));
+    root.querySelector('[data-audit-refresh]')?.addEventListener('click', async event => {
+      event.currentTarget.disabled = true;
+      await loadAudit();
+      render();
+    });
+    root.querySelector('[data-audit-filters]')?.addEventListener('submit', async event => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      audit.filters = {
+        category:String(form.get('category') || ''),
+        user_id:String(form.get('user_id') || ''),
+        from:String(form.get('from') || ''),
+        to:String(form.get('to') || '')
+      };
+      await loadAudit();
+      render();
+    });
+    root.querySelector('[data-audit-reset]')?.addEventListener('click', async () => {
+      audit.filters = { category:'', user_id:'', from:'', to:'' };
+      await loadAudit();
+      render();
+    });
+    root.querySelector('[data-audit-more]')?.addEventListener('click', async event => {
+      event.currentTarget.disabled = true;
+      await loadAudit({ append:true });
+      render();
+    });
   }
 
   function renderAccountFallback(error) {
@@ -406,9 +564,10 @@
   }
 
   root.textContent = t.loading;
-  Promise.all([api('/api/licensing/me'), loadSecurity()])
-    .then(([data]) => {
+  api('/api/licensing/me')
+    .then(async data => {
       state = data;
+      await Promise.all([loadSecurity(), refreshAuditIfManager()]);
       render();
     })
     .catch(error => {
