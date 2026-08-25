@@ -2,7 +2,7 @@ import { json, planConfig, safeOrigin, stripeRequest, taxRatesForProvince } from
 import { createInvitation, identityEmail, randomToken, sessionUser, sha256 } from './auth.js';
 
 const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
-const LEASE_SECONDS = 180;
+const LEASE_SECONDS = 90;
 
 export function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
@@ -179,7 +179,8 @@ export async function licensingContext(env, email, { includeMembers = true, touc
 
   return {
     user:{ id:membership.user_id, email:membership.email, display_name:membership.display_name || null,
-      role:membership.role, status:membership.user_status, licensed, license_type:assignment?.license_type || null },
+      role:membership.role, status:membership.user_status, licensed, license_type:assignment?.license_type || null,
+      assignment_id:assignment?.id || null },
     organization:{ id:membership.organization_id, name:membership.organization_name || membership.billing_email || 'NavoFlo',
       billing_email:membership.billing_email || null, stripe_customer_id:membership.stripe_customer_id },
     subscription:subscription ? { id:subscription.stripe_subscription_id, plan, status:subscription.status,
@@ -447,42 +448,73 @@ export async function acquireAppLease(request,env,context,payload={}){
   if(deviceIdentifier.length<8||deviceIdentifier.length>200) throw licensingError('A stable device identifier is required.',400,'DEVICE_ID_REQUIRED');
   const assignment=await env.NAVOFLO_DB.prepare(`SELECT id,license_type FROM license_assignments WHERE organization_id=? AND user_id=? AND active=1 LIMIT 1`).bind(context.organization.id,context.user.id).first();
   if(!assignment) throw licensingError('No active license is assigned to this user.',403,'LICENSE_REQUIRED');
+
   await env.NAVOFLO_DB.prepare(`
     INSERT INTO devices (user_id,device_identifier,name,last_seen_at) VALUES (?,?,?,datetime('now'))
     ON CONFLICT(user_id,device_identifier) DO UPDATE SET name=COALESCE(excluded.name,devices.name),last_seen_at=datetime('now'),revoked_at=NULL
   `).bind(context.user.id,deviceIdentifier,String(payload.device_name||'').trim().slice(0,100)||null).run();
   const device=await env.NAVOFLO_DB.prepare(`SELECT id,device_identifier,name FROM devices WHERE user_id=? AND device_identifier=? LIMIT 1`).bind(context.user.id,deviceIdentifier).first();
+
+  // Opportunistically close expired leases for this seat. Multiple tabs on the SAME
+  // workstation are allowed; a different workstation is the actual conflict.
+  await env.NAVOFLO_DB.prepare(`
+    UPDATE app_leases SET revoked_at=datetime('now')
+    WHERE license_assignment_id=? AND revoked_at IS NULL AND datetime(expires_at)<=datetime('now')
+  `).bind(assignment.id).run();
+
   const conflicting=await env.NAVOFLO_DB.prepare(`
-    SELECT l.id,d.name,d.device_identifier,l.expires_at FROM app_leases l JOIN devices d ON d.id=l.device_id
-    WHERE l.license_assignment_id=? AND l.revoked_at IS NULL AND datetime(l.expires_at)>datetime('now') AND l.device_id<>?
+    SELECT l.id,d.name,d.device_identifier,l.expires_at,l.product
+    FROM app_leases l JOIN devices d ON d.id=l.device_id
+    WHERE l.license_assignment_id=?
+      AND l.revoked_at IS NULL
+      AND datetime(l.expires_at)>datetime('now')
+      AND l.device_id<>?
     ORDER BY l.last_seen_at DESC LIMIT 1
   `).bind(assignment.id,device.id).first();
   if(conflicting&&!payload.force) {
     const error=licensingError('This license is already active on another device.',409,'LICENSE_IN_USE');
-    error.details={device_name:conflicting.name||'Other device',device_id:conflicting.device_identifier,expires_at:conflicting.expires_at};
+    error.details={device_name:conflicting.name||'Other device',device_id:conflicting.device_identifier,expires_at:conflicting.expires_at,product:conflicting.product};
     throw error;
   }
   if(conflicting&&payload.force){
-    await env.NAVOFLO_DB.prepare(`UPDATE app_leases SET revoked_at=datetime('now') WHERE license_assignment_id=? AND revoked_at IS NULL AND device_id<>?`).bind(assignment.id,device.id).run();
+    await env.NAVOFLO_DB.prepare(`
+      UPDATE app_leases SET revoked_at=datetime('now')
+      WHERE license_assignment_id=? AND revoked_at IS NULL AND device_id<>?
+    `).bind(assignment.id,device.id).run();
     await logAudit(env,{organizationId:context.organization.id,actorUserId:context.user.id,action:'license.device_takeover',targetUserId:context.user.id,details:{from_device:conflicting.device_identifier,to_device:deviceIdentifier}});
   }
-  await env.NAVOFLO_DB.prepare(`UPDATE app_leases SET revoked_at=datetime('now') WHERE license_assignment_id=? AND device_id=? AND product=? AND revoked_at IS NULL`).bind(assignment.id,device.id,feature).run();
+
   const rawToken=randomToken(32), tokenHash=await sha256(rawToken), expiresAt=new Date(Date.now()+LEASE_SECONDS*1000).toISOString();
   await env.NAVOFLO_DB.prepare(`
     INSERT INTO app_leases (license_assignment_id,user_id,device_id,product,lease_token_hash,expires_at)
     VALUES (?,?,?,?,?,?)
   `).bind(assignment.id,context.user.id,device.id,feature,tokenHash,expiresAt).run();
-  return {lease_token:rawToken,expires_at:expiresAt,ttl_seconds:LEASE_SECONDS,device:{id:deviceIdentifier,name:device.name||null},license_type:assignment.license_type};
+  return {lease_token:rawToken,expires_at:expiresAt,ttl_seconds:LEASE_SECONDS,heartbeat_seconds:20,device:{id:deviceIdentifier,name:device.name||null},license_type:assignment.license_type,product:feature};
 }
 
 export async function refreshAppLease(request,env,context,payload={}){
-  const token=String(payload.lease_token||''); if(!token) throw licensingError('Lease token is required.',400,'LEASE_TOKEN_REQUIRED');
+  const token=String(payload.lease_token||'');
+  if(!token) throw licensingError('Lease token is required.',400,'LEASE_TOKEN_REQUIRED');
   const hash=await sha256(token);
-  const lease=await env.NAVOFLO_DB.prepare(`SELECT id,user_id,revoked_at,expires_at FROM app_leases WHERE lease_token_hash=? LIMIT 1`).bind(hash).first();
-  if(!lease||lease.revoked_at||Number(lease.user_id)!==Number(context.user.id)) throw licensingError('The application lease is no longer valid.',409,'LEASE_INVALID');
+  const lease=await env.NAVOFLO_DB.prepare(`
+    SELECT id,user_id,license_assignment_id,product,revoked_at,expires_at
+    FROM app_leases WHERE lease_token_hash=? LIMIT 1
+  `).bind(hash).first();
+
+  const valid=Boolean(
+    lease && !lease.revoked_at &&
+    Number(lease.user_id)===Number(context.user.id) &&
+    Number(lease.license_assignment_id)===Number(context.user.assignment_id) &&
+    context.user.licensed && context.entitlements?.[lease.product] &&
+    new Date(lease.expires_at).getTime()>Date.now()
+  );
+  if(!valid){
+    if(lease?.id) await env.NAVOFLO_DB.prepare(`UPDATE app_leases SET revoked_at=COALESCE(revoked_at,datetime('now')) WHERE id=?`).bind(lease.id).run();
+    throw licensingError('The application lease is no longer valid.',409,'LEASE_INVALID');
+  }
   const expiresAt=new Date(Date.now()+LEASE_SECONDS*1000).toISOString();
   await env.NAVOFLO_DB.prepare(`UPDATE app_leases SET last_seen_at=datetime('now'),expires_at=? WHERE id=?`).bind(expiresAt,lease.id).run();
-  return {ok:true,expires_at:expiresAt,ttl_seconds:LEASE_SECONDS};
+  return {ok:true,expires_at:expiresAt,ttl_seconds:LEASE_SECONDS,heartbeat_seconds:20};
 }
 
 export async function releaseAppLease(env,context,payload={}){
