@@ -47,6 +47,23 @@ const API = Object.freeze({
 });
 
 function methodNotAllowed(allowed){ return json({error:'Method not allowed.'},405,{Allow:allowed.join(', ')}); }
+
+class Navo3DLeaseInjector {
+  element(element){
+    element.prepend('<script src="/js/license-lease-v89.js" data-product="navo3d" data-injected="worker-v8.9"></script>',{html:true});
+  }
+}
+function isNavo3DPath(pathname){
+  return pathname==='/navo3d'||pathname.startsWith('/navo3d/')||pathname==='/en/navo3d'||pathname.startsWith('/en/navo3d/');
+}
+async function serveAssetWithLeaseGate(request,env,url){
+  const response=await env.ASSETS.fetch(request);
+  const type=String(response.headers.get('content-type')||'').toLowerCase();
+  if(response.ok&&isNavo3DPath(url.pathname)&&type.includes('text/html')){
+    return new HTMLRewriter().on('body',new Navo3DLeaseInjector()).transform(response);
+  }
+  return response;
+}
 function featureForPath(pathname){
   if(pathname==='/navo2d'||pathname.startsWith('/navo2d/'))return 'navo2d';
   if(pathname==='/navo3d'||pathname.startsWith('/navo3d/'))return 'navo3d';
@@ -79,6 +96,6 @@ export default {
         return Response.redirect(new URL(target,url.origin),302);
       }
     }
-    return env.ASSETS.fetch(request);
+    return serveAssetWithLeaseGate(request,env,url);
   }
 };
