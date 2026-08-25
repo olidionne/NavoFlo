@@ -4,6 +4,8 @@ const SESSION_COOKIE = 'navoflo_session';
 const SESSION_DAYS = 30;
 const PASSWORD_RESET_TTL_MINUTES = 60;
 const PASSWORD_RESET_COOLDOWN_SECONDS = 60;
+const ACCOUNT_ACTIVATION_TTL_HOURS = 24;
+const ACCOUNT_ACTIVATION_COOLDOWN_SECONDS = 60;
 // Cloudflare Workers WebCrypto currently rejects PBKDF2 deriveBits calls above 100,000 iterations.
 const PBKDF2_ITERATIONS = 100000;
 
@@ -249,32 +251,219 @@ export async function logout(request, env) {
 
 export async function authStatus(request, env) {
   const user = await sessionUser(request, env, { touch:false });
-  const accessEmail = normalizeEmail(request.headers.get('cf-access-authenticated-user-email'));
-  let bootstrap = false;
-  if (!user && accessEmail && env?.NAVOFLO_DB) {
-    const row = await env.NAVOFLO_DB.prepare(`SELECT password_hash FROM users WHERE email=? COLLATE NOCASE LIMIT 1`).bind(accessEmail).first();
-    bootstrap = Boolean(row && !row.password_hash);
-  }
-  return json({ authenticated:Boolean(user), user:user ? { id:user.id,email:user.email,display_name:user.display_name,status:user.status } : null, bootstrap_available:bootstrap, access_email:bootstrap ? accessEmail : null });
+  return json({
+    authenticated:Boolean(user),
+    user:user ? { id:user.id,email:user.email,display_name:user.display_name,status:user.status } : null
+  }, 200, { 'cache-control':'no-store' });
 }
 
-export async function bootstrapAccount(request, env) {
-  const accessEmail = normalizeEmail(request.headers.get('cf-access-authenticated-user-email'));
-  if (!accessEmail) throw authError('Cloudflare Access identity is required for initial account setup.', 401, 'ACCESS_REQUIRED');
-  const body = await request.json().catch(() => ({}));
-  const passwordHash = await hashPassword(body.password);
+function accountActivationEmailHtml({ frUrl, enUrl, organizationName }) {
+  const safeFrUrl = escapeEmailHtml(frUrl);
+  const safeEnUrl = escapeEmailHtml(enUrl);
+  const safeOrganization = escapeEmailHtml(organizationName || 'NavoFlo');
+  return `<p>Merci pour votre abonnement NavoFlo.</p>
+<p>Votre compte administrateur pour <strong>${safeOrganization}</strong> est prêt à être activé.</p>
+<p><a href="${safeFrUrl}">Créer mon mot de passe NavoFlo</a></p>
+<p>Ce lien expire dans ${ACCOUNT_ACTIVATION_TTL_HOURS} heures et ne peut être utilisé qu'une seule fois.</p>
+<p>Si vous possédez déjà un compte NavoFlo avec ce courriel, vous pouvez simplement vous connecter.</p>
+<hr>
+<p>Thank you for subscribing to NavoFlo.</p>
+<p>Your administrator account for <strong>${safeOrganization}</strong> is ready to activate.</p>
+<p><a href="${safeEnUrl}">Create my NavoFlo password</a></p>
+<p>This link expires in ${ACCOUNT_ACTIVATION_TTL_HOURS} hours and can only be used once.</p>
+<p>If you already have a NavoFlo account with this email address, you can simply sign in.</p>`;
+}
+
+async function issueAccountActivation(request, env, { userId, email, organizationId = null, organizationName = null, source = 'manual' } = {}) {
+  if (!env?.NAVOFLO_DB || !userId || !normalizeEmail(email)) return { sent:false, skipped:true, reason:'invalid_account' };
+  if (!String(env?.RESEND_API_KEY || '').trim() || !String(env?.NAVOFLO_FROM_EMAIL || '').trim()) {
+    return { sent:false, skipped:false, error:'Account activation email delivery is not configured.' };
+  }
+
   const user = await env.NAVOFLO_DB.prepare(`
-    SELECT id, email, password_hash FROM users WHERE email=? COLLATE NOCASE LIMIT 1
-  `).bind(accessEmail).first();
-  if (!user) throw authError('No NavoFlo account is linked to this Cloudflare Access identity.', 404, 'ACCOUNT_NOT_FOUND');
-  if (user.password_hash) throw authError('This NavoFlo account already has a password.', 409, 'PASSWORD_ALREADY_SET');
-  await env.NAVOFLO_DB.prepare(`
-    UPDATE users SET password_hash=?, status='active', email_verified_at=COALESCE(email_verified_at, datetime('now')),
-      activated_at=COALESCE(activated_at, datetime('now')), updated_at=datetime('now') WHERE id=?
-  `).bind(passwordHash, user.id).run();
-  const session = await createSession(request, env, user.id);
-  await logAudit(env, { actor_user_id:user.id, action:'auth.bootstrap' });
-  return session.cookie ? json({ ok:true }, 200, { 'set-cookie':session.cookie }) : json({ ok:true });
+    SELECT id, email, password_hash, status FROM users WHERE id=? LIMIT 1
+  `).bind(userId).first();
+  if (!user || user.password_hash || user.status !== 'pending_setup') {
+    return { sent:false, skipped:true, reason:user?.password_hash ? 'already_active' : 'account_unavailable' };
+  }
+
+  const recent = await env.NAVOFLO_DB.prepare(`
+    SELECT id FROM account_activation_tokens
+    WHERE user_id=?
+      AND consumed_at IS NULL
+      AND revoked_at IS NULL
+      AND datetime(created_at) > datetime('now', '-' || ? || ' seconds')
+    ORDER BY id DESC LIMIT 1
+  `).bind(user.id, ACCOUNT_ACTIVATION_COOLDOWN_SECONDS).first();
+  if (recent) return { sent:false, skipped:true, reason:'cooldown' };
+
+  const rawToken = randomToken(32);
+  const tokenHash = await sha256(rawToken);
+  const expires = new Date(Date.now() + ACCOUNT_ACTIVATION_TTL_HOURS * 60 * 60 * 1000).toISOString();
+  const ipHash = request ? await requestIpHash(request) : null;
+  const userAgent = request ? String(request.headers.get('user-agent') || '').slice(0, 500) || null : null;
+
+  await env.NAVOFLO_DB.batch([
+    env.NAVOFLO_DB.prepare(`
+      UPDATE account_activation_tokens
+      SET revoked_at=COALESCE(revoked_at, datetime('now'))
+      WHERE user_id=? AND consumed_at IS NULL AND revoked_at IS NULL
+    `).bind(user.id),
+    env.NAVOFLO_DB.prepare(`
+      INSERT INTO account_activation_tokens (
+        user_id, token_hash, expires_at, requested_ip_hash, user_agent
+      ) VALUES (?, ?, ?, ?, ?)
+    `).bind(user.id, tokenHash, expires, ipHash, userAgent)
+  ]);
+
+  const origin = request
+    ? safeOrigin(request, env)
+    : String(env?.PUBLIC_APP_URL || 'https://navoflo.com').replace(/\/$/, '');
+  const frUrl = `${origin}/auth/setup/?token=${encodeURIComponent(rawToken)}`;
+  const enUrl = `${origin}/en/auth/setup/?token=${encodeURIComponent(rawToken)}`;
+  const emailResult = await sendTransactionalEmail(env, {
+    to:user.email,
+    subject:'Activez votre compte administrateur NavoFlo / Activate your NavoFlo admin account',
+    html:accountActivationEmailHtml({ frUrl, enUrl, organizationName })
+  });
+
+  if (!emailResult.sent) {
+    await env.NAVOFLO_DB.prepare(`
+      UPDATE account_activation_tokens SET revoked_at=datetime('now') WHERE token_hash=?
+    `).bind(tokenHash).run();
+    await logAudit(env, {
+      organization_id:organizationId || null,
+      target_user_id:user.id,
+      action:'auth.activation_email_failed',
+      details:{ source, reason:emailResult.error || 'email_delivery_failed' }
+    });
+    return { sent:false, skipped:false, error:emailResult.error || 'Email delivery failed.' };
+  }
+
+  await logAudit(env, {
+    organization_id:organizationId || null,
+    target_user_id:user.id,
+    action:'auth.activation_email_sent',
+    details:{ source, email_provider:'resend' }
+  });
+  return { sent:true, skipped:false, expires_at:expires };
+}
+
+export async function sendBillingOwnerActivation(request, env, { userId, email, organizationId = null, organizationName = null } = {}) {
+  return issueAccountActivation(request, env, {
+    userId, email, organizationId, organizationName, source:'stripe_checkout'
+  });
+}
+
+export async function requestAccountActivation(request, env) {
+  if (!env?.NAVOFLO_DB) throw authError('NavoFlo database is unavailable.', 503, 'DB_UNAVAILABLE');
+  if (!String(env?.RESEND_API_KEY || '').trim() || !String(env?.NAVOFLO_FROM_EMAIL || '').trim()) {
+    throw authError('Account activation email delivery is not configured.', 503, 'EMAIL_NOT_CONFIGURED');
+  }
+  const body = await request.json().catch(() => ({}));
+  const email = normalizeEmail(body.email);
+  if (!email || email.length > 320 || !/^\S+@\S+\.\S+$/.test(email)) {
+    throw authError('A valid email address is required.', 400, 'INVALID_EMAIL');
+  }
+
+  const response = () => json({ ok:true }, 200, { 'cache-control':'no-store' });
+  const row = await env.NAVOFLO_DB.prepare(`
+    SELECT u.id, u.email, u.password_hash, u.status,
+      m.organization_id, o.name AS organization_name
+    FROM users u
+    JOIN memberships m ON m.user_id=u.id AND m.active=1 AND m.role='owner'
+    JOIN organizations o ON o.id=m.organization_id
+    WHERE u.email=? COLLATE NOCASE
+    ORDER BY m.id LIMIT 1
+  `).bind(email).first();
+  if (!row || row.password_hash || row.status !== 'pending_setup') return response();
+
+  await issueAccountActivation(request, env, {
+    userId:row.id,
+    email:row.email,
+    organizationId:row.organization_id,
+    organizationName:row.organization_name,
+    source:'activation_resend'
+  });
+  return response();
+}
+
+export async function accountActivationInfo(request, env) {
+  if (!env?.NAVOFLO_DB) throw authError('NavoFlo database is unavailable.', 503, 'DB_UNAVAILABLE');
+  const token = new URL(request.url).searchParams.get('token') || '';
+  if (!token) throw authError('Account activation token is required.', 400, 'ACTIVATION_TOKEN_REQUIRED');
+  const tokenHash = await sha256(token);
+  const row = await env.NAVOFLO_DB.prepare(`
+    SELECT a.expires_at, u.email, u.display_name, o.name AS organization_name
+    FROM account_activation_tokens a
+    JOIN users u ON u.id=a.user_id
+    LEFT JOIN memberships m ON m.user_id=u.id AND m.active=1 AND m.role='owner'
+    LEFT JOIN organizations o ON o.id=m.organization_id
+    WHERE a.token_hash=?
+      AND a.consumed_at IS NULL
+      AND a.revoked_at IS NULL
+      AND datetime(a.expires_at) > datetime('now')
+      AND u.password_hash IS NULL
+      AND u.status='pending_setup'
+    ORDER BY m.id LIMIT 1
+  `).bind(tokenHash).first();
+  if (!row) throw authError('This account activation link is invalid or expired.', 410, 'ACTIVATION_TOKEN_EXPIRED');
+  return json({
+    valid:true,
+    email:row.email,
+    display_name:row.display_name || null,
+    organization_name:row.organization_name || 'NavoFlo',
+    expires_at:row.expires_at
+  }, 200, { 'cache-control':'no-store' });
+}
+
+export async function activateAccount(request, env) {
+  if (!env?.NAVOFLO_DB) throw authError('NavoFlo database is unavailable.', 503, 'DB_UNAVAILABLE');
+  const body = await request.json().catch(() => ({}));
+  const token = String(body.token || '');
+  if (!token) throw authError('Account activation token is required.', 400, 'ACTIVATION_TOKEN_REQUIRED');
+  const tokenHash = await sha256(token);
+  const activation = await env.NAVOFLO_DB.prepare(`
+    SELECT a.id, a.user_id, a.expires_at, u.email, u.password_hash, u.status,
+      (SELECT m.organization_id FROM memberships m WHERE m.user_id=u.id AND m.active=1 AND m.role='owner' ORDER BY m.id LIMIT 1) AS organization_id
+    FROM account_activation_tokens a
+    JOIN users u ON u.id=a.user_id
+    WHERE a.token_hash=?
+      AND a.consumed_at IS NULL
+      AND a.revoked_at IS NULL
+      AND datetime(a.expires_at) > datetime('now')
+      AND u.password_hash IS NULL
+      AND u.status='pending_setup'
+    LIMIT 1
+  `).bind(tokenHash).first();
+  if (!activation) throw authError('This account activation link is invalid or expired.', 410, 'ACTIVATION_TOKEN_EXPIRED');
+
+  const passwordHash = await hashPassword(body.password);
+  await env.NAVOFLO_DB.batch([
+    env.NAVOFLO_DB.prepare(`
+      UPDATE users SET password_hash=?, status='active', failed_login_count=0, locked_until=NULL,
+        email_verified_at=COALESCE(email_verified_at, datetime('now')),
+        activated_at=COALESCE(activated_at, datetime('now')), updated_at=datetime('now')
+      WHERE id=?
+    `).bind(passwordHash, activation.user_id),
+    env.NAVOFLO_DB.prepare(`UPDATE account_activation_tokens SET consumed_at=datetime('now') WHERE id=?`).bind(activation.id),
+    env.NAVOFLO_DB.prepare(`
+      UPDATE account_activation_tokens
+      SET revoked_at=COALESCE(revoked_at, datetime('now'))
+      WHERE user_id=? AND id<>? AND consumed_at IS NULL AND revoked_at IS NULL
+    `).bind(activation.user_id, activation.id),
+    env.NAVOFLO_DB.prepare(`UPDATE auth_sessions SET revoked_at=datetime('now') WHERE user_id=? AND revoked_at IS NULL`).bind(activation.user_id)
+  ]);
+
+  const session = await createSession(request, env, activation.user_id);
+  await logAudit(env, {
+    organization_id:activation.organization_id || null,
+    actor_user_id:activation.user_id,
+    target_user_id:activation.user_id,
+    action:'auth.activation_completed',
+    details:{ source:'stripe_checkout' }
+  });
+  return json({ ok:true }, 200, { 'set-cookie':session.cookie, 'cache-control':'no-store' });
 }
 
 

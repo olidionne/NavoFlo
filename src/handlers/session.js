@@ -7,9 +7,19 @@ export async function getSession({ request, env }) {
     if (!id || !id.startsWith('cs_')) return json({ error: 'Invalid session.' }, 400);
     const s = await stripeRequest(env, `/checkout/sessions/${encodeURIComponent(id)}?expand[]=subscription`);
     const subscription = typeof s.subscription === 'object' ? s.subscription : null;
+    const customerEmail = s.customer_details?.email || s.customer_email || null;
+    let accountStatus = 'provisioning';
+    if (env?.NAVOFLO_DB && customerEmail) {
+      const account = await env.NAVOFLO_DB.prepare(`
+        SELECT password_hash, status FROM users WHERE email=? COLLATE NOCASE LIMIT 1
+      `).bind(customerEmail).first();
+      if (account?.password_hash && account.status === 'active') accountStatus = 'ready';
+      else if (account && !account.password_hash) accountStatus = 'pending_activation';
+    }
     return json({
       customer_name: s.customer_details?.name || null,
-      customer_email: s.customer_details?.email || s.customer_email || null,
+      customer_email: customerEmail,
+      account_status: accountStatus,
       payment_status: s.payment_status,
       status: s.status,
       mode: s.mode || null,

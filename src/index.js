@@ -19,14 +19,16 @@ import {
   updateLicensingMemberLicense
 } from './handlers/licensing.js';
 import {
+  getAccountActivation,
   getAuthStatus,
   getAuthSessions,
+  postAccountActivation,
   postRevokeAuthSession,
   postRevokeOtherAuthSessions,
+  postResendAccountActivation,
   getInvitation,
   getPasswordReset,
   postAcceptInvitation,
-  postBootstrap,
   postForgotPassword,
   postLogin,
   postLogout,
@@ -47,7 +49,8 @@ const API = Object.freeze({
   '/api/auth/logout': { POST:postLogout },
   '/api/auth/forgot-password': { POST:postForgotPassword },
   '/api/auth/reset-password': { GET:getPasswordReset, POST:postResetPassword },
-  '/api/auth/bootstrap': { POST:postBootstrap },
+  '/api/auth/activation': { GET:getAccountActivation, POST:postAccountActivation },
+  '/api/auth/resend-activation': { POST:postResendAccountActivation },
   '/api/auth/invitation': { GET:getInvitation },
   '/api/auth/accept-invitation': { POST:postAcceptInvitation },
   '/api/licensing/me': { GET:getLicensingMe },

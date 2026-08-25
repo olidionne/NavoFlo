@@ -13,6 +13,7 @@ import {
   webhookEventAlreadyProcessed
 } from '../lib/stripe.js';
 import { assignPendingLicenses, ensureBillingOwnerLicense } from '../lib/licensing.js';
+import { sendBillingOwnerActivation } from '../lib/auth.js';
 
 function objectId(value) {
   return typeof value === 'string' ? value : value?.id || null;
@@ -86,8 +87,9 @@ async function syncSubscription(env, subscription, hints = {}) {
   };
   await upsertSubscription(env, row);
 
+  let ownerUser = null;
   if (organization?.id && row.customer_email) {
-    await ensureBillingOwnerLicense(env, {
+    ownerUser = await ensureBillingOwnerLicense(env, {
       organization,
       email: row.customer_email,
       display_name: hints.customer_name || null,
@@ -97,6 +99,7 @@ async function syncSubscription(env, subscription, hints = {}) {
   if (organization?.id) {
     await assignPendingLicenses(env, organization.id, row);
   }
+  return { organization, subscription:row, ownerUser };
 }
 
 async function payPadInitialInvoice(env, setupIntent, subscription, paymentMethod) {
@@ -222,7 +225,7 @@ export async function handleWebhook({ request, env }) {
       const subscriptionId = objectId(session.subscription);
       if (subscriptionId) {
         const subscription = await stripeRequest(env, `/subscriptions/${encodeURIComponent(subscriptionId)}`);
-        await syncSubscription(env, subscription, {
+        const synced = await syncSubscription(env, subscription, {
           stripe_customer_id: customerId,
           customer_email: email,
           customer_name: session.customer_details?.name || null,
@@ -230,6 +233,17 @@ export async function handleWebhook({ request, env }) {
           plan: session.metadata?.navoflo_plan || null,
           seats: Number(session.metadata?.navoflo_seats || 1)
         });
+        if (synced?.ownerUser && email) {
+          const activation = await sendBillingOwnerActivation(request, env, {
+            userId:synced.ownerUser.id,
+            email:synced.ownerUser.email || email,
+            organizationId:synced.organization?.id || null,
+            organizationName:synced.organization?.name || organizationName || null
+          });
+          if (!activation.sent && !activation.skipped) {
+            console.warn('admin-activation-email', activation.error || 'Unable to send activation email.');
+          }
+        }
       }
 
       // Keep legacy PAD setup events harmless while PAD is disabled.

@@ -1,13 +1,15 @@
 import {
   acceptInvitation,
+  accountActivationInfo,
   accountSessions,
+  activateAccount,
   authJsonError,
   authStatus,
-  bootstrapAccount,
   invitationInfo,
   login,
   logout,
   passwordResetInfo,
+  requestAccountActivation,
   requestPasswordReset,
   resetPassword,
   revokeAccountSession,
@@ -25,7 +27,9 @@ export async function postLogout({ request, env }) { return safe(() => logout(re
 export async function postForgotPassword({ request, env }) { return safe(() => requestPasswordReset(request, env)); }
 export async function getPasswordReset({ request, env }) { return safe(() => passwordResetInfo(request, env)); }
 export async function postResetPassword({ request, env }) { return safe(() => resetPassword(request, env)); }
-export async function postBootstrap({ request, env }) { return safe(() => bootstrapAccount(request, env)); }
+export async function getAccountActivation({ request, env }) { return safe(() => accountActivationInfo(request, env)); }
+export async function postAccountActivation({ request, env }) { return safe(() => activateAccount(request, env)); }
+export async function postResendAccountActivation({ request, env }) { return safe(() => requestAccountActivation(request, env)); }
 export async function getInvitation({ request, env }) { return safe(() => invitationInfo(request, env)); }
 export async function postAcceptInvitation({ request, env }) { return safe(() => acceptInvitation(request, env)); }
 

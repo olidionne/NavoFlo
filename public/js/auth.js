@@ -7,13 +7,31 @@
 
   const login=document.querySelector('[data-auth-login]');
   if(login){
-    api('/api/auth/me').then(s=>{if(s.authenticated){location.href=next();return;}if(s.bootstrap_available){login.querySelector('[data-bootstrap]').hidden=false;const a=login.querySelector('[data-bootstrap] a');if(a)a.href=(fr?'/auth/setup/':'/en/auth/setup/')+'?next='+encodeURIComponent(next());}}).catch(()=>{});
+    api('/api/auth/me').then(s=>{if(s.authenticated){location.href=next();}}).catch(()=>{});
     login.querySelector('[data-login-form]').addEventListener('submit',async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;show('');const f=new FormData(e.currentTarget);try{await api('/api/auth/login',{method:'POST',body:JSON.stringify({email:f.get('email'),password:f.get('password')})});location.href=next();}catch(err){show(err.message);b.disabled=false;}});
   }
 
   const setup=document.querySelector('[data-auth-setup]');
   if(setup){
-    setup.querySelector('[data-setup-form]').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget),p=String(f.get('password')||''),c=String(f.get('confirm')||'');if(p!==c){show(fr?'Les mots de passe ne correspondent pas.':'Passwords do not match.');return;}const b=e.submitter;b.disabled=true;try{await api('/api/auth/bootstrap',{method:'POST',body:JSON.stringify({password:p})});show(fr?'Compte activé. Redirection…':'Account activated. Redirecting…',true);location.href=next();}catch(err){show(err.message);b.disabled=false;}});
+    const params=new URLSearchParams(location.search),token=params.get('token')||'';
+    const form=setup.querySelector('[data-setup-form]'),requestForm=setup.querySelector('[data-activation-request-form]'),details=setup.querySelector('[data-activation-details]');
+    if(token){
+      history.replaceState(null,'',location.pathname);
+      if(requestForm)requestForm.hidden=true;
+      api('/api/auth/activation?token='+encodeURIComponent(token)).then(info=>{
+        if(details){details.textContent=fr?`Compte administrateur : ${info.email} · ${info.organization_name||'NavoFlo'}`:`Administrator account: ${info.email} · ${info.organization_name||'NavoFlo'}`;details.hidden=false;}
+        form.hidden=false;
+      }).catch(err=>{show(err.message);form.hidden=true;if(requestForm)requestForm.hidden=false;});
+      form.addEventListener('submit',async e=>{
+        e.preventDefault();const f=new FormData(form),p=String(f.get('password')||''),c=String(f.get('confirm')||'');
+        if(p!==c){show(fr?'Les mots de passe ne correspondent pas.':'Passwords do not match.');return;}
+        const b=e.submitter;b.disabled=true;show('');
+        try{await api('/api/auth/activation',{method:'POST',body:JSON.stringify({token,password:p})});show(fr?'Compte administrateur activé. Redirection…':'Administrator account activated. Redirecting…',true);setTimeout(()=>{location.href=fr?'/account/licenses/':'/en/account/licenses/';},700);}catch(err){show(err.message);b.disabled=false;}
+      });
+    }else{
+      form.hidden=true;
+      if(requestForm){requestForm.hidden=false;requestForm.addEventListener('submit',async e=>{e.preventDefault();const rf=e.currentTarget,b=e.submitter;b.disabled=true;show('');const f=new FormData(rf);try{await api('/api/auth/resend-activation',{method:'POST',body:JSON.stringify({email:f.get('email')})});show(fr?'Si un compte administrateur NavoFlo en attente correspond à ce courriel, un nouveau lien d’activation vient d’être envoyé.':'If a pending NavoFlo administrator account matches that email, a new activation link has been sent.',true);rf.reset();b.disabled=false;}catch(err){show(err.message);b.disabled=false;}});}
+    }
   }
 
 
