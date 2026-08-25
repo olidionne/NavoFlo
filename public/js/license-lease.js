@@ -14,6 +14,8 @@
   let expiryTimer = null;
   let started = false;
   let locked = true;
+  let acquirePromise = null;
+  let acquireGeneration = 0;
 
   function uuid() {
     if (crypto.randomUUID) return crypto.randomUUID();
@@ -67,19 +69,48 @@
 
   async function post(path, body, timeoutMs=12000) {
     const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),timeoutMs);
-    let r;
-    try { r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:controller.signal}); }
-    catch (cause) {
-      const timedOut=cause?.name==='AbortError';
-      const e=new Error(timedOut
-        ? (fr?'Le serveur de licences met trop de temps à répondre.':'The license server is taking too long to respond.')
-        : (fr?'Connexion au serveur impossible.':'Unable to reach the server.'));
-      e.network=true; e.timeout=timedOut; e.cause=cause; throw e;
-    } finally { clearTimeout(timer); }
-    const d=await r.json().catch(()=>({}));
-    if(!r.ok){const e=new Error(d.error||'License request failed');e.code=d.code;e.details=d.details;e.status=r.status;throw e;}
-    return d;
+    let timedOut=false;
+    let timer;
+    const timeout=new Promise((_,reject)=>{
+      timer=setTimeout(()=>{
+        timedOut=true;
+        try{controller.abort();}catch{}
+        const e=new Error(fr?'Le serveur de licences met trop de temps à répondre.':'The license server is taking too long to respond.');
+        e.network=true; e.timeout=true; reject(e);
+      },timeoutMs);
+    });
+    try {
+      const requestPromise=(async()=>{
+        const r=await fetch(path,{
+          method:'POST',
+          headers:{'content-type':'application/json','accept':'application/json'},
+          body:JSON.stringify(body),
+          signal:controller.signal,
+          cache:'no-store',
+          credentials:'same-origin'
+        });
+        // Keep the watchdog alive until the COMPLETE response body has been read.
+        const text=await r.text();
+        let d={};
+        if(text){ try{d=JSON.parse(text);}catch{d={error:text.slice(0,500)};} }
+        return {r,d};
+      })();
+      const {r,d}=await Promise.race([requestPromise,timeout]);
+      if(!r.ok){const e=new Error(d.error||'License request failed');e.code=d.code;e.details=d.details;e.status=r.status;throw e;}
+      return d;
+    } catch(cause) {
+      if(cause?.network) throw cause;
+      const aborted=timedOut||cause?.name==='AbortError';
+      if(aborted){
+        const e=new Error(fr?'Le serveur de licences met trop de temps à répondre.':'The license server is taking too long to respond.');
+        e.network=true; e.timeout=true; e.cause=cause; throw e;
+      }
+      if(cause?.code||cause?.status) throw cause;
+      const e=new Error(fr?'Connexion au serveur impossible.':'Unable to reach the server.');
+      e.network=true; e.cause=cause; throw e;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function stopTimers(){ clearInterval(heartbeatTimer); clearInterval(expiryTimer); heartbeatTimer=null; expiryTimer=null; }
@@ -131,19 +162,30 @@
   }
 
   async function acquire(force=false){
+    // Never allow two acquire requests from this page to race and invalidate one another.
+    if(acquirePromise) return acquirePromise;
+    const generation=++acquireGeneration;
     loading(force?(fr?'Transfert de la session vers ce poste…':'Moving the session to this device…'):undefined);
-    try{
-      const d=await post('/api/licensing/lease/acquire',{product,device_id:deviceId,device_name:deviceName,force});
-      leaseToken=d.lease_token; expiresAt=Date.parse(d.expires_at)||Date.now()+90000; schedule(); await startApp();
-    }catch(e){
-      if(e.code==='AUTH_REQUIRED'){ location.href=loginUrl(); return; }
-      if(e.code==='LICENSE_IN_USE'&&!force){ showConflict(e); return; }
-      if(['FEATURE_NOT_LICENSED','LICENSE_REQUIRED','NO_ORGANIZATION'].includes(e.code)){
-        card(`<div class="nlg-kicker">NAVOFLO · ${product.toUpperCase()}</div><h2>${fr?'Licence requise':'License required'}</h2><p>${fr?'Aucune licence donnant accès à cette application n’est actuellement attribuée à votre compte.':'No license granting access to this application is currently assigned to your account.'}</p><div class="nlg-actions"><a class="primary" href="${accountUrl()}">${fr?'Voir mes licences':'View my licenses'}</a></div>`); return;
+    acquirePromise=(async()=>{
+      try{
+        const d=await post('/api/licensing/lease/acquire',{product,device_id:deviceId,device_name:deviceName,force},12000);
+        if(generation!==acquireGeneration)return;
+        if(!d?.lease_token) throw new Error(fr?'Le serveur n’a retourné aucun jeton de licence.':'The server did not return a license token.');
+        leaseToken=d.lease_token; expiresAt=Date.parse(d.expires_at)||Date.now()+90000; schedule(); await startApp();
+      }catch(e){
+        if(generation!==acquireGeneration)return;
+        if(e.code==='AUTH_REQUIRED'){ location.href=loginUrl(); return; }
+        if(e.code==='LICENSE_IN_USE'&&!force){ showConflict(e); return; }
+        if(['FEATURE_NOT_LICENSED','LICENSE_REQUIRED','NO_ORGANIZATION'].includes(e.code)){
+          card(`<div class="nlg-kicker">NAVOFLO · ${product.toUpperCase()}</div><h2>${fr?'Licence requise':'License required'}</h2><p>${fr?'Aucune licence donnant accès à cette application n’est actuellement attribuée à votre compte.':'No license granting access to this application is currently assigned to your account.'}</p><div class="nlg-actions"><a class="primary" href="${accountUrl()}">${fr?'Voir mes licences':'View my licenses'}</a></div>`); return;
+        }
+        card(`<div class="nlg-kicker">NAVOFLO</div><h2>${fr?'Impossible de valider la licence':'Unable to validate license'}</h2><p>${String(e.message||e)}</p><div class="nlg-actions"><a href="${accountUrl()}">${fr?'Mon compte':'My account'}</a><button class="primary" data-retry>${fr?'Réessayer':'Retry'}</button></div>`);
+        gate.querySelector('[data-retry]')?.addEventListener('click',()=>acquire(false));
+      } finally {
+        if(generation===acquireGeneration) acquirePromise=null;
       }
-      card(`<div class="nlg-kicker">NAVOFLO</div><h2>${fr?'Impossible de valider la licence':'Unable to validate license'}</h2><p>${String(e.message||e)}</p><div class="nlg-actions"><a href="${accountUrl()}">${fr?'Mon compte':'My account'}</a><button class="primary" data-retry>${fr?'Réessayer':'Retry'}</button></div>`);
-      gate.querySelector('[data-retry]')?.addEventListener('click',()=>acquire(false));
-    }
+    })();
+    return acquirePromise;
   }
 
   async function release(){
@@ -161,5 +203,5 @@
   });
   addEventListener('keydown',e=>{if(locked){e.stopImmediatePropagation();}},true);
 
-  loading(); acquire(false);
+  acquire(false);
 })();
