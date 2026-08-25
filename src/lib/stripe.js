@@ -192,8 +192,8 @@ export async function upsertSubscription(env, row) {
   await env.NAVOFLO_DB.prepare(`
     INSERT INTO subscriptions (
       stripe_subscription_id, stripe_customer_id, customer_email, plan, seats,
-      status, current_period_end, cancel_at_period_end, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      status, current_period_end, cancel_at_period_end, organization_id, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(stripe_subscription_id) DO UPDATE SET
       stripe_customer_id=excluded.stripe_customer_id,
       customer_email=COALESCE(excluded.customer_email, subscriptions.customer_email),
@@ -202,11 +202,12 @@ export async function upsertSubscription(env, row) {
       status=excluded.status,
       current_period_end=COALESCE(excluded.current_period_end, subscriptions.current_period_end),
       cancel_at_period_end=excluded.cancel_at_period_end,
+      organization_id=COALESCE(excluded.organization_id, subscriptions.organization_id),
       updated_at=datetime('now')
   `).bind(
     row.stripe_subscription_id, row.stripe_customer_id || null,
     row.customer_email || null, row.plan || null, row.seats ?? null,
     row.status || 'unknown', row.current_period_end || null,
-    row.cancel_at_period_end ? 1 : 0
+    row.cancel_at_period_end ? 1 : 0, row.organization_id || null
   ).run();
 }

@@ -16,6 +16,14 @@
     nav.insertBefore(link, contactButton || null);
   }
 
+  if (nav && !nav.querySelector('a[href*="account/licenses"]')) {
+    const account = document.createElement('a');
+    account.href = isEnglish ? '/en/account/licenses/' : '/account/licenses/';
+    account.textContent = isEnglish ? 'Account' : 'Compte';
+    const contactButton = nav.querySelector('.button');
+    nav.insertBefore(account, contactButton || null);
+  }
+
   const updateHeader = () => {
     if (header) header.classList.toggle('scrolled', window.scrollY > 8);
   };

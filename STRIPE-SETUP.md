@@ -1,45 +1,82 @@
-# NavoFlo Stripe + D1 V6.9
+# NavoFlo Stripe + D1 V7.0 — Licensing
 
-## Required Cloudflare runtime values
+## Before deploying V7.0
 
-Existing Stripe price/tax variables and secrets remain unchanged.
+Run `migrations/0003_licensing_v7.sql` once in:
 
-D1 binding:
+Cloudflare → D1 → `navoflo-prod` → Console
+
+This migration links subscriptions to organizations and adds the fields used by the licensing UI.
+
+## Existing bindings and secrets
+
+Keep the existing Stripe runtime variables/secrets unchanged.
+
+Required D1 binding:
 - Binding: `NAVOFLO_DB`
 - Database: `navoflo-prod`
 
-PAD is disabled unless runtime variable `NAVOFLO_PAD_ENABLED=true` is explicitly added.
+`wrangler.jsonc` already pins this binding.
 
-## D1 migrations
+PAD remains disabled unless `NAVOFLO_PAD_ENABLED=true` is explicitly added.
 
-`0001_billing.sql` creates `subscriptions`.
+## Authentication during development
 
-`0002_licensing.sql` creates:
-- `organizations` — one billing/customer organization per Stripe customer
-- `users` — future NavoFlo login identities
-- `memberships` — user ↔ organization membership and role
-- `license_assignments` — assigned seats
-- `webhook_events` — processed Stripe webhook IDs
+V7.0 uses Cloudflare Access as the identity provider. The Worker reads:
 
-Run migration 0002 before deploying V6.9 because the webhook now writes to these tables.
+`cf-access-authenticated-user-email`
 
-## Stripe renewal date
+The first person signing in with the Stripe billing email is bootstrapped as the organization owner and receives the first available license seat.
 
-With modern Stripe API versions, the billing period is stored on subscription items. V6.9 reads the maximum `items.data[].current_period_end`, which fixes the previously null `subscriptions.current_period_end` value.
+## Licensing endpoints
 
-## Test after deployment
+- `GET /api/licensing/me` — current user, organization, subscription, seats and entitlements
+- `POST /api/licensing/members` — owner/admin adds a user and assigns an available seat
+- `POST /api/licensing/members/:userId/license` — assign/revoke a seat
+- `DELETE /api/licensing/members/:userId` — remove a non-owner member
+- `POST /api/licensing/portal` — open Stripe Billing Portal for the organization
 
-Rather than create another paid test, resend the most recent successful **card** `checkout.session.completed` event from Stripe Workbench.
+## Account page
 
-Then query D1:
+FR: `/account/licenses/`
+EN: `/en/account/licenses/`
+
+NavoBase entitlements:
+- automation: yes
+- Navo2D: no
+- Navo3D: no
+
+NavoPro entitlements:
+- automation: yes
+- Navo2D: yes
+- Navo3D: yes
+
+NavoAnalyzer remains disabled until launch.
+
+## Optional enforcement
+
+By default V7.0 only reports entitlements. To make the Worker redirect unlicensed users away from Navo2D/Navo3D, add runtime variable:
+
+`NAVOFLO_ENFORCE_LICENSES=true`
+
+Keep it unset during development until the account/licensing flow has been validated.
+
+## Test with the existing Stripe subscription
+
+No new payment is required.
+
+1. Deploy V7.0 after migration 0003.
+2. Sign in to `navoflo.com` through Cloudflare Access with the same email used for the successful Stripe test subscription.
+3. Open `/account/licenses/`.
+4. The page lazily creates the owner/membership/license assignment from the existing organization + subscription rows.
+5. Verify D1:
 
 ```sql
-SELECT * FROM organizations;
-SELECT * FROM subscriptions;
-SELECT * FROM webhook_events ORDER BY processed_at DESC LIMIT 20;
+SELECT * FROM users;
+SELECT * FROM memberships;
+SELECT * FROM license_assignments;
+SELECT stripe_subscription_id, organization_id, plan, seats, status, current_period_end
+FROM subscriptions;
 ```
 
-Expected:
-- organization row contains Stripe `cus_...`, company/name and billing email
-- subscription row contains `sub_...`, plan, seats, `active`, and non-null `current_period_end`
-- webhook event is recorded once
+If the current subscription has only one seat, seeing `1 / 1` with the Add User button disabled is expected.

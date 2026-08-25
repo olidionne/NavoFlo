@@ -12,6 +12,7 @@ import {
   verifyStripeSignature,
   webhookEventAlreadyProcessed
 } from '../lib/stripe.js';
+import { ensureBillingOwnerLicense } from '../lib/licensing.js';
 
 function objectId(value) {
   return typeof value === 'string' ? value : value?.id || null;
@@ -47,17 +48,27 @@ async function syncSubscription(env, subscription, hints = {}) {
       })
     : null;
 
-  await upsertSubscription(env, {
+  const row = {
     stripe_subscription_id: subscription.id,
     stripe_customer_id: customerId,
-    customer_email: hints.customer_email || null,
+    customer_email: hints.customer_email || organization?.billing_email || null,
     plan: subscription.metadata?.navoflo_plan || hints.plan || null,
     seats: Number(subscription.metadata?.navoflo_seats || hints.seats || 1),
     status: subscription.status || hints.status || 'unknown',
     current_period_end: subscriptionPeriodEnd(subscription),
     cancel_at_period_end: Boolean(subscription.cancel_at_period_end),
     organization_id: organization?.id || null
-  });
+  };
+  await upsertSubscription(env, row);
+
+  if (organization?.id && row.customer_email) {
+    await ensureBillingOwnerLicense(env, {
+      organization,
+      email: row.customer_email,
+      display_name: hints.customer_name || null,
+      subscription: row
+    });
+  }
 }
 
 async function payPadInitialInvoice(env, setupIntent, subscription, paymentMethod) {
@@ -186,6 +197,7 @@ export async function handleWebhook({ request, env }) {
         await syncSubscription(env, subscription, {
           stripe_customer_id: customerId,
           customer_email: email,
+          customer_name: session.customer_details?.name || null,
           organization_name: organizationName,
           plan: session.metadata?.navoflo_plan || null,
           seats: Number(session.metadata?.navoflo_seats || 1)

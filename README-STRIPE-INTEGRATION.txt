@@ -1,22 +1,27 @@
-NavoFlo Stripe Workers V6.9 — Licensing Foundation
+NavoFlo Stripe Workers V7.0 — Licensing
 
-Changes from V6.8:
-- PAD remains disabled by default for both NavoBase and NavoPro.
-- Cloudflare D1 binding NAVOFLO_DB is pinned in wrangler.jsonc to navoflo-prod.
-- Adds organizations, users, memberships, license_assignments and webhook_events tables (migration 0002_licensing.sql).
-- checkout.session.completed now creates/updates the Stripe customer organization in D1.
-- Subscription events are synchronized into D1 with plan, seats and status.
-- Fixes current_period_end for modern Stripe API versions by reading subscription item current_period_end.
-- Old PAD setup events are ignored cleanly while NAVOFLO_PAD_ENABLED is not true.
-- Stripe webhook event IDs are recorded to avoid duplicate processing.
+Changes from V6.9:
+- Adds the real NavoFlo licensing account page at /account/licenses/ (+ English version).
+- Uses Cloudflare Access authenticated email as the current development identity.
+- Automatically bootstraps the Stripe billing email as organization owner.
+- Automatically assigns the owner's first license seat when an active subscription has capacity.
+- Adds GET /api/licensing/me.
+- Adds owner/admin member + seat management APIs.
+- Adds Stripe Billing Portal access from the licensing page.
+- Returns Base/Pro entitlements from the server.
+- Adds optional server-side Navo2D/Navo3D enforcement with NAVOFLO_ENFORCE_LICENSES=true.
+- Adds subscriptions.organization_id and stores it during Stripe synchronization.
+- Keeps PAD disabled by default.
+- Pricing page is card-only while PAD is disabled.
 
-Deployment order:
-1. Run migrations/0002_licensing.sql in Cloudflare D1 navoflo-prod Console.
-2. Deploy this Worker version.
-3. In Stripe Workbench, resend the latest successful CARD checkout.session.completed event.
-4. Run in D1:
-   SELECT * FROM organizations;
-   SELECT * FROM subscriptions;
-   SELECT * FROM webhook_events ORDER BY processed_at DESC LIMIT 20;
+Required deployment order:
+1. Run migrations/0003_licensing_v7.sql ONCE in D1 navoflo-prod.
+2. Deploy V7.0.
+3. Open /account/licenses/ while signed in through Cloudflare Access using the Stripe billing email.
+4. Query D1 users, memberships and license_assignments to verify bootstrap.
 
-The users/memberships/license_assignments tables are intentionally empty until customer authentication and seat assignment UI are implemented.
+Validation performed before packaging:
+- 0001 + 0002 + 0003 migrations applied successfully to SQLite 3.46.
+- JS syntax validation passed for all Worker/public JS files.
+- Licensing integration test passed with a D1-compatible SQLite mock:
+  owner bootstrap, Pro entitlements, 2-seat cap, add member, revoke seat, reuse released seat.
