@@ -19,3 +19,6 @@
 
 /* V8 — native auth, invitations and floating user licenses */
 .license-hero-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.license-transfer,.license-invite{border:1px solid #345061;background:#101a22;color:#dce7ed;border-radius:9px;padding:10px 12px;cursor:pointer}.license-transfer:hover,.license-invite:hover{border-color:#35d39a}.invite-link-row{display:flex;gap:8px;margin:16px 0}.invite-link-row input{min-width:0;flex:1;height:44px;border:1px solid #344856;border-radius:8px;background:#091017;color:#dce7ed;padding:0 12px}.license-transfer-label{display:grid;gap:8px;margin:18px 0;font-weight:700}.license-transfer-label select{height:46px;border:1px solid #344856;border-radius:9px;background:#091017;color:#fff;padding:0 10px}.license-member>div:first-child small{display:block}.license-member .role-badge{min-width:62px;text-align:center}.license-member button:disabled{opacity:.65;cursor:not-allowed}
+
+/* V8.2 — stronger sign-out affordance */
+.license-logout{background:#8f2430!important;border:1px solid #d55a67!important;color:#fff!important;font-weight:800}.license-logout:hover{background:#a72b38!important;border-color:#ef7180!important}.license-logout:focus-visible{outline:3px solid rgba(239,113,128,.28);outline-offset:2px}
