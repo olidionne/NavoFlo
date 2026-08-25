@@ -8,7 +8,8 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/navo2d.css">
+  <link rel="stylesheet" href="/css/navo2d.css?v=8.15">
+  <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15">
 </head>
 <body class="navo2d-page">
 <header class="n2-appbar">
@@ -16,9 +17,9 @@
     <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
     <strong>NavoFlo</strong><i>/</i><b>Navo2D</b>
   </a>
-  <nav class="suite-switch" aria-label="Suite NavoFlo"><a class="active" href="/navo2d/">Navo2D</a><a href="/navo3d/">Navo3D</a></nav>
   <span class="n2-app-local"><i></i> LOCAL</span>
   <div class="n2-appbar-spacer"></div>
+  <nav class="suite-switch" aria-label="Suite NavoFlo"><a class="active" href="/navo2d/">Navo2D</a><a href="/navo3d/">Navo3D</a></nav>
   <a class="n2-site-link" href="/">Site principal</a>
   <a class="n2-site-link" href="/legal/open-source.html">Licences</a>
   <div class="lang-switcher"><a class="active" href="/navo2d/">FR</a><a href="/en/navo2d/">EN</a></div>
@@ -31,7 +32,7 @@
     <div class="n2-toolbar n2-ribbon" role="toolbar" aria-label="Outils Navo2D">
       <section class="n2-ribbon-group n2-group-file">
         <div class="n2-ribbon-layout n2-file-layout">
-          <label class="n2-tool n2-tool-large n2-open"><input id="n2-file" type="file" accept=".dxf" hidden><span class="n2-icon">＋</span><span>Ouvrir</span></label>
+          <label class="n2-tool n2-tool-large n2-open"><input id="n2-file" type="file" accept=".dxf" multiple hidden><span class="n2-icon">＋</span><span>Ouvrir</span></label>
           <button id="n2-export" class="n2-tool n2-tool-large primary" type="button" disabled><span class="n2-icon">⇩</span><span>DXF</span></button>
         </div><small>FICHIER</small>
       </section>
@@ -60,6 +61,11 @@
       <section class="n2-ribbon-group n2-group-select"><div class="n2-ribbon-layout"><div class="n2-ribbon-stack"><button id="n2-select" class="n2-tool n2-tool-small active" type="button" disabled><span class="n2-icon">↖</span><span>Sélection</span></button><button id="n2-delete" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">⌫</span><span>Supprimer</span></button></div><div class="n2-ribbon-stack n2-ribbon-stack-icons"><button id="n2-undo" class="n2-tool compact" type="button" disabled>↶</button><button id="n2-redo" class="n2-tool compact" type="button" disabled>↷</button></div></div><small>ÉDITION</small></section>
       <section class="n2-ribbon-group n2-group-layer"><div class="n2-ribbon-layout"><div class="n2-layer-picker" title="Layer courant / sélection"><span id="n2-layer-swatch" class="n2-layer-swatch"></span><select id="n2-layer-select" class="n2-layer-select" disabled></select></div><button id="n2-layers" class="n2-tool n2-tool-large" type="button" disabled><span class="n2-icon">▤</span><span>Layers</span></button></div><small>LAYERS</small></section>
       <section class="n2-ribbon-group n2-group-inspect"><div class="n2-ribbon-layout"><div class="n2-ribbon-stack"><button id="n2-measure" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">↔</span><span>Mesure</span></button><button id="n2-analyze" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">✓</span><span>Analyser</span></button><button id="n2-properties" class="n2-tool n2-tool-small" type="button" disabled><span class="n2-icon">ⓘ</span><span>Propriétés</span></button></div><div class="n2-ribbon-stack n2-ribbon-stack-icons"><button id="n2-fit" class="n2-tool compact" type="button" disabled>⌖</button><button id="n2-fullscreen" class="n2-tool compact" type="button">⛶</button><button id="n2-close" class="n2-tool compact danger" type="button" disabled>×</button></div></div><small>INSPECTER</small></section>
+    </div>
+
+    <div id="n2-doc-tabs" class="cad-doc-tabs n2-doc-tabs" aria-label="Documents ouverts">
+      <div id="n2-doc-tab-list" class="cad-doc-tab-list" role="tablist"></div>
+      <button id="n2-doc-tab-add" class="cad-doc-tab-add" type="button" title="Ouvrir un autre DXF" aria-label="Ouvrir un autre DXF">＋</button>
     </div>
     <div id="n2-more-menu" class="n2-ribbon-menu-pop n2-ribbon-menu-portal" hidden>
       <button type="button" data-command="ARRAYRECT"><b>AR</b><span>Réseau rectangulaire</span></button>
@@ -151,6 +157,6 @@
     </div>
   </div>
 </main>
-<script src="/js/license-lease-v89.js?v=8.14" data-product="navo2d" data-module="/js/navo2d.js?v=8.14"></script>
+<script src="/js/license-lease-v89.js?v=8.15" data-product="navo2d" data-module="/js/navo2d.js?v=8.15"></script>
 </body>
 </html>

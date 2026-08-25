@@ -984,3 +984,37 @@ body.navo3d-focus-mode .cad-workspace.is-fullscreen{position:fixed!important;z-i
 .cad-workspace.is-fullscreen .step-tree{font-size:10px;line-height:1.65}
 .cad-workspace.is-fullscreen .selection-summary{font-size:10.5px}
 .cad-workspace.is-fullscreen .measure-details dt,.cad-workspace.is-fullscreen .measure-details dd{font-size:10px}
+
+/* V8.15 — Navo3D uses the same compact application shell as Navo2D */
+html,body{height:100%}
+body.viewer-v2{height:100%;margin:0;overflow:hidden;background:#080d12;color:#d7e1e6}
+.n3-appbar{
+  position:fixed;z-index:100;top:0;left:0;right:0;height:48px;
+  display:flex;align-items:center;gap:12px;padding:0 12px;
+  border-bottom:1px solid rgba(255,255,255,.08);
+  background:#080d12;box-shadow:0 5px 20px rgba(0,0,0,.22)
+}
+.n3-brand{display:flex;align-items:center;gap:8px;color:#d9e2e7;text-decoration:none;font:800 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+.n3-brand .brand-mark{transform:scale(.82);transform-origin:left center;margin-right:-5px}
+.n3-brand i{font-style:normal;color:#4d5d66}.n3-brand b{color:#35d39a}
+.n3-appbar-spacer{flex:1}
+.n3-site-link{color:#74858f;text-decoration:none;font-size:10px;font-weight:700}.n3-site-link:hover{color:#35d39a}
+.n3-app-local{display:inline-flex;align-items:center;gap:6px;padding:5px 7px;border:1px solid rgba(53,211,154,.15);border-radius:5px;color:#35d39a;font:800 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em}
+.n3-app-local i{width:6px;height:6px;border-radius:50%;background:#35d39a;box-shadow:0 0 0 3px rgba(53,211,154,.08)}
+.n3-appbar .suite-switch{gap:2px;padding:2px;border-radius:7px}
+.n3-appbar .suite-switch a{padding:6px 9px;border-radius:5px;font-size:8px;letter-spacing:0}
+.n3-appbar .lang-switcher{margin-left:2px}
+.n3-main{position:fixed;z-index:1;top:48px;left:0;right:0;bottom:0;overflow:hidden}
+.n3-main .cad-shell-section{height:100%;padding:0}
+.n3-workspace-wrap{width:100%;height:100%;margin:0;padding:0}
+.n3-main .cad-workspace{width:100%;height:100%;min-height:0;max-height:none;border:0;border-radius:0;box-shadow:none}
+.n3-main .cad-toolbar{top:10px;left:10px;right:10px;border-radius:8px;background:rgba(7,12,17,.95)}
+.n3-doc-tabs{top:70px;left:10px;right:10px}
+.n3-main .empty-drop{inset:106px 0 34px}
+.n3-main .properties-drawer{top:108px;right:10px}
+.n3-main .section-panel{top:104px}
+.n3-main .measure-card-v2{bottom:48px}
+.cad-workspace.is-fullscreen .n3-doc-tabs{top:70px;left:14px;right:14px}
+.cad-workspace.is-fullscreen .properties-drawer{top:108px}
+body.navo3d-focus-mode .n3-appbar{display:none!important}
+@media(max-width:760px){.n3-site-link,.n3-app-local{display:none}.n3-appbar{padding:0 8px;gap:7px}.n3-brand i{display:none}}

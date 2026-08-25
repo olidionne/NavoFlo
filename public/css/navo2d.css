@@ -337,3 +337,18 @@ body.n2-focus-mode{overflow:hidden}
 /* Dimension properties palette */
 .n2-dim-editor{position:fixed;z-index:980;width:330px;padding:0 10px 10px;border:1px solid rgba(255,255,255,.14);border-radius:8px;background:rgba(8,14,19,.985);box-shadow:0 22px 60px rgba(0,0,0,.55);color:#c9d5db;font:700 10px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
 .n2-dim-editor select,.n2-dim-editor input{width:100%;height:29px;border:1px solid rgba(255,255,255,.1);border-radius:5px;background:#091117;color:#d6e0e5;padding:0 7px}
+
+/* V8.15 — document tabs below the compact stacked ribbon. */
+.n2-doc-tabs{top:147px}
+.n2-empty{inset:183px 0 34px}
+.n2-drawer{top:184px}
+.n2-osnap-panel{top:184px!important}
+.n2-workspace.is-fullscreen .n2-doc-tabs{top:142px}
+.n2-workspace.is-fullscreen .n2-drawer{top:179px}
+.n2-workspace.is-fullscreen .n2-osnap-panel{top:179px!important}
+@media(max-width:1000px){
+  .n2-doc-tabs{top:147px}
+  .n2-empty{inset:183px 0 34px}
+  .n2-drawer{top:184px}
+  .n2-osnap-panel{top:184px!important}
+}

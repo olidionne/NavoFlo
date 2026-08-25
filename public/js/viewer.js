@@ -64,7 +64,8 @@ const E = {
   smManualToggle:$('sm-manual-k-toggle'), smManualRow:$('sm-manual-k-row'), smManualK:$('sm-manual-k'),
   smRatio:$('sm-ratio'), smBand:$('sm-band'), smK:$('sm-k'), smNeutralRadius:$('sm-neutral-radius'),
   smBendAllowance:$('sm-bend-allowance'), smBendDeduction:$('sm-bend-deduction'), smStatus:$('sm-status'),
-  statusFile:$('status-file'), statusFormat:$('status-format'), statusUnits:$('status-units')
+  statusFile:$('status-file'), statusFormat:$('status-format'), statusUnits:$('status-units'),
+  docTabs:$('n3-doc-tabs'), docTabList:$('n3-doc-tab-list'), docTabAdd:$('n3-doc-tab-add')
 };
 
 const MAX_FILE = 250*1024*1024;
@@ -146,6 +147,87 @@ let dimensionLabel = null, dimensionLabelPoint = null;
 let worker = null, workerSeq = 0, workerPending = new Map();
 let meshObjectUrls = [];
 let baseMaterials = new Set();
+
+// V8.15 — multi-document model tabs. Only the active 3D scene is resident in
+// WebGL/OCCT at once to keep large STEP assemblies from multiplying RAM usage.
+// File objects and per-document camera/unit state stay local in the browser.
+const modelDocuments=new Map();
+let activeModelDocumentId=null,modelDocumentSeq=0,modelDocumentBusy=false,pendingModelDocumentId=null;
+function nextModelDocumentId(){return`n3doc-${++modelDocumentSeq}`;}
+function modelMainCandidates(files){return [...files].filter(file=>['step','stp','glb','gltf','stl','obj'].includes(ext(file.name)));}
+function captureActiveModelDocumentState(){
+  if(!activeModelDocumentId)return;
+  const doc=modelDocuments.get(activeModelDocumentId);if(!doc)return;
+  if(camera&&controls&&currentModel){
+    doc.view={position:camera.position.toArray(),quaternion:camera.quaternion.toArray(),up:camera.up.toArray(),target:controls.target.toArray(),displayUnit};
+  }
+  doc.lastFormat=currentFormat||doc.lastFormat||'';
+  doc.sheetMetal={thickness:sheetMetalState.thickness,radius:sheetMetalState.radius,bendAngleDeg:sheetMetalState.bendAngleDeg,manualKEnabled:sheetMetalState.manualKEnabled,manualK:sheetMetalState.manualK};
+}
+function renderModelDocumentTabs(){
+  if(!E.docTabs||!E.docTabList)return;
+  E.docTabs.classList.toggle('is-empty',modelDocuments.size===0);
+  E.docTabList.replaceChildren();
+  for(const [id,doc] of modelDocuments){
+    const active=id===activeModelDocumentId;
+    const tab=document.createElement('div');tab.className='cad-doc-tab'+(active?' active':'');tab.dataset.documentId=id;tab.setAttribute('role','tab');tab.setAttribute('aria-selected',active?'true':'false');tab.title=doc.name;
+    const name=document.createElement('span');name.className='cad-doc-tab-name';name.textContent=doc.name;tab.append(name);
+    const close=document.createElement('button');close.type='button';close.className='cad-doc-tab-close';close.textContent='×';close.disabled=modelDocumentBusy&&active;close.title=FR?'Fermer le modèle':'Close model';close.addEventListener('click',event=>{event.stopPropagation();closeModelDocument(id);});tab.append(close);
+    tab.addEventListener('click',()=>activateModelDocument(id));E.docTabList.append(tab);
+  }
+  requestAnimationFrame(()=>E.docTabList.querySelector('.cad-doc-tab.active')?.scrollIntoView({block:'nearest',inline:'nearest'}));
+}
+function buildModelDocumentSets(files){
+  const all=[...files];const mains=modelMainCandidates(all);if(!mains.length)return[];
+  if(mains.length===1)return[{main:mains[0],files:all}];
+  const mainSet=new Set(mains),aux=all.filter(file=>!mainSet.has(file));
+  return mains.map(main=>({main,files:[main,...aux]}));
+}
+async function openModelDocuments(files){
+  const sets=buildModelDocumentSets(files);
+  if(!sets.length)return showError(T.unsupported);
+  const newIds=[];
+  for(const set of sets){
+    if(set.files.some(file=>file.size>MAX_FILE)){showError(T.tooLarge);continue;}
+    if(set.files.reduce((sum,file)=>sum+file.size,0)>MAX_TOTAL){showError(T.totalTooLarge);continue;}
+    const id=nextModelDocumentId();modelDocuments.set(id,{id,name:set.main.name,main:set.main,files:set.files,view:null,lastFormat:ext(set.main.name).toUpperCase()});newIds.push(id);
+  }
+  renderModelDocumentTabs();
+  if(newIds.length)await activateModelDocument(newIds[0]);
+}
+function restoreModelDocumentView(doc){
+  const view=doc?.view;if(!view||!camera||!controls)return false;
+  try{
+    camera.position.fromArray(view.position);camera.quaternion.fromArray(view.quaternion);if(Array.isArray(view.up))camera.up.fromArray(view.up);controls.target.fromArray(view.target);
+    if(['u','mm','cm','m','in'].includes(view.displayUnit)){displayUnit=view.displayUnit;E.unitSelect.value=displayUnit;updateDisplayedUnits();}
+    cadNav.pivot.copy(controls.target);cadNav.wheelFocus.copy(controls.target);updateZoomClipping();updateDimensionLabelPosition();return true;
+  }catch{return false;}
+}
+async function activateModelDocument(id){
+  if(!id||!modelDocuments.has(id))return;
+  if(modelDocumentBusy){pendingModelDocumentId=id;return;}
+  if(id===activeModelDocumentId&&currentModel)return;
+  captureActiveModelDocumentState();activeModelDocumentId=id;renderModelDocumentTabs();
+  const doc=modelDocuments.get(id);modelDocumentBusy=true;renderModelDocumentTabs();
+  try{await loadFileSet(doc.files,{restoreView:doc.view,restoreSheetMetal:doc.sheetMetal});}
+  finally{
+    modelDocumentBusy=false;renderModelDocumentTabs();
+    const pending=pendingModelDocumentId;pendingModelDocumentId=null;
+    if(pending&&pending!==activeModelDocumentId&&modelDocuments.has(pending))await activateModelDocument(pending);
+  }
+}
+function cycleModelDocument(direction=1){
+  const ids=[...modelDocuments.keys()];if(ids.length<2)return;const index=Math.max(0,ids.indexOf(activeModelDocumentId));activateModelDocument(ids[(index+direction+ids.length)%ids.length]);
+}
+async function closeModelDocument(id=activeModelDocumentId){
+  if(!id||!modelDocuments.has(id)||modelDocumentBusy)return;
+  if(id!==activeModelDocumentId){modelDocuments.delete(id);renderModelDocumentTabs();return;}
+  captureActiveModelDocumentState();
+  const ids=[...modelDocuments.keys()],index=ids.indexOf(id),next=ids[index+1]||ids[index-1]||null;
+  modelDocuments.delete(id);activeModelDocumentId=null;await clearModel(true);renderModelDocumentTabs();
+  if(next&&modelDocuments.has(next))await activateModelDocument(next);
+}
+
 
 const navo3dPreferences={gridVisible:true,edgesVisible:true,selectionMode:'auto',propertiesOpen:false,materialClass:'hard'};
 function navo3dPreferenceSnapshot(){return {...navo3dPreferences,edgesVisible:Boolean(edgesVisible),selectionMode,propertiesOpen:Boolean(navo3dPreferences.propertiesOpen),materialClass:sheetMetalState.materialClass};}
@@ -253,6 +335,7 @@ async function init() {
   bindUI();
   updatePCCheck();
   resize();
+  renderModelDocumentTabs();
   renderer.setAnimationLoop(render);
 }
 
@@ -261,7 +344,7 @@ function bindUI() {
 
   E.input.addEventListener('change', event => {
     const files = [...(event.target.files || [])];
-    if (files.length) loadFiles(files);
+    if (files.length) openModelDocuments(files);
     event.target.value = '';
   });
 
@@ -275,10 +358,11 @@ function bindUI() {
   }));
   E.workspace.addEventListener('drop', event => {
     const files=[...(event.dataTransfer?.files||[])];
-    if (files.length) loadFiles(files);
+    if (files.length) openModelDocuments(files);
   });
 
-  E.clear.addEventListener('click', clearModel);
+  E.clear.addEventListener('click', () => closeModelDocument());
+  E.docTabAdd?.addEventListener('click',()=>E.input.click());
   E.fit.addEventListener('click', () => fitCamera('iso'));
   E.edges.addEventListener('click', toggleEdges);
   E.gridToggle.addEventListener('click', toggleGrid);
@@ -498,6 +582,13 @@ function bindUI() {
 
   addEventListener('keydown', event => {
     if (event.target && ['INPUT','SELECT','TEXTAREA'].includes(event.target.tagName)) return;
+
+    if ((event.ctrlKey||event.metaKey) && event.key==='Tab' && modelDocuments.size>1) {
+      event.preventDefault();cycleModelDocument(event.shiftKey?-1:1);return;
+    }
+    if ((event.ctrlKey||event.metaKey) && event.key.toLowerCase()==='w' && activeModelDocumentId) {
+      event.preventDefault();closeModelDocument();return;
+    }
 
     if (event.key === 'Escape') {
       closeSelectOther();
@@ -951,7 +1042,7 @@ function render() {
   updateDimensionLabelPosition();
 }
 
-async function loadFiles(files) {
+async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
   if (files.some(f=>f.size>MAX_FILE)) return showError(T.tooLarge);
   if (files.reduce((s,f)=>s+f.size,0)>MAX_TOTAL) return showError(T.totalTooLarge);
 
@@ -1001,6 +1092,15 @@ async function loadFiles(files) {
     E.statusFormat.textContent=currentFormat;
     E.statusUnits.textContent=unitLabel(displayUnit);
     fitCamera('iso');
+    if(restoreView)restoreModelDocumentView({view:restoreView});
+    if(currentStepResult&&restoreSheetMetal){
+      sheetMetalState.thickness=Number.isFinite(restoreSheetMetal.thickness)?restoreSheetMetal.thickness:null;
+      sheetMetalState.radius=Number.isFinite(restoreSheetMetal.radius)?restoreSheetMetal.radius:null;
+      sheetMetalState.bendAngleDeg=Number.isFinite(restoreSheetMetal.bendAngleDeg)?restoreSheetMetal.bendAngleDeg:90;
+      sheetMetalState.manualKEnabled=Boolean(restoreSheetMetal.manualKEnabled);
+      sheetMetalState.manualK=Number.isFinite(restoreSheetMetal.manualK)?restoreSheetMetal.manualK:(AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness??0.40);
+      syncSheetMetalInputs();
+    }
   } catch (error) {
     console.error('[NavoFlo CAD Viewer]',error);
     await clearModel(false);

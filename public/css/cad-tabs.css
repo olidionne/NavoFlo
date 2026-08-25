@@ -1,0 +1,81 @@
+/* V8.15 — shared CAD document tabs (Navo2D + Navo3D) */
+.cad-doc-tabs{
+  position:absolute;
+  z-index:28;
+  height:32px;
+  display:flex;
+  align-items:stretch;
+  gap:4px;
+  padding:0 4px;
+  border:1px solid rgba(255,255,255,.075);
+  border-radius:7px;
+  background:rgba(7,12,17,.95);
+  box-shadow:0 8px 24px rgba(0,0,0,.22);
+  backdrop-filter:blur(12px);
+  overflow:hidden;
+}
+.cad-doc-tab-list{
+  min-width:0;
+  display:flex;
+  align-items:stretch;
+  gap:2px;
+  overflow-x:auto;
+  overflow-y:hidden;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(117,138,149,.45) transparent;
+}
+.cad-doc-tab-list::-webkit-scrollbar{height:4px}
+.cad-doc-tab-list::-webkit-scrollbar-track{background:transparent}
+.cad-doc-tab-list::-webkit-scrollbar-thumb{background:rgba(117,138,149,.4);border-radius:999px}
+.cad-doc-tab{
+  flex:0 0 auto;
+  min-width:118px;
+  max-width:240px;
+  height:30px;
+  display:flex;
+  align-items:center;
+  gap:7px;
+  padding:0 6px 0 10px;
+  border:0;
+  border-bottom:2px solid transparent;
+  background:transparent;
+  color:#9aabb4;
+  font:700 9.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  cursor:pointer;
+  transition:background .12s ease,color .12s ease,border-color .12s ease;
+}
+.cad-doc-tab:hover{background:rgba(255,255,255,.035);color:#d7e1e6}
+.cad-doc-tab.active{
+  background:rgba(53,211,154,.07);
+  border-bottom-color:#35d39a;
+  color:#dff8ef;
+}
+.cad-doc-tab-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cad-doc-tab-dirty{flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:#35d39a;box-shadow:0 0 0 2px rgba(53,211,154,.08)}
+.cad-doc-tab-close{
+  flex:0 0 auto;
+  width:20px;height:20px;
+  display:grid;place-items:center;
+  margin-left:auto;
+  border:0;border-radius:5px;
+  background:transparent;
+  color:#71828c;
+  font:800 14px/1 Arial,sans-serif;
+  cursor:pointer;
+}
+.cad-doc-tab-close:hover{background:rgba(255,100,100,.10);color:#ffaaaa}
+.cad-doc-tab-add{
+  flex:0 0 30px;
+  width:30px;height:30px;
+  border:0;border-left:1px solid rgba(255,255,255,.07);
+  background:transparent;
+  color:#c5d1d7;
+  font:500 18px/1 Arial,sans-serif;
+  cursor:pointer;
+}
+.cad-doc-tab-add:hover{background:rgba(53,211,154,.08);color:#63e3b4}
+.cad-doc-tabs.is-empty .cad-doc-tab-list{display:none}
+
+@media(max-width:760px){
+  .cad-doc-tab{min-width:96px;max-width:170px;padding-left:8px;font-size:8.5px}
+}

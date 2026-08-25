@@ -8,7 +8,8 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/viewer.css">
+  <link rel="stylesheet" href="/css/viewer.css?v=8.15">
+  <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15">
   <script type="importmap">
   {
     "imports": {
@@ -19,42 +20,22 @@
   </script>
 </head>
 <body class="viewer-v2">
-<header class="site-header viewer-site-header">
-  <div class="container viewer-wide nav-wrap">
-    <a class="brand" href="/">
-      <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
-      <span>NavoFlo</span>
-    </a>
-    <div class="viewer-top-nav">
-      <nav class="suite-switch" aria-label="Suite NavoFlo">
-        <a href="/navo2d/">Navo2D</a>
-        <a class="active" href="/navo3d/">Navo3D</a>
-      </nav>
-      <a class="viewer-back" href="/">← Site principal</a>
-      <div class="lang-switcher">
-        <a class="active" href="/navo3d/">FR</a>
-        <a class="" href="/en/navo3d/">EN</a>
-      </div>
-    </div>
-  </div>
+<header class="n3-appbar">
+  <a class="n3-brand" href="/" aria-label="NavoFlo">
+    <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+    <strong>NavoFlo</strong><i>/</i><b>Navo3D</b>
+  </a>
+  <span class="n3-app-local"><i></i> LOCAL</span>
+  <div class="n3-appbar-spacer"></div>
+  <nav class="suite-switch" aria-label="Suite NavoFlo"><a href="/navo2d/">Navo2D</a><a class="active" href="/navo3d/">Navo3D</a></nav>
+  <a class="n3-site-link" href="/">Site principal</a>
+  <a class="n3-site-link" href="/legal/open-source.html">Licences</a>
+  <div class="lang-switcher"><a class="active" href="/navo3d/">FR</a><a href="/en/navo3d/">EN</a></div>
 </header>
 
-<main>
-<section class="viewer-v2-intro">
-  <div class="container viewer-wide intro-v2-row">
-    <div>
-      <span class="viewer-kicker">NAVOFLO · MOTEUR 3D</span>
-      <h1>Navo<span>3D</span></h1>
-      <p>Inspection CAD 3D locale, mesures exactes STEP et analyse tôlerie.</p>
-    </div>
-    <div class="privacy-pill">
-      <i></i><div><strong>Le modèle reste sur votre PC</strong><small>Le fichier CAD n'est pas envoyé à NavoFlo.</small></div>
-    </div>
-  </div>
-</section>
-
+<main class="n3-main">
 <section class="cad-shell-section">
-<div class="container viewer-wide">
+<div class="n3-workspace-wrap">
   <div id="cad-workspace" class="cad-workspace">
     <canvas id="viewer-canvas" aria-label="Navo3D"></canvas>
 
@@ -137,6 +118,11 @@
         <span class="tool-icon fullscreen-icon">⛶</span><span>Plein écran</span>
       </button>
       <button id="clear-model" class="tool-button compact danger" type="button" disabled title="Fermer">×</button>
+    </div>
+
+    <div id="n3-doc-tabs" class="cad-doc-tabs n3-doc-tabs" aria-label="Documents ouverts">
+      <div id="n3-doc-tab-list" class="cad-doc-tab-list" role="tablist"></div>
+      <button id="n3-doc-tab-add" class="cad-doc-tab-add" type="button" title="Ouvrir un autre modèle" aria-label="Ouvrir un autre modèle">＋</button>
     </div>
 
     <div id="empty-drop" class="empty-drop">
@@ -297,6 +283,6 @@
 </section>
 </main>
 
-<script type="module" src="/js/viewer.js?v=8.14"></script>
+<script type="module" src="/js/viewer.js?v=8.15"></script>
 </body>
 </html>

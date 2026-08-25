@@ -9,14 +9,14 @@ const T=FR?{
   selected:'sélectionnée(s)', noSelection:'Aucune sélection', deleted:'Entité(s) supprimée(s).', moved:'Entité(s) déplacée(s).', exported:'DXF exporté.',
   analysisDone:'Analyse terminée.', openContours:'Contours ouverts', duplicates:'Doublons potentiels', unsupported:'Entités non prises en charge', approx:'Entités approximées', layers:'Layers',
   clean:'Aucun problème évident détecté.', chooseSelection:'Sélectionnez au moins une entité.', parser:'Moteur DXF', normalized:'DXF normalisé', snap:'Snap',
-  unused:'INUTILISÉ', frozen:'GELÉ', off:'OFF', window:'FENÊTRE', crossing:'CROSSING', selectAdded:'Sélection ajoutée', selectRemoved:'Sélection retirée',
+  unused:'INUTILISÉ', frozen:'GELÉ', off:'OFF', window:'FENÊTRE', crossing:'CROSSING', selectAdded:'Sélection ajoutée', selectRemoved:'Sélection retirée', closeDirty:'Ce dessin contient des modifications non exportées. Fermer quand même ?',
 }: {
   noDxf:'No DXF', entities:'entities', units:'Units', unitless:'unitless', loadFail:'Unable to read this DXF.',
   firstPoint:'Click the first point.', secondPoint:'Click the second point.', moveBase:'Click the base point.', moveTarget:'Click the target point.',
   selected:'selected', noSelection:'No selection', deleted:'Entity/entities deleted.', moved:'Entity/entities moved.', exported:'DXF exported.',
   analysisDone:'Analysis complete.', openContours:'Open contours', duplicates:'Potential duplicates', unsupported:'Unsupported entities', approx:'Approximated entities', layers:'Layers',
   clean:'No obvious issue detected.', chooseSelection:'Select at least one entity.', parser:'DXF engine', normalized:'Normalized DXF', snap:'Snap',
-  unused:'UNUSED', frozen:'FROZEN', off:'OFF', window:'WINDOW', crossing:'CROSSING', selectAdded:'Selection added', selectRemoved:'Selection removed',
+  unused:'UNUSED', frozen:'FROZEN', off:'OFF', window:'WINDOW', crossing:'CROSSING', selectAdded:'Selection added', selectRemoved:'Selection removed', closeDirty:'This drawing has unexported changes. Close it anyway?',
  };
 
 const CMDT=FR?{
@@ -65,7 +65,8 @@ const E={
   osnapPanel:$('n2-osnap-panel'),osnapClose:$('n2-osnap-close'),
   statusGrid:$('n2-status-grid'),statusGridSnap:$('n2-status-gridsnap'),statusOrtho:$('n2-status-ortho'),statusPolar:$('n2-status-polar'),
   statusOsnap:$('n2-status-osnap'),statusOtrack:$('n2-status-otrack'),statusDyn:$('n2-status-dyn'),polarAngle:$('n2-polar-angle'),
-  layerSelect:$('n2-layer-select'),layerSwatch:$('n2-layer-swatch'),moreToggle:$('n2-more-toggle'),moreMenu:$('n2-more-menu')
+  layerSelect:$('n2-layer-select'),layerSwatch:$('n2-layer-swatch'),moreToggle:$('n2-more-toggle'),moreMenu:$('n2-more-menu'),
+  docTabs:$('n2-doc-tabs'),docTabList:$('n2-doc-tab-list'),docTabAdd:$('n2-doc-tab-add')
 };
 
 const ctx=E.canvas.getContext('2d',{alpha:false});
@@ -92,6 +93,90 @@ const state={
 
 const UNIT_LABELS={0:'u',1:'in',2:'ft',3:'mi',4:'mm',5:'cm',6:'m',7:'km',8:'µin',9:'mil',10:'yd',11:'Å',12:'nm',13:'µm',14:'dm'};
 let toastTimer=0;
+
+// V8.15 — multi-document DXF workspace. Geometry stays local in memory and
+// each tab owns its own edit/history/view state while drafting preferences remain per user.
+const openDocuments=new Map();
+let activeDocumentId=null,documentSeq=0,untitledSeq=0;
+function nextDocumentId(){return`n2doc-${++documentSeq}`;}
+function captureDocumentState(){
+  return{
+    file:state.file,dxf:state.dxf,rawText:state.rawText,entities:state.entities,layers:state.layers,
+    layerDefinitions:state.layerDefinitions,unsupported:state.unsupported,selected:state.selected,
+    unitCode:state.unitCode,unitLabel:state.unitLabel,bounds:state.bounds,view:state.view,
+    history:state.history,future:state.future,analysis:state.analysis,dirty:state.dirty,
+    entitySeq:state.entitySeq,activeLayer:state.activeLayer
+  };
+}
+function saveActiveDocumentState(){
+  if(!activeDocumentId)return;
+  const doc=openDocuments.get(activeDocumentId);if(!doc)return;
+  doc.state=captureDocumentState();doc.name=state.file?.name||doc.name;doc.dirty=Boolean(state.dirty);
+}
+function resetTransientDocumentState(){
+  state.drag=null;state.selectionBox=null;state.measure=[];state.moveBase=null;state.hover=null;
+  state.trackingPoint=null;state.lastSnap=null;state.snapCycle=0;state.gripEdit=null;state.hoverGrip=null;
+  state.trimBrush=null;state.lastCrossingRect=null;
+}
+function restoreDocumentState(doc){
+  closeTextEditor(false);cancelGripEdit(false);cancelCommand(false);closeContextMenu();clearMeasure();
+  const d=doc?.state;if(!d)return;
+  state.file=d.file;state.dxf=d.dxf;state.rawText=d.rawText;state.entities=d.entities;state.layers=d.layers;
+  state.layerDefinitions=d.layerDefinitions;state.unsupported=d.unsupported;state.selected=d.selected;
+  state.unitCode=d.unitCode;state.unitLabel=d.unitLabel;state.bounds=d.bounds;state.view=d.view;
+  state.history=d.history;state.future=d.future;state.analysis=d.analysis;state.dirty=Boolean(d.dirty);
+  state.entitySeq=d.entitySeq;state.activeLayer=d.activeLayer;
+  resetTransientDocumentState();
+  syncUI();renderLayerList();renderProperties();syncDraftingUI();resize();
+}
+function registerCurrentDocument(name=state.file?.name||`Drawing${++untitledSeq}.dxf`){
+  const id=nextDocumentId();
+  const doc={id,name,state:captureDocumentState(),dirty:Boolean(state.dirty)};
+  openDocuments.set(id,doc);activeDocumentId=id;renderDocumentTabs();return id;
+}
+function renderDocumentTabs(){
+  if(!E.docTabs||!E.docTabList)return;
+  E.docTabs.classList.toggle('is-empty',openDocuments.size===0);
+  E.docTabList.replaceChildren();
+  for(const [id,doc] of openDocuments){
+    const active=id===activeDocumentId;
+    const dirty=active?Boolean(state.dirty):Boolean(doc.state?.dirty||doc.dirty);
+    const tab=document.createElement('div');tab.className='cad-doc-tab'+(active?' active':'');tab.dataset.documentId=id;tab.setAttribute('role','tab');tab.setAttribute('aria-selected',active?'true':'false');tab.title=doc.name;
+    const name=document.createElement('span');name.className='cad-doc-tab-name';name.textContent=doc.name;tab.append(name);
+    if(dirty){const mark=document.createElement('i');mark.className='cad-doc-tab-dirty';mark.title=FR?'Modifications non exportées':'Unexported changes';tab.append(mark);}
+    const close=document.createElement('button');close.type='button';close.className='cad-doc-tab-close';close.textContent='×';close.title=FR?'Fermer le dessin':'Close drawing';close.addEventListener('click',event=>{event.stopPropagation();closeDocument(id);});tab.append(close);
+    tab.addEventListener('click',()=>switchDocument(id));E.docTabList.append(tab);
+  }
+  requestAnimationFrame(()=>E.docTabList.querySelector('.cad-doc-tab.active')?.scrollIntoView({block:'nearest',inline:'nearest'}));
+}
+function switchDocument(id){
+  if(!id||id===activeDocumentId||!openDocuments.has(id))return;
+  saveActiveDocumentState();activeDocumentId=id;restoreDocumentState(openDocuments.get(id));renderDocumentTabs();
+}
+function cycleDocument(direction=1){
+  const ids=[...openDocuments.keys()];if(ids.length<2)return;const index=Math.max(0,ids.indexOf(activeDocumentId));switchDocument(ids[(index+direction+ids.length)%ids.length]);
+}
+function clearDrawingState(){
+  closeTextEditor(false);cancelGripEdit(false);cancelCommand(false);state.file=null;state.dxf=null;state.rawText='';state.entities=[];state.layers.clear();state.layerDefinitions.clear();state.unsupported=[];state.selected.clear();state.history=[];state.future=[];state.analysis=null;state.bounds=null;state.selectionBox=null;state.dirty=false;state.entitySeq=0;closeContextMenu();clearMeasure();syncUI();E.layerDrawer.hidden=true;E.propDrawer.hidden=true;
+}
+function closeDocument(id=activeDocumentId){
+  const doc=openDocuments.get(id);if(!doc)return;
+  if(id===activeDocumentId)saveActiveDocumentState();
+  const dirty=Boolean(openDocuments.get(id)?.state?.dirty);
+  if(dirty&&!confirm(T.closeDirty))return;
+  const ids=[...openDocuments.keys()],index=ids.indexOf(id);openDocuments.delete(id);
+  if(id!==activeDocumentId){renderDocumentTabs();return;}
+  const next=ids[index+1]||ids[index-1]||null;
+  activeDocumentId=null;
+  if(next&&openDocuments.has(next)){activeDocumentId=next;restoreDocumentState(openDocuments.get(next));}
+  else clearDrawingState();
+  renderDocumentTabs();
+}
+async function openDxfFiles(files){
+  const list=[...files].filter(file=>/\.dxf$/i.test(file.name));
+  for(const file of list)await loadDxf(file);
+}
+
 
 function navo2dPreferenceSnapshot(){
   return {
@@ -138,10 +223,10 @@ async function init(){
 
 function bindUI(){
   addEventListener('resize',resize);
-  E.file.addEventListener('change',()=>{const f=E.file.files?.[0];if(f)loadDxf(f);E.file.value='';});
+  E.file.addEventListener('change',()=>{const files=[...(E.file.files||[])];if(files.length)openDxfFiles(files);E.file.value='';});
   ['dragenter','dragover'].forEach(type=>E.workspace.addEventListener(type,e=>{e.preventDefault();E.workspace.classList.add('drag-over');}));
   ['dragleave','drop'].forEach(type=>E.workspace.addEventListener(type,e=>{e.preventDefault();E.workspace.classList.remove('drag-over');}));
-  E.workspace.addEventListener('drop',e=>{const f=[...(e.dataTransfer?.files||[])].find(x=>x.name.toLowerCase().endsWith('.dxf'));if(f)loadDxf(f);});
+  E.workspace.addEventListener('drop',e=>{const files=[...(e.dataTransfer?.files||[])].filter(x=>/\.dxf$/i.test(x.name));if(files.length)openDxfFiles(files);});
 
   E.select.addEventListener('click',()=>setTool('select'));
   E.measure.addEventListener('click',()=>setTool('measure'));
@@ -160,7 +245,8 @@ function bindUI(){
   E.props.addEventListener('click',()=>toggleDrawer('properties'));
   E.analyze.addEventListener('click',runAnalysis);
   E.export.addEventListener('click',exportDxf);
-  E.close.addEventListener('click',clearFile);
+  E.close.addEventListener('click',()=>closeDocument());
+  E.docTabAdd?.addEventListener('click',()=>E.file.click());
   E.fullscreen?.addEventListener('click',toggleFullscreen);
   E.layersAll.addEventListener('click',()=>setAllLayers(true));
   E.layersNone.addEventListener('click',()=>setAllLayers(false));
@@ -220,24 +306,32 @@ function bindUI(){
   E.canvas.addEventListener('wheel',wheel,{passive:false});
 
   addEventListener('keydown',handleGlobalKeyDown);
+  addEventListener('beforeunload',event=>{saveActiveDocumentState();if([...openDocuments.values()].some(doc=>doc.state?.dirty)){event.preventDefault();event.returnValue='';}});
   syncDraftingUI();
   updateCommandPrompt();
+  renderDocumentTabs();
 }
 
 async function loadDxf(file){
+  const previousId=activeDocumentId;
   try{
     const text=await file.text();
     const parser=new DxfParser();
     const dxf=parser.parseSync(text);
-    state.file=file;state.dxf=dxf;state.rawText=text;state.unsupported=[];state.selected.clear();state.history=[];state.future=[];state.analysis=null;state.dirty=false;state.selectionBox=null;
+    saveActiveDocumentState();
+    state.file=file;state.dxf=dxf;state.rawText=text;state.unsupported=[];state.selected=new Set();state.history=[];state.future=[];state.analysis=null;state.dirty=false;state.selectionBox=null;
     state.unitCode=Number(dxf?.header?.$INSUNITS??0)||0;state.unitLabel=UNIT_LABELS[state.unitCode]||'u';
     state.layerDefinitions=buildLayerDefinitions(dxf,text);
     state.entities=normalizeDxf(dxf);
     state.entitySeq=state.entities.length;state.activeLayer=state.layerDefinitions.has('0')?'0':(state.layerDefinitions.keys().next().value||'0');
+    state.view={scale:1,cx:0,cy:0};resetTransientDocumentState();
     cancelCommand(false);
     rebuildLayers();recomputeBounds();fitView();syncUI();renderLayerList();renderProperties();syncDraftingUI();
-    E.empty.hidden=true;toast(`${file.name} · ${state.entities.length} ${T.entities}`);
-  }catch(err){console.error(err);toast(T.loadFail);}
+    E.empty.hidden=true;registerCurrentDocument(file.name);toast(`${file.name} · ${state.entities.length} ${T.entities}`);
+  }catch(err){
+    console.error(err);toast(T.loadFail);
+    if(previousId&&openDocuments.has(previousId)){activeDocumentId=previousId;restoreDocumentState(openDocuments.get(previousId));renderDocumentTabs();}
+  }
 }
 
 function normalizeDxf(dxf){
@@ -1833,7 +1927,7 @@ function renderLayerList(){
   }
 }
 
-function pushHistory(){state.history.push(JSON.stringify(state.entities));if(state.history.length>30)state.history.shift();state.future=[];syncHistoryButtons();state.dirty=true;}
+function pushHistory(){state.history.push(JSON.stringify(state.entities));if(state.history.length>30)state.history.shift();state.future=[];syncHistoryButtons();state.dirty=true;renderDocumentTabs();}
 function undo(){closeTextEditor(false);cancelGripEdit(false);if(!state.history.length)return;state.future.push(JSON.stringify(state.entities));state.entities=JSON.parse(state.history.pop());state.selected.clear();rebuildLayers();recomputeBounds();renderLayerList();syncUI();}
 function redo(){closeTextEditor(false);cancelGripEdit(false);if(!state.future.length)return;state.history.push(JSON.stringify(state.entities));state.entities=JSON.parse(state.future.pop());state.selected.clear();rebuildLayers();recomputeBounds();renderLayerList();syncUI();}
 function deleteSelected(){cancelGripEdit(false);if(!state.selected.size)return;pushHistory();state.entities=state.entities.filter(e=>!state.selected.has(e.id));state.selected.clear();rebuildLayers();recomputeBounds();renderLayerList();syncUI();toast(T.deleted);}
@@ -1858,8 +1952,8 @@ function syncSelectionUI(){
   syncLayerPicker();
 }
 function syncHistoryButtons(){E.undo.disabled=!state.history.length;E.redo.disabled=!state.future.length;}
-function syncUI(){const has=Boolean(state.file);for(const b of[E.select,E.measure,E.fit,E.grid,E.snap,E.layers,E.analyze,E.props,E.export,E.close,E.layerSelect].filter(Boolean))b.disabled=!has;E.statusFile.textContent=state.file?.name||T.noDxf;E.statusEntities.textContent=has?`${state.entities.length} ${T.entities}`:'—';E.statusUnits.textContent=has?state.unitLabel:'—';if(E.currentLayer)E.currentLayer.textContent=has?`Layer: ${state.activeLayer||'0'}`:'Layer: —';E.empty.hidden=has;syncHistoryButtons();renderProperties();syncDraftingUI();syncLayerPicker();updateCommandPrompt();}
-function clearFile(){closeTextEditor(false);cancelGripEdit(false);cancelCommand(false);state.file=null;state.dxf=null;state.rawText='';state.entities=[];state.layers.clear();state.layerDefinitions.clear();state.unsupported=[];state.selected.clear();state.history=[];state.future=[];state.analysis=null;state.bounds=null;state.selectionBox=null;closeContextMenu();clearMeasure();syncUI();E.layerDrawer.hidden=true;E.propDrawer.hidden=true;}
+function syncUI(){const has=Boolean(state.file);for(const b of[E.select,E.measure,E.fit,E.grid,E.snap,E.layers,E.analyze,E.props,E.export,E.close,E.layerSelect].filter(Boolean))b.disabled=!has;E.statusFile.textContent=state.file?.name||T.noDxf;E.statusEntities.textContent=has?`${state.entities.length} ${T.entities}`:'—';E.statusUnits.textContent=has?state.unitLabel:'—';if(E.currentLayer)E.currentLayer.textContent=has?`Layer: ${state.activeLayer||'0'}`:'Layer: —';E.empty.hidden=has;syncHistoryButtons();renderProperties();syncDraftingUI();syncLayerPicker();updateCommandPrompt();renderDocumentTabs();}
+function clearFile(){closeDocument();}
 function toggleDrawer(which,force){const el=which==='layers'?E.layerDrawer:E.propDrawer,other=which==='layers'?E.propDrawer:E.layerDrawer;const show=force??el.hidden;el.hidden=!show;if(show)other.hidden=true;if(which==='properties'&&show)renderProperties();}
 
 function exportDxf(){
@@ -1875,6 +1969,7 @@ function exportDxf(){
     }
     const name=(state.file.name.replace(/\.dxf$/i,'')||'navo2d')+'-Navo2D.dxf';
     downloadBlob(result.text,name,'application/dxf');
+    state.dirty=false;saveActiveDocumentState();renderDocumentTabs();
     commandLog(`DXF export OK · ${result.written}/${state.entities.length} ${T.entities} · ${state.layers.size} layers`);
     toast(`${T.exported} ${result.written} ${T.entities}`);
   }catch(error){
@@ -2157,6 +2252,8 @@ function handleGlobalKeyDown(event){
   const target=event.target;
   const editing=target===E.commandInput||target?.matches?.('input,select,textarea,[contenteditable="true"]');
 
+  if((event.ctrlKey||event.metaKey)&&event.key==='Tab'&&openDocuments.size>1){event.preventDefault();cycleDocument(event.shiftKey?-1:1);return;}
+  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='w'&&activeDocumentId){event.preventDefault();closeDocument();return;}
   if(state.gripEdit&&event.key==='Tab'){event.preventDefault();cycleGripDynamicField(E.commandInput?.value||'');return;}
   if(state.gripEdit&&event.key==='Escape'){event.preventDefault();cancelGripEdit(true);try{E.canvas.focus()}catch{}return;}
   if(state.gripEdit&&(event.key==='Enter'||event.key===' ')){event.preventDefault();const raw=(E.commandInput?.value||'').trim();if(raw&&!commitGripDynamicField(raw))return;commitGripEdit(gripTargetFromDynamic());return;}
@@ -3199,7 +3296,7 @@ function commandError(text){commandLog(text);toast(text);}
 
 function ensureDrawing(){if(!state.file)createBlankDrawing();}
 function createBlankDrawing(){
-  cancelCommand(false);state.file={name:'Drawing1.dxf',size:0};state.dxf={header:{$INSUNITS:4},entities:[]};state.rawText='';state.entities=[];state.unsupported=[];state.selected.clear();state.history=[];state.future=[];state.analysis=null;state.dirty=false;state.unitCode=4;state.unitLabel='mm';state.entitySeq=0;state.layerDefinitions=new Map();state.layers=new Map();ensureLayerDefinition('0');rebuildLayers();state.activeLayer='0';state.bounds=null;state.view={scale:1,cx:0,cy:0};syncUI();renderLayerList();E.empty.hidden=true;commandLog(FR?'Nouveau dessin DXF.':'New DXF drawing.');
+  saveActiveDocumentState();cancelCommand(false);const name=`Drawing${++untitledSeq}.dxf`;state.file={name,size:0};state.dxf={header:{$INSUNITS:4},entities:[]};state.rawText='';state.entities=[];state.unsupported=[];state.selected=new Set();state.history=[];state.future=[];state.analysis=null;state.dirty=false;state.unitCode=4;state.unitLabel='mm';state.entitySeq=0;state.layerDefinitions=new Map();state.layers=new Map();ensureLayerDefinition('0');rebuildLayers();state.activeLayer='0';state.bounds=null;state.view={scale:1,cx:0,cy:0};resetTransientDocumentState();syncUI();renderLayerList();E.empty.hidden=true;registerCurrentDocument(name);commandLog(FR?'Nouveau dessin DXF.':'New DXF drawing.');
 }
 function nextEntityId(){return`n${++state.entitySeq}`;}
 function newEntityBase(type){
@@ -3211,7 +3308,7 @@ function addEntity(entity){
 function addLine(a,b){return addEntity({...newEntityBase('LINE'),p1:copyPoint(a),p2:copyPoint(b)});}
 function commitCircle(center,radius){return addEntity({...newEntityBase('CIRCLE'),center:copyPoint(center),radius:Math.abs(radius)});}
 function commitPolyline(points,closed=false){return addEntity({...newEntityBase('POLYLINE'),points:points.map(q=>({x:q.x,y:q.y,bulge:q.bulge||0})),closed:Boolean(closed)});}
-function afterGeometryChange(){rebuildLayers();recomputeBounds();renderLayerList();syncUI();state.dirty=true;}
+function afterGeometryChange(){rebuildLayers();recomputeBounds();renderLayerList();state.dirty=true;syncUI();}
 function copyPoint(q){return{x:+q.x||0,y:+q.y||0};}
 function parseNumber(v){const n=Number(String(v).trim().replace(',','.'));return Number.isFinite(n)?n:NaN;}
 
