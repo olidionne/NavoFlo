@@ -1,4 +1,4 @@
-NavoFlo V8.0 — Auth & Floating Licenses Foundation
+NavoFlo V8.1 — Auth & Floating Licenses Foundation
 ==================================================
 
 Baseline: V7.2 Fast Track Tax Fix
@@ -7,7 +7,7 @@ WHAT V8 ADDS
 ------------
 1. Native NavoFlo authentication
    - email + password
-   - PBKDF2-SHA256 password hashing (310,000 iterations)
+   - PBKDF2-SHA256 password hashing (100,000 iterations; Cloudflare Workers WebCrypto compatible)
    - secure HttpOnly/SameSite session cookies
    - logout
    - temporary lock after repeated bad passwords
@@ -75,4 +75,4 @@ Prefer leaving it unset once the Owner password has been bootstrapped.
 
 PASSWORD RESET
 --------------
-Not included in V8.0 yet. This is the next auth increment after login/invitation validation.
+Not included in V8.1 yet. This is the next auth increment after login/invitation validation.

@@ -2,7 +2,8 @@ import { json, safeOrigin } from './stripe.js';
 
 const SESSION_COOKIE = 'navoflo_session';
 const SESSION_DAYS = 30;
-const PBKDF2_ITERATIONS = 310000;
+// Cloudflare Workers WebCrypto currently rejects PBKDF2 deriveBits calls above 100,000 iterations.
+const PBKDF2_ITERATIONS = 100000;
 
 function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
@@ -55,7 +56,7 @@ export async function verifyPassword(password, encoded) {
   const [scheme, iterationsRaw, saltRaw, hashRaw] = String(encoded || '').split('$');
   if (scheme !== 'pbkdf2_sha256' || !iterationsRaw || !saltRaw || !hashRaw) return false;
   const iterations = Number(iterationsRaw);
-  if (!Number.isInteger(iterations) || iterations < 100000 || iterations > 1000000) return false;
+  if (!Number.isInteger(iterations) || iterations !== PBKDF2_ITERATIONS) return false;
   const actual = await pbkdf2(String(password || ''), base64UrlToBytes(saltRaw), iterations);
   const expected = base64UrlToBytes(hashRaw);
   if (actual.length !== expected.length) return false;
