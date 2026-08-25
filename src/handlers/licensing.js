@@ -11,7 +11,9 @@ import {
   requireLicensingContext,
   resendMemberInvitation,
   setMemberLicense,
-  transferMemberLicense
+  transferMemberLicense,
+  userDevices,
+  disconnectUserDevice
 } from '../lib/licensing.js';
 
 async function run(fn){ try{return await fn();}catch(error){return licensingJsonError(error);} }
@@ -26,3 +28,6 @@ export async function createAccountPortal({request,env}){ return run(async()=>{c
 export async function acquireLease({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env,{includeMembers:false});return json(await acquireAppLease(request,env,c,await request.json()));}); }
 export async function refreshLease({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env,{includeMembers:false});return json(await refreshAppLease(request,env,c,await request.json()));}); }
 export async function releaseLease({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env,{includeMembers:false});return json(await releaseAppLease(env,c,await request.json()));}); }
+
+export async function getLicensingDevices({request,env}){ return run(async()=>{const c=await requireLicensingContext(request,env,{includeMembers:false});const current=new URL(request.url).searchParams.get('current_device_id')||'';return json(await userDevices(env,c,current),200,{'cache-control':'no-store'});}); }
+export async function disconnectLicensingDevice({request,env,deviceId}){ return run(async()=>{const c=await requireLicensingContext(request,env,{includeMembers:false});return json(await disconnectUserDevice(env,c,deviceId),200,{'cache-control':'no-store'});}); }

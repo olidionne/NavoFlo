@@ -1,5 +1,6 @@
 import {
   acceptInvitation,
+  accountSessions,
   authJsonError,
   authStatus,
   bootstrapAccount,
@@ -8,7 +9,9 @@ import {
   logout,
   passwordResetInfo,
   requestPasswordReset,
-  resetPassword
+  resetPassword,
+  revokeAccountSession,
+  revokeOtherAccountSessions
 } from '../lib/auth.js';
 
 async function safe(fn) {
@@ -25,3 +28,7 @@ export async function postResetPassword({ request, env }) { return safe(() => re
 export async function postBootstrap({ request, env }) { return safe(() => bootstrapAccount(request, env)); }
 export async function getInvitation({ request, env }) { return safe(() => invitationInfo(request, env)); }
 export async function postAcceptInvitation({ request, env }) { return safe(() => acceptInvitation(request, env)); }
+
+export async function getAuthSessions({ request, env }) { return safe(() => accountSessions(request, env)); }
+export async function postRevokeAuthSession({ request, env, sessionId }) { return safe(() => revokeAccountSession(request, env, sessionId)); }
+export async function postRevokeOtherAuthSessions({ request, env }) { return safe(() => revokeOtherAccountSessions(request, env)); }

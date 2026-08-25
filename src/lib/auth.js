@@ -535,6 +535,77 @@ export async function acceptInvitation(request, env) {
   return session.cookie ? json({ ok:true }, 200, { 'set-cookie':session.cookie }) : json({ ok:true });
 }
 
+async function organizationIdForUser(env, userId) {
+  if (!env?.NAVOFLO_DB || !userId) return null;
+  const row = await env.NAVOFLO_DB.prepare(`
+    SELECT organization_id FROM memberships
+    WHERE user_id=? AND active=1
+    ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, id
+    LIMIT 1
+  `).bind(userId).first();
+  return row?.organization_id || null;
+}
+
+export async function accountSessions(request, env) {
+  const user = await requireAuthUser(request, env);
+  const result = await env.NAVOFLO_DB.prepare(`
+    SELECT id, created_at, last_seen_at, expires_at, user_agent
+    FROM auth_sessions
+    WHERE user_id=?
+      AND revoked_at IS NULL
+      AND datetime(expires_at) > datetime('now')
+    ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, datetime(last_seen_at) DESC, id DESC
+  `).bind(user.id, user.session_id).all();
+  const sessions = (result.results || []).map(row => ({
+    id:Number(row.id),
+    created_at:row.created_at,
+    last_seen_at:row.last_seen_at,
+    expires_at:row.expires_at,
+    user_agent:row.user_agent || null,
+    current:Number(row.id) === Number(user.session_id)
+  }));
+  return json({ sessions }, 200, { 'cache-control':'no-store' });
+}
+
+export async function revokeAccountSession(request, env, sessionId) {
+  const user = await requireAuthUser(request, env);
+  const id = Number(sessionId);
+  if (!Number.isInteger(id) || id <= 0) throw authError('Invalid session.', 400, 'INVALID_SESSION');
+  const row = await env.NAVOFLO_DB.prepare(`
+    SELECT id FROM auth_sessions
+    WHERE id=? AND user_id=? AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
+    LIMIT 1
+  `).bind(id, user.id).first();
+  if (!row) throw authError('Session not found.', 404, 'SESSION_NOT_FOUND');
+  await env.NAVOFLO_DB.prepare(`UPDATE auth_sessions SET revoked_at=datetime('now') WHERE id=? AND user_id=?`).bind(id, user.id).run();
+  const current = Number(id) === Number(user.session_id);
+  await logAudit(env, {
+    organization_id:await organizationIdForUser(env, user.id),
+    actor_user_id:user.id,
+    target_user_id:user.id,
+    action:'auth.session_revoked',
+    details:{ session_id:id, current }
+  });
+  return json({ ok:true, current }, 200, current ? { 'set-cookie':clearSessionCookie(request, env), 'cache-control':'no-store' } : { 'cache-control':'no-store' });
+}
+
+export async function revokeOtherAccountSessions(request, env) {
+  const user = await requireAuthUser(request, env);
+  const result = await env.NAVOFLO_DB.prepare(`
+    UPDATE auth_sessions SET revoked_at=datetime('now')
+    WHERE user_id=? AND id<>? AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
+  `).bind(user.id, user.session_id).run();
+  const count = Number(result?.meta?.changes || 0);
+  await logAudit(env, {
+    organization_id:await organizationIdForUser(env, user.id),
+    actor_user_id:user.id,
+    target_user_id:user.id,
+    action:'auth.other_sessions_revoked',
+    details:{ count }
+  });
+  return json({ ok:true, revoked:count }, 200, { 'cache-control':'no-store' });
+}
+
 export async function revokeAllUserSessions(env, userId) {
   if (!env?.NAVOFLO_DB || !userId) return;
   await env.NAVOFLO_DB.batch([

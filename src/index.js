@@ -10,6 +10,8 @@ import {
   deleteLicensingMember,
   fastTrackLicensingSeat,
   getLicensingMe,
+  getLicensingDevices,
+  disconnectLicensingDevice,
   inviteLicensingMember,
   refreshLease,
   releaseLease,
@@ -18,6 +20,9 @@ import {
 } from './handlers/licensing.js';
 import {
   getAuthStatus,
+  getAuthSessions,
+  postRevokeAuthSession,
+  postRevokeOtherAuthSessions,
   getInvitation,
   getPasswordReset,
   postAcceptInvitation,
@@ -36,6 +41,8 @@ const API = Object.freeze({
   '/api/stripe/portal': { POST:createPortal },
   '/api/stripe/webhook': { POST:handleWebhook },
   '/api/auth/me': { GET:getAuthStatus },
+  '/api/auth/sessions': { GET:getAuthSessions },
+  '/api/auth/sessions/revoke-others': { POST:postRevokeOtherAuthSessions },
   '/api/auth/login': { POST:postLogin },
   '/api/auth/logout': { POST:postLogout },
   '/api/auth/forgot-password': { POST:postForgotPassword },
@@ -44,6 +51,7 @@ const API = Object.freeze({
   '/api/auth/invitation': { GET:getInvitation },
   '/api/auth/accept-invitation': { POST:postAcceptInvitation },
   '/api/licensing/me': { GET:getLicensingMe },
+  '/api/licensing/devices': { GET:getLicensingDevices },
   '/api/licensing/members': { POST:createLicensingMember },
   '/api/licensing/fast-track-seat': { POST:fastTrackLicensingSeat },
   '/api/licensing/portal': { POST:createAccountPortal },
@@ -102,6 +110,18 @@ export default {
   async fetch(request,env,ctx){
     const url=new URL(request.url); const route=API[url.pathname];
     if(route){ const handler=route[request.method]; if(!handler)return methodNotAllowed(Object.keys(route)); return handler({request,env,ctx}); }
+
+    const authSessionMatch=url.pathname.match(/^\/api\/auth\/sessions\/(\d+)\/revoke$/);
+    if(authSessionMatch){
+      if(request.method!=='POST')return methodNotAllowed(['POST']);
+      return postRevokeAuthSession({request,env,ctx,sessionId:authSessionMatch[1]});
+    }
+
+    const deviceMatch=url.pathname.match(/^\/api\/licensing\/devices\/(\d+)\/disconnect$/);
+    if(deviceMatch){
+      if(request.method!=='POST')return methodNotAllowed(['POST']);
+      return disconnectLicensingDevice({request,env,ctx,deviceId:deviceMatch[1]});
+    }
 
     const memberMatch=url.pathname.match(/^\/api\/licensing\/members\/(\d+)(\/(license|invite|transfer))?$/);
     if(memberMatch){

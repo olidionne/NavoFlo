@@ -529,6 +529,78 @@ export async function releaseAppLease(env,context,payload={}){
   return {ok:true};
 }
 
+export async function userDevices(env, context, currentDeviceIdentifier = '') {
+  const currentId = String(currentDeviceIdentifier || '').trim();
+  await env.NAVOFLO_DB.prepare(`
+    UPDATE app_leases SET revoked_at=datetime('now')
+    WHERE user_id=? AND revoked_at IS NULL AND datetime(expires_at)<=datetime('now')
+  `).bind(context.user.id).run();
+
+  const deviceRows = await env.NAVOFLO_DB.prepare(`
+    SELECT id, device_identifier, name, first_seen_at, last_seen_at, revoked_at
+    FROM devices
+    WHERE user_id=?
+    ORDER BY datetime(last_seen_at) DESC, id DESC
+    LIMIT 20
+  `).bind(context.user.id).all();
+  const leaseRows = await env.NAVOFLO_DB.prepare(`
+    SELECT device_id, product, MAX(expires_at) AS expires_at, MAX(last_seen_at) AS last_seen_at
+    FROM app_leases
+    WHERE user_id=? AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
+    GROUP BY device_id, product
+  `).bind(context.user.id).all();
+  const historyRows = await env.NAVOFLO_DB.prepare(`
+    SELECT device_id, MAX(last_seen_at) AS last_seen_at
+    FROM app_leases
+    WHERE user_id=?
+    GROUP BY device_id
+  `).bind(context.user.id).all();
+  const latestActivity = new Map((historyRows.results || []).map(row => [Number(row.device_id), row.last_seen_at]));
+  const active = new Map();
+  for (const lease of leaseRows.results || []) {
+    const id = Number(lease.device_id);
+    if (!active.has(id)) active.set(id, []);
+    active.get(id).push({ product:lease.product, expires_at:lease.expires_at, last_seen_at:lease.last_seen_at });
+  }
+  return {
+    devices:(deviceRows.results || []).map(row => {
+      const leases = active.get(Number(row.id)) || [];
+      return {
+        id:Number(row.id),
+        name:row.name || null,
+        first_seen_at:row.first_seen_at,
+        last_seen_at:[row.last_seen_at, latestActivity.get(Number(row.id))].filter(Boolean).sort().at(-1) || row.last_seen_at,
+        disconnected_at:row.revoked_at || null,
+        current:Boolean(currentId && row.device_identifier === currentId),
+        active:leases.length > 0,
+        active_products:leases.map(item => item.product),
+        active_until:leases.reduce((latest, item) => !latest || String(item.expires_at) > String(latest) ? item.expires_at : latest, null)
+      };
+    })
+  };
+}
+
+export async function disconnectUserDevice(env, context, deviceId) {
+  const id = Number(deviceId);
+  if (!Number.isInteger(id) || id <= 0) throw licensingError('Invalid device.',400,'INVALID_DEVICE');
+  const device = await env.NAVOFLO_DB.prepare(`
+    SELECT id, device_identifier, name FROM devices WHERE id=? AND user_id=? LIMIT 1
+  `).bind(id, context.user.id).first();
+  if (!device) throw licensingError('Device not found.',404,'DEVICE_NOT_FOUND');
+  await env.NAVOFLO_DB.batch([
+    env.NAVOFLO_DB.prepare(`UPDATE app_leases SET revoked_at=datetime('now') WHERE device_id=? AND user_id=? AND revoked_at IS NULL`).bind(id, context.user.id),
+    env.NAVOFLO_DB.prepare(`UPDATE devices SET revoked_at=datetime('now') WHERE id=? AND user_id=?`).bind(id, context.user.id)
+  ]);
+  await logAudit(env,{
+    organizationId:context.organization.id,
+    actorUserId:context.user.id,
+    action:'license.device_disconnected',
+    targetUserId:context.user.id,
+    details:{device_id:id,device_name:device.name || null}
+  });
+  return {ok:true};
+}
+
 export async function featureAuthorized(request,env,feature){
   const email=await identityEmail(request,env); if(!email)return false;
   const context=await licensingContext(env,email,{includeMembers:false,touchLogin:true});
