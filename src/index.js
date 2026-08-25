@@ -24,7 +24,8 @@ import {
   postLogin,
   postLogout
 } from './handlers/auth.js';
-import { featureAuthorized } from './lib/licensing.js';
+import { licensingContext } from './lib/licensing.js';
+import { sessionUser } from './lib/auth.js';
 
 const API = Object.freeze({
   '/api/stripe/create-checkout': { POST:createCheckout },
@@ -64,6 +65,26 @@ async function serveAssetWithLeaseGate(request,env,url){
   }
   return response;
 }
+
+function escapeHtml(value){
+  return String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function licenseRequiredResponse(url,feature,context){
+  const en=url.pathname.startsWith('/en/');
+  const app=feature==='navo3d'?'Navo3D':'Navo2D';
+  const account=en?'/en/account/licenses/':'/account/licenses/';
+  const pricing=en?'/en/pricing/':'/pricing/';
+  const title=en?'License required':'Licence requise';
+  const body=en
+    ? `Your NavoFlo account is signed in, but no active license granting access to ${app} is currently assigned to you.`
+    : `Votre compte NavoFlo est bien connecté, mais aucune licence active donnant accès à ${app} ne vous est actuellement attribuée.`;
+  const detail=context?.subscription?.active
+    ? (en?'Ask your administrator to transfer a floating User license to your account, or add another license.':'Demandez à votre administrateur de vous transférer une licence User flottante ou d’ajouter une licence supplémentaire.')
+    : (en?'This organization does not currently have an active compatible subscription.':'Cette organisation ne possède actuellement aucun abonnement compatible actif.');
+  const html=`<!doctype html><html lang="${en?'en':'fr-CA'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} — NavoFlo</title><style>html,body{margin:0;min-height:100%;background:#081118;color:#eef6fa;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box}.card{width:min(560px,100%);background:#101b23;border:1px solid #2c4351;border-radius:18px;padding:28px;box-sizing:border-box;box-shadow:0 28px 90px rgba(0,0,0,.35)}.k{font-size:11px;letter-spacing:.16em;font-weight:800;color:#34d399;margin-bottom:14px}h1{font-size:30px;margin:0 0 12px}p{color:#adc0cc;line-height:1.6}.app{color:#fff;font-weight:750}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:24px}.actions a{padding:12px 16px;border-radius:10px;text-decoration:none;font-weight:750;border:1px solid #355061;color:#eaf4f8;background:#14242f}.actions a.primary{background:#35d19f;border-color:#35d19f;color:#05120e}</style></head><body><main class="card"><div class="k">NAVOFLO · ${escapeHtml(app)}</div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p><p>${escapeHtml(detail)}</p><div class="actions"><a class="primary" href="${account}">${en?'My licenses':'Mes licences'}</a><a href="${pricing}">${en?'View plans':'Voir les forfaits'}</a></div></main></body></html>`;
+  return new Response(html,{status:403,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});
+}
+
 function featureForPath(pathname){
   if(pathname==='/navo2d'||pathname.startsWith('/navo2d/'))return 'navo2d';
   if(pathname==='/navo3d'||pathname.startsWith('/navo3d/'))return 'navo3d';
@@ -91,9 +112,17 @@ export default {
 
     if(String(env?.NAVOFLO_ENFORCE_LICENSES||'').toLowerCase()==='true'){
       const feature=featureForPath(url.pathname);
-      if(feature&&!(await featureAuthorized(request,env,feature))){
-        const target=url.pathname.startsWith('/en/')?'/en/login/?next='+encodeURIComponent(url.pathname):'/login/?next='+encodeURIComponent(url.pathname);
-        return Response.redirect(new URL(target,url.origin),302);
+      if(feature){
+        const user=await sessionUser(request,env,{touch:false});
+        if(!user){
+          const target=url.pathname.startsWith('/en/')?'/en/login/?next='+encodeURIComponent(url.pathname+url.search):'/login/?next='+encodeURIComponent(url.pathname+url.search);
+          return Response.redirect(new URL(target,url.origin),302);
+        }
+        const context=await licensingContext(env,user.email,{includeMembers:false,touchLogin:true});
+        const authorized=Boolean(user.status==='active'&&context?.user?.licensed&&context?.entitlements?.[feature]);
+        if(!authorized){
+          return licenseRequiredResponse(url,feature,context);
+        }
       }
     }
     return serveAssetWithLeaseGate(request,env,url);
