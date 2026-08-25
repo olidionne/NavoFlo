@@ -1018,3 +1018,17 @@ body.viewer-v2{height:100%;margin:0;overflow:hidden;background:#080d12;color:#d7
 .cad-workspace.is-fullscreen .properties-drawer{top:108px}
 body.navo3d-focus-mode .n3-appbar{display:none!important}
 @media(max-width:760px){.n3-site-link,.n3-app-local{display:none}.n3-appbar{padding:0 8px;gap:7px}.n3-brand i{display:none}}
+
+/* V8.15.1 — CAD UI readability pass */
+.n3-brand,.n3-appbar .suite-switch a,.n3-app-local,
+.tool-button,.file-tool,.tool-select,.segmented button,.view-popover button,
+.n3-site-link,.drawer-head,.drawer-stats dt,.drawer-stats dd,.selection-summary{
+  -webkit-font-smoothing:antialiased;
+  text-rendering:geometricPrecision;
+}
+.n3-appbar .suite-switch a{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:9.5px;font-weight:700}
+.n3-site-link{font-size:11px;font-weight:650}
+.n3-app-local{font-size:9px}
+.tool-button,.file-tool,.tool-select,.segmented button{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:12px;font-weight:650;letter-spacing:.005em}
+.segmented button{font-size:11px}.tool-select{font-size:11.5px}.view-popover button{font-size:11.5px}
+.cad-statusbar{font-size:9px}.drawer-stats dt,.drawer-stats dd{font-size:10.5px}.selection-summary{font-size:10.5px}

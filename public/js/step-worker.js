@@ -6,6 +6,8 @@ const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6';
 let occtPromise = null;
 let exactModelId = null;
 let bindingByGeometry = new Map();
+let topologyByGeometry = new Map();
+let logicalFaceGroupCache = new Map();
 
 function getOcct() {
   if (!occtPromise) {
@@ -25,6 +27,8 @@ function releaseCurrent(occt) {
   }
   exactModelId = null;
   bindingByGeometry = new Map();
+  topologyByGeometry = new Map();
+  logicalFaceGroupCache = new Map();
 }
 
 function plainNode(node) {
@@ -86,6 +90,55 @@ function transferListFor(result) {
     }
   }
   return list;
+}
+
+
+function faceIdsForSelection(selection) {
+  const ids=Array.isArray(selection?.elementIds)&&selection.elementIds.length
+    ? selection.elementIds.map(Number).filter(Number.isFinite)
+    : [Number(selection?.elementId)].filter(Number.isFinite);
+  return [...new Set(ids)];
+}
+
+function isCylinderFamily(info){
+  return ['cylinder','cylindrical'].includes(String(info?.family||'').toLowerCase());
+}
+function vec3(v){return Array.isArray(v)&&v.length>=3?v.map(Number).slice(0,3):null;}
+function sameCylinder(a,b){
+  if(!isCylinderFamily(a)||!isCylinderFamily(b))return false;
+  const ra=Number(a.radius),rb=Number(b.radius);
+  const aa=vec3(a.axisDirection),ab=vec3(b.axisDirection),ca=vec3(a.localCenter),cb=vec3(b.localCenter);
+  if(!Number.isFinite(ra)||!Number.isFinite(rb)||!aa||!ab||!ca||!cb)return false;
+  const tol=Math.max(Math.abs(ra),Math.abs(rb),1)*1e-5;
+  if(Math.abs(ra-rb)>tol)return false;
+  const la=Math.hypot(...aa),lb=Math.hypot(...ab);if(la<1e-12||lb<1e-12)return false;
+  const ua=aa.map(x=>x/la),ub=ab.map(x=>x/lb);
+  const dot=Math.abs(ua[0]*ub[0]+ua[1]*ub[1]+ua[2]*ub[2]);if(dot<0.99999)return false;
+  const d=[cb[0]-ca[0],cb[1]-ca[1],cb[2]-ca[2]];
+  const proj=d[0]*ua[0]+d[1]*ua[1]+d[2]*ua[2];
+  const perp=Math.hypot(d[0]-proj*ua[0],d[1]-proj*ua[1],d[2]-proj*ua[2]);
+  return perp<=tol*2;
+}
+function logicalFaceGroup(occt,selection){
+  const gid=String(selection.geometryId),fid=Number(selection.elementId),cacheKey=`${gid}:${fid}`;
+  if(logicalFaceGroupCache.has(cacheKey))return logicalFaceGroupCache.get(cacheKey);
+  const topo=topologyByGeometry.get(gid);
+  if(!topo){const out=[fid];logicalFaceGroupCache.set(cacheKey,out);return out;}
+  const base=inspectSelection(occt,{...selection,kind:'face',elementId:fid,elementIds:undefined});
+  if(!isCylinderFamily(base)){const out=[fid];logicalFaceGroupCache.set(cacheKey,out);return out;}
+  const edgeToFaces=new Map();
+  for(const face of topo.faces){for(const edge of face.edgeIndices||[]){const k=Number(edge);if(!edgeToFaces.has(k))edgeToFaces.set(k,[]);edgeToFaces.get(k).push(Number(face.id));}}
+  const byId=new Map(topo.faces.map(f=>[Number(f.id),f]));
+  const group=new Set([fid]),queue=[fid];
+  while(queue.length){
+    const id=queue.shift(),face=byId.get(id);if(!face)continue;
+    const neighbors=new Set();for(const edge of face.edgeIndices||[])for(const n of edgeToFaces.get(Number(edge))||[])if(n!==id)neighbors.add(n);
+    for(const n of neighbors){if(group.has(n))continue;
+      const info=inspectSelection(occt,{...selection,kind:'face',elementId:n,elementIds:undefined});
+      if(sameCylinder(base,info)){group.add(n);queue.push(n);}
+    }
+  }
+  const out=[...group].sort((a,b)=>a-b);for(const id of out)logicalFaceGroupCache.set(`${gid}:${id}`,out);return out;
 }
 
 function shapeHandle(geometryId) {
@@ -150,8 +203,11 @@ function inspectSelection(occt, selection) {
   }
 
   if (r.kind === 'face') {
-    const area = occt.MeasureExactFaceArea(r.exactModelId, r.exactShapeHandle, r.kind, r.elementId);
-    if (area?.ok) out.area = area.value;
+    const ids=faceIdsForSelection(selection);
+    let areaSum=0,areaOk=false;
+    for(const faceId of ids){const area=occt.MeasureExactFaceArea(r.exactModelId,r.exactShapeHandle,r.kind,faceId);if(area?.ok&&Number.isFinite(area.value)){areaSum+=area.value;areaOk=true;}}
+    if(areaOk) out.area=areaSum;
+    if(ids.length>1) out.logicalFaceIds=ids;
     const hole = occt.DescribeExactHole(r.exactModelId, r.exactShapeHandle, r.kind, r.elementId);
     if (hole?.ok) {
       out.hole = {
@@ -208,13 +264,18 @@ function centerDistance(a, b) {
 
 function exactDistance(occt, aSel, bSel, aInfo, bInfo) {
   const a=exactRef(aSel), b=exactRef(bSel);
-  const r=occt.MeasureExactDistance(
-    a.exactModelId, a.exactShapeHandle, a.kind, a.elementId,
-    b.exactShapeHandle, b.kind, b.elementId,
-    a.transform, b.transform
-  );
-  if (!r?.ok) return r;
-  return { ...r, kind:'distance', detailsA:aInfo, detailsB:bInfo };
+  const aIds=faceIdsForSelection(aSel),bIds=faceIdsForSelection(bSel);
+  let best=null;
+  for(const aid of aIds){for(const bid of bIds){
+    const r=occt.MeasureExactDistance(
+      a.exactModelId,a.exactShapeHandle,a.kind,aid,
+      b.exactShapeHandle,b.kind,bid,
+      a.transform,b.transform
+    );
+    if(r?.ok&&Number.isFinite(r.value)&&(!best||r.value<best.value))best=r;
+  }}
+  if(!best)return {ok:false,code:'no-distance',message:'Exact distance unavailable.'};
+  return {...best,kind:'distance',detailsA:aInfo,detailsB:bInfo};
 }
 
 function exactAngle(occt, aSel, bSel, aInfo, bInfo) {
@@ -259,6 +320,8 @@ self.onmessage = async (event) => {
       bindingByGeometry = new Map(
         Array.from(raw.exactGeometryBindings ?? []).map(b => [String(b.geometryId), Number(b.exactShapeHandle)])
       );
+      topologyByGeometry = new Map(Array.from(raw.geometries ?? []).map(g=>[String(g.id),{faces:Array.from(g.faces??[]).map(f=>({id:Number(f.id),edgeIndices:Array.from(f.edgeIndices??[]).map(Number)}))}]));
+      logicalFaceGroupCache = new Map();
 
       const result = {
         success: true,
@@ -281,6 +344,12 @@ self.onmessage = async (event) => {
 
       const transfer = transferListFor(result);
       self.postMessage({ id, ok:true, result }, transfer);
+      return;
+    }
+
+    if (action === 'logical-face-group') {
+      const faceIds=logicalFaceGroup(occt,payload.selection);
+      self.postMessage({id,ok:true,result:{faceIds}});
       return;
     }
 

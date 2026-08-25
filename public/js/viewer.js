@@ -70,7 +70,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js';
+const WORKER_URL = '/js/step-worker.js?v=8.15.1';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -130,6 +130,7 @@ let edgesVisible = true, clipEnabled = false;
 let modelBounds = null, modelSize = 1;
 let hoverRAF = 0, preselected = null, selectOtherMenu = null;
 let selectionEpoch = 0;
+let logicalFaceGroupCache = new Map();
 const cadNav = {
   active:false,
   pointerId:null,
@@ -281,10 +282,11 @@ const selectionFaceMaterial = new THREE.MeshBasicMaterial({
   side:THREE.DoubleSide,
   depthTest:true,
   depthWrite:false,
-  depthFunc:THREE.LessEqualDepth,
-  polygonOffset:true,
-  polygonOffsetFactor:-1,
-  polygonOffsetUnits:-1
+  // Draw only where the selected surface is actually the visible surface.
+  // This prevents an inner cylindrical face from bleeding through an outer wall
+  // when the camera zooms far away and depth precision becomes coarse.
+  depthFunc:THREE.EqualDepth,
+  polygonOffset:false
 });
 
 init();
@@ -1608,16 +1610,8 @@ function highlightPreselection(s) {
   }
 
   if (s.kind==='face') {
-    const face=s.def.facesById.get(Number(s.elementId));
-    if (!face) return;
-    const source=s.def.geometry;
-    const g=new THREE.BufferGeometry();
-    g.setAttribute('position',source.getAttribute('position'));
-    if (source.getAttribute('normal')) g.setAttribute('normal',source.getAttribute('normal'));
-    const srcIndex=source.index.array;
-    const slice=srcIndex.slice(face.firstIndex,face.firstIndex+face.indexCount);
-    g.setIndex(new THREE.BufferAttribute(new Uint32Array(slice),1));
-
+    const g=buildFaceOverlayGeometry(s);
+    if(!g)return;
     const mesh=new THREE.Mesh(g,hoverFaceMaterial.clone());
     mesh.matrix.copy(s.object.matrixWorld);
     mesh.matrixAutoUpdate=false;
@@ -2007,10 +2001,42 @@ function measureAngleFallback(a,b) {
   };
 }
 
+async function expandLogicalFaceSelection(selection){
+  if(selection?.kind!=='face'||!currentStepResult)return selection;
+  const cacheKey=`${selection.geometryId}:${selection.elementId}`;
+  let ids=logicalFaceGroupCache.get(cacheKey);
+  if(!ids){
+    try{
+      const result=await workerRequest('logical-face-group',{selection:serialSelection(selection)});
+      ids=Array.isArray(result?.faceIds)&&result.faceIds.length?result.faceIds.map(Number):[Number(selection.elementId)];
+    }catch{ids=[Number(selection.elementId)];}
+    ids=[...new Set(ids)].sort((a,b)=>a-b);
+    for(const id of ids)logicalFaceGroupCache.set(`${selection.geometryId}:${id}`,ids);
+  }
+  if(ids.length>1)return {...selection,elementId:ids[0],memberFaceIds:ids};
+  return selection;
+}
+
+function faceIdsForHighlight(selection){
+  return Array.isArray(selection?.memberFaceIds)&&selection.memberFaceIds.length?selection.memberFaceIds:[Number(selection.elementId)];
+}
+function buildFaceOverlayGeometry(selection){
+  const source=selection.def.geometry,srcIndex=source.index.array,indices=[];
+  for(const id of faceIdsForHighlight(selection)){
+    const face=selection.def.facesById.get(Number(id));if(!face)continue;
+    for(let i=face.firstIndex;i<face.firstIndex+face.indexCount;i++)indices.push(srcIndex[i]);
+  }
+  if(!indices.length)return null;
+  const g=new THREE.BufferGeometry();g.setAttribute('position',source.getAttribute('position'));
+  if(source.getAttribute('normal'))g.setAttribute('normal',source.getAttribute('normal'));
+  g.setIndex(new THREE.BufferAttribute(new Uint32Array(indices),1));return g;
+}
+
 async function acceptSelection(selection, event={}) {
   // Once clicked, the hover overlay must get out of the way immediately.
   // The committed blue overlay is the only visual state until deselection.
   clearPreselection();
+  selection=await expandLogicalFaceSelection(selection);
 
   const key=selectionKey(selection);
   const existing=selected.findIndex(s=>selectionKey(s)===key);
@@ -2107,10 +2133,12 @@ async function acceptSelection(selection, event={}) {
 
 function serialSelection(s) {
   return {
-    kind:s.kind,geometryId:s.geometryId,elementId:s.elementId,transform:s.object.matrixWorld.toArray()
+    kind:s.kind,geometryId:s.geometryId,elementId:s.elementId,
+    elementIds:Array.isArray(s.memberFaceIds)?s.memberFaceIds:undefined,
+    transform:s.object.matrixWorld.toArray()
   };
 }
-function selectionKey(s){return `${s.kind}:${s.geometryId||''}:${s.elementId??''}:${s.object?.uuid||''}`}
+function selectionKey(s){const faceKey=s.kind==='face'&&Array.isArray(s.memberFaceIds)?s.memberFaceIds.join(','):(s.elementId??'');return `${s.kind}:${s.geometryId||''}:${faceKey}:${s.object?.uuid||''}`}
 
 function removeSelectionHighlight(key) {
   const group=selectionHighlightMap.get(key);
@@ -2183,26 +2211,13 @@ function highlightSelection(s,index,parent=selectionRoot) {
     parent.add(sphere);
 
   } else if (s.kind==='face') {
-    const face=s.def.facesById.get(Number(s.elementId));
-    if (!face) return;
-
-    const source=s.def.geometry;
-    const g=new THREE.BufferGeometry();
-    g.setAttribute('position',source.getAttribute('position'));
-
-    if (source.getAttribute('normal')){
-      g.setAttribute('normal',source.getAttribute('normal'));
-    }
-
-    const srcIndex=source.index.array;
-    const slice=srcIndex.slice(face.firstIndex,face.firstIndex+face.indexCount);
-    g.setIndex(new THREE.BufferAttribute(new Uint32Array(slice),1));
-
+    const g=buildFaceOverlayGeometry(s);
+    if(!g)return;
     const mesh=new THREE.Mesh(g,selectionFaceMaterial.clone());
     mesh.material.color.setHex(faceColor);
     mesh.material.side=THREE.DoubleSide;
     mesh.material.depthWrite=false;
-    mesh.material.depthFunc=THREE.LessEqualDepth;
+    mesh.material.depthFunc=THREE.EqualDepth;
     mesh.material.needsUpdate=true;
     mesh.matrix.copy(s.object.matrixWorld);
     mesh.matrixAutoUpdate=false;
@@ -2823,7 +2838,7 @@ async function clearModel(showMessage=true) {
     modelRoot.remove(child);disposeObject(child);
   }
   modelRoot.position.set(0,0,0);
-  surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();
+  surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];
   resetSheetMetalForModel();
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;
