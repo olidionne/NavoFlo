@@ -26,7 +26,13 @@
     }
   ],
   "vars": {
-    "NAVOFLO_ENFORCE_LICENSES": "true"
+    "NAVOFLO_ENFORCE_LICENSES": "true",
+    "NAVOFLO_FROM_EMAIL": "NavoFlo <noreply@navoflo.com>"
   },
-  "keep_vars": true
+  "keep_vars": true,
+  "secrets": {
+    "required": [
+      "RESEND_API_KEY"
+    ]
+  }
 }
