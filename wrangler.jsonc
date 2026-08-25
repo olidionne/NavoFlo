@@ -15,7 +15,24 @@
       "/en/navo2d",
       "/en/navo2d/*",
       "/en/navo3d",
-      "/en/navo3d/*"
+      "/en/navo3d/*",
+      "/login",
+      "/login/*",
+      "/forgot-password/*",
+      "/reset-password/*",
+      "/auth/*",
+      "/invite/*",
+      "/account/*",
+      "/billing/*",
+      "/pricing/*",
+      "/en/login/*",
+      "/en/forgot-password/*",
+      "/en/reset-password/*",
+      "/en/auth/*",
+      "/en/invite/*",
+      "/en/account/*",
+      "/en/billing/*",
+      "/en/pricing/*"
     ]
   },
   "d1_databases": [
@@ -27,7 +44,12 @@
   ],
   "vars": {
     "NAVOFLO_ENFORCE_LICENSES": "true",
-    "NAVOFLO_FROM_EMAIL": "NavoFlo <noreply@navoflo.com>"
+    "NAVOFLO_FROM_EMAIL": "NavoFlo <noreply@navoflo.com>",
+    "NAVOFLO_SESSION_DAYS": "30",
+    "NAVOFLO_SESSION_IDLE_HOURS": "168"
+  },
+  "triggers": {
+    "crons": ["17 4 * * *"]
   },
   "keep_vars": true,
   "secrets": {

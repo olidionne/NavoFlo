@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -146,6 +147,18 @@ let worker = null, workerSeq = 0, workerPending = new Map();
 let meshObjectUrls = [];
 let baseMaterials = new Set();
 
+const navo3dPreferences={gridVisible:true,edgesVisible:true,selectionMode:'auto',propertiesOpen:false,materialClass:'hard'};
+function navo3dPreferenceSnapshot(){return {...navo3dPreferences,edgesVisible:Boolean(edgesVisible),selectionMode,propertiesOpen:Boolean(navo3dPreferences.propertiesOpen),materialClass:sheetMetalState.materialClass};}
+const saveNavo3DPrefs=createPreferenceSaver('navo3d',navo3dPreferenceSnapshot,500);
+function applyNavo3DPreferences(p={}){
+  if(typeof p.gridVisible==='boolean')navo3dPreferences.gridVisible=p.gridVisible;
+  if(typeof p.edgesVisible==='boolean')navo3dPreferences.edgesVisible=p.edgesVisible;
+  if(['auto','face','edge','vertex'].includes(p.selectionMode))navo3dPreferences.selectionMode=p.selectionMode;
+  if(typeof p.propertiesOpen==='boolean')navo3dPreferences.propertiesOpen=p.propertiesOpen;
+  if(AIR_BENDING_K_TABLE[p.materialClass])navo3dPreferences.materialClass=p.materialClass;
+  edgesVisible=navo3dPreferences.edgesVisible;selectionMode=navo3dPreferences.selectionMode;sheetMetalState.materialClass=navo3dPreferences.materialClass;
+}
+
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const clipPlane = new THREE.Plane(new THREE.Vector3(1,0,0), 0);
@@ -194,7 +207,8 @@ const selectionFaceMaterial = new THREE.MeshBasicMaterial({
 
 init();
 
-function init() {
+async function init() {
+  applyNavo3DPreferences(await loadUserPreferences('navo3d',navo3dPreferences));
   try {
     renderer = new THREE.WebGLRenderer({canvas:E.canvas, antialias:true, preserveDrawingBuffer:true});
   } catch (error) {
@@ -287,6 +301,7 @@ function bindUI() {
       clearSelections();
       clearPreselection();
       updatePickingVisibility();
+      saveNavo3DPrefs();
     });
   });
 
@@ -316,7 +331,8 @@ function bindUI() {
   E.sheetMetal.addEventListener('click', openSheetMetalPanel);
   E.smMaterial.addEventListener('change', () => {
     sheetMetalState.materialClass=E.smMaterial.value;
-    try { localStorage.setItem('navoflo.sheetMetal.materialClass',sheetMetalState.materialClass); } catch {}
+    navo3dPreferences.materialClass=sheetMetalState.materialClass;
+    saveNavo3DPrefs();
     updateSheetMetalCalculation();
   });
   E.smThickness.addEventListener('input', () => {
@@ -346,6 +362,11 @@ function bindUI() {
   E.smUseRadius.addEventListener('click', captureSheetMetalRadius);
 
   initSheetMetalUI();
+  E.edges.classList.toggle('active',edgesVisible);
+  E.gridToggle.classList.toggle('active',navo3dPreferences.gridVisible);
+  document.querySelectorAll('[data-select-mode]').forEach(button=>button.classList.toggle('active',button.dataset.selectMode===selectionMode));
+  E.propsDrawer.hidden=!navo3dPreferences.propertiesOpen;
+  syncPropertiesState(false);
 
   E.fullscreen.addEventListener('click', toggleFullscreen);
 
@@ -519,11 +540,6 @@ function bindUI() {
 
 function initSheetMetalUI() {
   if(!E.sheetMetalSection)return;
-
-  try{
-    const saved=localStorage.getItem('navoflo.sheetMetal.materialClass');
-    if(saved && AIR_BENDING_K_TABLE[saved])sheetMetalState.materialClass=saved;
-  }catch{}
 
   E.smMaterial.value=sheetMetalState.materialClass;
   E.smAngle.value=String(sheetMetalState.bendAngleDeg);
@@ -793,9 +809,10 @@ async function captureSheetMetalRadius() {
 }
 
 
-function syncPropertiesState() {
+function syncPropertiesState(persist=true) {
   const open = !E.propsDrawer.hidden;
   E.workspace.classList.toggle('properties-open', open);
+  if(persist){navo3dPreferences.propertiesOpen=open;saveNavo3DPrefs();}
   requestAnimationFrame(resize);
 }
 
@@ -975,6 +992,8 @@ async function loadFiles(files) {
     }
 
     finalizeLoadedModel();
+    E.propsDrawer.hidden=!navo3dPreferences.propertiesOpen;
+    syncPropertiesState(false);
     fillProperties();
     E.empty.classList.add('hidden');
     enableTools(true);
@@ -1212,14 +1231,16 @@ function finalizeLoadedModel() {
 function createGrid(size) {
   if (grid) {scene.remove(grid);grid.geometry.dispose();grid.material.dispose();}
   grid=new THREE.GridHelper(size,20,0x263b34,0x17241f);
-  grid.material.opacity=.34;grid.material.transparent=true;scene.add(grid);
+  grid.material.opacity=.34;grid.material.transparent=true;grid.visible=navo3dPreferences.gridVisible;scene.add(grid);
 }
 function niceGrid(v){const p=10**Math.floor(Math.log10(v)),s=v/p;return(s<=1?1:s<=2?2:s<=5?5:10)*p}
 
 function toggleGrid() {
   if(!grid)return;
   grid.visible=!grid.visible;
+  navo3dPreferences.gridVisible=grid.visible;
   E.gridToggle.classList.toggle('active',grid.visible);
+  saveNavo3DPrefs();
 }
 
 
@@ -2436,8 +2457,10 @@ function applyEdgesVisibility() {
 
 function toggleEdges() {
   edgesVisible=!edgesVisible;
+  navo3dPreferences.edgesVisible=edgesVisible;
   E.edges.classList.toggle('active',edgesVisible);
   applyEdgesVisibility();
+  saveNavo3DPrefs();
 }
 function updatePickingVisibility() {
   // Topological edges remain visually visible regardless of pick filter.
@@ -2703,10 +2726,10 @@ async function clearModel(showMessage=true) {
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];
   resetSheetMetalForModel();
-  modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=true;blackEdgeMaterial.visible=true;measureEnabled=false;
+  modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;
   cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;
   cadNav.pivot.set(0,0,0);cadNav.wheelFocus.set(0,0,0);updateCadCursor();
-  E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.add('active');E.gridToggle.classList.add('active');E.measure.classList.remove('active');
+  E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.toggle('active',edgesVisible);E.gridToggle.classList.toggle('active',navo3dPreferences.gridVisible);E.measure.classList.remove('active');
   E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.sheetMetalSection.hidden=true;E.empty.classList.remove('hidden');
   E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';E.unitSelect.value='u';
   enableTools(false);revokeObjectUrls();

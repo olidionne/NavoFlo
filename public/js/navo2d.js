@@ -1,5 +1,6 @@
 import DxfParser from 'https://cdn.jsdelivr.net/npm/dxf-parser@1.1.2/+esm';
 import AUTO_CAD_COLOR_INDEX from 'https://cdn.jsdelivr.net/npm/dxf-parser@1.1.2/dist/AutoCadColorIndex.js';
+import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 
 const FR=document.documentElement.lang.toLowerCase().startsWith('fr');
 const T=FR?{
@@ -92,9 +93,46 @@ const state={
 const UNIT_LABELS={0:'u',1:'in',2:'ft',3:'mi',4:'mm',5:'cm',6:'m',7:'km',8:'µin',9:'mil',10:'yd',11:'Å',12:'nm',13:'µm',14:'dm'};
 let toastTimer=0;
 
+function navo2dPreferenceSnapshot(){
+  return {
+    grid:Boolean(state.grid), snap:Boolean(state.snap), gridSnap:Boolean(state.gridSnap), gridSnapStep:Number(state.gridSnapStep)||1,
+    ortho:Boolean(state.ortho), polar:Boolean(state.polar), polarIncrement:Number(state.polarIncrement)||45,
+    otrack:Boolean(state.otrack), dyn:Boolean(state.dyn), osnapModes:[...state.osnapModes].sort(),
+    filletRadius:Number(state.filletRadius)||0, filletTrim:Boolean(state.filletTrim),
+    chamferA:Number(state.chamferA)||0, chamferB:Number(state.chamferB)||0, chamferTrim:Boolean(state.chamferTrim),
+    chamferMethod:state.chamferMethod==='angle'?'angle':'distance',
+    chamferAngleDistance:Number(state.chamferAngleDistance)||0, chamferAngle:Number(state.chamferAngle)||45,
+    offsetErase:Boolean(state.offsetErase), offsetLayer:state.offsetLayer==='current'?'current':'source',
+    textHeight:Math.max(.000001,Number(state.textHeight)||2.5), textRotation:Number(state.textRotation)||0,
+    dimPrecision:Math.max(0,Math.min(8,Math.round(Number(state.dimPrecision)||0))),
+    dimArrowMode:['auto','inside','outside'].includes(state.dimArrowMode)?state.dimArrowMode:'auto',
+    dimTextRatio:Math.max(.001,Number(state.dimTextRatio)||.02), dimArrowFactor:Math.max(.2,Number(state.dimArrowFactor)||.55)
+  };
+}
+const saveNavo2DPrefs=createPreferenceSaver('navo2d',navo2dPreferenceSnapshot,500);
+
+function finitePref(value,fallback,min=-Infinity,max=Infinity){const n=Number(value);return Number.isFinite(n)?Math.max(min,Math.min(max,n)):fallback;}
+function applyNavo2DPreferences(p={}){
+  for(const key of ['grid','snap','gridSnap','ortho','polar','otrack','dyn','filletTrim','chamferTrim','offsetErase'])if(typeof p[key]==='boolean')state[key]=p[key];
+  state.gridSnapStep=finitePref(p.gridSnapStep,state.gridSnapStep,1e-9,1e9);
+  state.polarIncrement=finitePref(p.polarIncrement,state.polarIncrement,.1,360);
+  state.filletRadius=finitePref(p.filletRadius,state.filletRadius,0,1e12);
+  state.chamferA=finitePref(p.chamferA,state.chamferA,0,1e12);state.chamferB=finitePref(p.chamferB,state.chamferB,0,1e12);
+  state.chamferAngleDistance=finitePref(p.chamferAngleDistance,state.chamferAngleDistance,0,1e12);state.chamferAngle=finitePref(p.chamferAngle,state.chamferAngle,0,180);
+  state.textHeight=finitePref(p.textHeight,state.textHeight,1e-9,1e9);state.textRotation=finitePref(p.textRotation,state.textRotation,-360000,360000);
+  state.dimPrecision=Math.round(finitePref(p.dimPrecision,state.dimPrecision,0,8));
+  state.dimTextRatio=finitePref(p.dimTextRatio,state.dimTextRatio,.001,.2);state.dimArrowFactor=finitePref(p.dimArrowFactor,state.dimArrowFactor,.2,2);
+  if(['distance','angle'].includes(p.chamferMethod))state.chamferMethod=p.chamferMethod;
+  if(['current','source'].includes(p.offsetLayer))state.offsetLayer=p.offsetLayer;
+  if(['auto','inside','outside'].includes(p.dimArrowMode))state.dimArrowMode=p.dimArrowMode;
+  if(Array.isArray(p.osnapModes))state.osnapModes=new Set(p.osnapModes.filter(x=>typeof x==='string').slice(0,30));
+  if(state.ortho&&state.polar)state.polar=false;
+}
+
 init();
 
-function init(){
+async function init(){
+  applyNavo2DPreferences(await loadUserPreferences('navo2d',navo2dPreferenceSnapshot()));
   bindUI();resize();setTool('select');requestAnimationFrame(frame);
 }
 
@@ -150,6 +188,7 @@ function bindUI(){
     cb.checked=state.osnapModes.has(cb.dataset.osnap);
     cb.addEventListener('change',()=>{
       if(cb.checked)state.osnapModes.add(cb.dataset.osnap);else state.osnapModes.delete(cb.dataset.osnap);
+      saveNavo2DPrefs();
     });
   });
   E.snap?.addEventListener('contextmenu',event=>{event.preventDefault();E.osnapPanel.hidden=!E.osnapPanel.hidden;});
@@ -161,7 +200,7 @@ function bindUI(){
   E.statusOsnap?.addEventListener('click',()=>toggleDraftSetting('osnap'));
   E.statusOtrack?.addEventListener('click',()=>toggleDraftSetting('otrack'));
   E.statusDyn?.addEventListener('click',()=>toggleDraftSetting('dyn'));
-  E.polarAngle?.addEventListener('change',()=>{state.polarIncrement=Math.max(0.1,Number(E.polarAngle.value)||45);syncDraftingUI();});
+  E.polarAngle?.addEventListener('change',()=>{state.polarIncrement=Math.max(0.1,Number(E.polarAngle.value)||45);syncDraftingUI();saveNavo2DPrefs();});
 
   E.canvas.addEventListener('contextmenu',e=>{e.preventDefault();if(e.shiftKey)return openOsnapQuickMenu(e.clientX,e.clientY);if(state.file||state.command)openContextMenu(e.clientX,e.clientY);});
   E.canvas.addEventListener('dblclick',event=>{
@@ -3028,6 +3067,7 @@ function finishCommand(log=true){
   state.command=null;state.snapOverride=null;state.trackingPoint=null;E.workspace.classList.remove('command-active');
   setTool('select');syncSelectionUI();updateCommandPrompt();
   if(log&&name)commandLog(`${name} — ${CMDT.complete}`);
+  saveNavo2DPrefs();
   try{E.canvas.focus()}catch{}
 }
 
@@ -3299,7 +3339,7 @@ function openDimensionEditor(groupId,clientX=20,clientY=120){
   panel.querySelector('[data-dim-close]').addEventListener('click',closeDimensionEditor);panel.addEventListener('keydown',e=>{if(e.key==='Escape')closeDimensionEditor();});const r=panel.getBoundingClientRect();panel.style.left=`${Math.max(10,Math.min(clientX+12,innerWidth-r.width-10))}px`;panel.style.top=`${Math.max(10,Math.min(clientY+12,innerHeight-r.height-10))}px`;
 }
 function openDimensionStyleEditor(){
-  closeDimensionEditor();const panel=document.createElement('div');panel.className='n2-dim-editor';panel.innerHTML=`<div class="n2-text-editor-head"><strong>${FR?'STYLE DE COTE':'DIMENSION STYLE'}</strong><button type="button" data-dim-close>×</button></div><div class="n2-text-editor-grid"><label><span>${FR?'Flèches défaut':'Default arrows'}</span><select data-ds-arrow><option value="auto">Auto</option><option value="inside">${FR?'Intérieur':'Inside'}</option><option value="outside">${FR?'Extérieur':'Outside'}</option></select></label><label><span>${FR?'Précision':'Precision'}</span><input data-ds-precision type="number" min="0" max="8" step="1"></label><label><span>${FR?'Texte / diagonale':'Text / diagonal'}</span><input data-ds-text type="number" min="0.001" max="0.2" step="0.001"></label><label><span>${FR?'Flèche / texte':'Arrow / text'}</span><input data-ds-arrowfactor type="number" min="0.2" max="2" step="0.05"></label></div><div class="n2-text-editor-actions"><button type="button" class="primary" data-ds-apply>${FR?'Appliquer':'Apply'}</button></div>`;document.body.append(panel);dimensionEditorEl=panel;const a=panel.querySelector('[data-ds-arrow]'),p=panel.querySelector('[data-ds-precision]'),t=panel.querySelector('[data-ds-text]'),f=panel.querySelector('[data-ds-arrowfactor]');a.value=state.dimArrowMode||'auto';p.value=state.dimPrecision;t.value=state.dimTextRatio;f.value=state.dimArrowFactor;panel.querySelector('[data-ds-apply]').addEventListener('click',()=>{state.dimArrowMode=a.value;state.dimPrecision=Math.max(0,Math.min(8,Math.round(Number(p.value)||0)));state.dimTextRatio=Math.max(.001,Number(t.value)||.02);state.dimArrowFactor=Math.max(.2,Number(f.value)||.55);closeDimensionEditor();toast(FR?'Style de cote mis à jour.':'Dimension style updated.');});panel.querySelector('[data-dim-close]').addEventListener('click',closeDimensionEditor);const r=panel.getBoundingClientRect();panel.style.left=`${Math.max(10,(innerWidth-r.width)/2)}px`;panel.style.top='120px';
+  closeDimensionEditor();const panel=document.createElement('div');panel.className='n2-dim-editor';panel.innerHTML=`<div class="n2-text-editor-head"><strong>${FR?'STYLE DE COTE':'DIMENSION STYLE'}</strong><button type="button" data-dim-close>×</button></div><div class="n2-text-editor-grid"><label><span>${FR?'Flèches défaut':'Default arrows'}</span><select data-ds-arrow><option value="auto">Auto</option><option value="inside">${FR?'Intérieur':'Inside'}</option><option value="outside">${FR?'Extérieur':'Outside'}</option></select></label><label><span>${FR?'Précision':'Precision'}</span><input data-ds-precision type="number" min="0" max="8" step="1"></label><label><span>${FR?'Texte / diagonale':'Text / diagonal'}</span><input data-ds-text type="number" min="0.001" max="0.2" step="0.001"></label><label><span>${FR?'Flèche / texte':'Arrow / text'}</span><input data-ds-arrowfactor type="number" min="0.2" max="2" step="0.05"></label></div><div class="n2-text-editor-actions"><button type="button" class="primary" data-ds-apply>${FR?'Appliquer':'Apply'}</button></div>`;document.body.append(panel);dimensionEditorEl=panel;const a=panel.querySelector('[data-ds-arrow]'),p=panel.querySelector('[data-ds-precision]'),t=panel.querySelector('[data-ds-text]'),f=panel.querySelector('[data-ds-arrowfactor]');a.value=state.dimArrowMode||'auto';p.value=state.dimPrecision;t.value=state.dimTextRatio;f.value=state.dimArrowFactor;panel.querySelector('[data-ds-apply]').addEventListener('click',()=>{state.dimArrowMode=a.value;state.dimPrecision=Math.max(0,Math.min(8,Math.round(Number(p.value)||0)));state.dimTextRatio=Math.max(.001,Number(t.value)||.02);state.dimArrowFactor=Math.max(.2,Number(f.value)||.55);saveNavo2DPrefs();closeDimensionEditor();toast(FR?'Style de cote mis à jour.':'Dimension style updated.');});panel.querySelector('[data-dim-close]').addEventListener('click',closeDimensionEditor);const r=panel.getBoundingClientRect();panel.style.left=`${Math.max(10,(innerWidth-r.width)/2)}px`;panel.style.top='120px';
 }
 
 function selectedEntities(){return state.entities.filter(e=>state.selected.has(e.id));}
@@ -3475,6 +3515,7 @@ function toggleDraftSetting(which){
   if(which==='otrack')toast(state.otrack?CMDT.otrackOn:CMDT.otrackOff);
   if(which==='dyn')toast(state.dyn?CMDT.dynOn:CMDT.dynOff);
   syncDraftingUI();
+  saveNavo2DPrefs();
 }
 function syncDraftingUI(){
   E.grid?.classList.toggle('active',state.grid);E.snap?.classList.toggle('active',state.snap);

@@ -1,11 +1,28 @@
 import { json, safeOrigin } from './stripe.js';
+import { enforceRateLimit } from './security.js';
 
 const SESSION_COOKIE = 'navoflo_session';
-const SESSION_DAYS = 30;
+const DEFAULT_SESSION_DAYS = 30;
+const DEFAULT_SESSION_IDLE_HOURS = 168; // 7 days without authenticated activity.
 const PASSWORD_RESET_TTL_MINUTES = 60;
 const PASSWORD_RESET_COOLDOWN_SECONDS = 60;
 const ACCOUNT_ACTIVATION_TTL_HOURS = 24;
 const ACCOUNT_ACTIVATION_COOLDOWN_SECONDS = 60;
+
+function boundedEnvNumber(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function sessionDays(env) {
+  return boundedEnvNumber(env?.NAVOFLO_SESSION_DAYS, DEFAULT_SESSION_DAYS, 1, 90);
+}
+
+function sessionIdleHours(env) {
+  return boundedEnvNumber(env?.NAVOFLO_SESSION_IDLE_HOURS, DEFAULT_SESSION_IDLE_HOURS, 1, 720);
+}
+
 // Cloudflare Workers WebCrypto currently rejects PBKDF2 deriveBits calls above 100,000 iterations.
 const PBKDF2_ITERATIONS = 100000;
 
@@ -86,7 +103,7 @@ function cookieValue(request, name) {
   return '';
 }
 
-function sessionCookie(token, request, env, maxAgeSeconds = SESSION_DAYS * 86400) {
+function sessionCookie(token, request, env, maxAgeSeconds = null) {
   const url = new URL(request.url);
   const secure = url.protocol === 'https:';
   const domain = String(env?.NAVOFLO_COOKIE_DOMAIN || '').trim();
@@ -97,7 +114,7 @@ function sessionCookie(token, request, env, maxAgeSeconds = SESSION_DAYS * 86400
     'SameSite=Lax',
     secure ? 'Secure' : '',
     domain ? `Domain=${domain}` : '',
-    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`
+    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds == null ? sessionDays(env) * 86400 : maxAgeSeconds))}`
   ].filter(Boolean).join('; ');
 }
 
@@ -138,7 +155,7 @@ export async function createSession(request, env, userId) {
   if (!env?.NAVOFLO_DB) throw authError('NavoFlo database is unavailable.', 503, 'DB_UNAVAILABLE');
   const rawToken = randomToken(32);
   const tokenHash = await sha256(rawToken);
-  const expiry = new Date(Date.now() + SESSION_DAYS * 86400 * 1000).toISOString();
+  const expiry = new Date(Date.now() + sessionDays(env) * 86400 * 1000).toISOString();
   await env.NAVOFLO_DB.prepare(`
     INSERT INTO auth_sessions (user_id, token_hash, expires_at, ip_hash, user_agent)
     VALUES (?, ?, ?, ?, ?)
@@ -163,8 +180,9 @@ export async function sessionUser(request, env, { touch = true } = {}) {
     WHERE s.token_hash=?
       AND s.revoked_at IS NULL
       AND datetime(s.expires_at) > datetime('now')
+      AND datetime(s.last_seen_at) > datetime('now', '-' || ? || ' hours')
     LIMIT 1
-  `).bind(tokenHash).first();
+  `).bind(tokenHash, sessionIdleHours(env)).first();
   if (!row) return null;
   if (touch) {
     await env.NAVOFLO_DB.batch([
@@ -211,13 +229,20 @@ export async function login(request, env) {
   const password = String(body.password || '');
   if (!email || !password) throw authError('Email and password are required.', 400, 'MISSING_CREDENTIALS');
 
+  await enforceRateLimit(request, env, 'auth.login.ip', { limit:30, windowSeconds:900, blockSeconds:900 });
+  await enforceRateLimit(request, env, 'auth.login.identity', { identity:email, limit:12, windowSeconds:900, blockSeconds:900 });
+
   const user = await env.NAVOFLO_DB.prepare(`
     SELECT id, email, display_name, password_hash, status, failed_login_count, locked_until
     FROM users WHERE email=? COLLATE NOCASE LIMIT 1
   `).bind(email).first();
 
   const generic = () => authError('Invalid email or password.', 401, 'INVALID_CREDENTIALS');
-  if (!user || !user.password_hash) throw generic();
+  if (!user || !user.password_hash) {
+    // Spend the same PBKDF2 class of work for unknown accounts to reduce timing-based account discovery.
+    await pbkdf2(password, new Uint8Array(16), PBKDF2_ITERATIONS);
+    throw generic();
+  }
   if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) {
     throw authError('Too many failed attempts. Try again later.', 429, 'ACCOUNT_TEMPORARILY_LOCKED');
   }
@@ -380,6 +405,9 @@ export async function requestAccountActivation(request, env) {
     throw authError('A valid email address is required.', 400, 'INVALID_EMAIL');
   }
 
+  await enforceRateLimit(request, env, 'auth.activation_resend.ip', { limit:10, windowSeconds:3600, blockSeconds:3600 });
+  await enforceRateLimit(request, env, 'auth.activation_resend.identity', { identity:email, limit:5, windowSeconds:3600, blockSeconds:3600 });
+
   const response = () => json({ ok:true }, 200, { 'cache-control':'no-store' });
   const row = await env.NAVOFLO_DB.prepare(`
     SELECT u.id, u.email, u.password_hash, u.status,
@@ -433,6 +461,7 @@ export async function accountActivationInfo(request, env) {
 
 export async function activateAccount(request, env) {
   if (!env?.NAVOFLO_DB) throw authError('NavoFlo database is unavailable.', 503, 'DB_UNAVAILABLE');
+  await enforceRateLimit(request, env, 'auth.activation_complete.ip', { limit:20, windowSeconds:900, blockSeconds:900 });
   const body = await request.json().catch(() => ({}));
   const token = String(body.token || '');
   if (!token) throw authError('Account activation token is required.', 400, 'ACTIVATION_TOKEN_REQUIRED');
@@ -505,6 +534,9 @@ export async function requestPasswordReset(request, env) {
   if (!email || email.length > 320 || !/^\S+@\S+\.\S+$/.test(email)) {
     throw authError('A valid email address is required.', 400, 'INVALID_EMAIL');
   }
+
+  await enforceRateLimit(request, env, 'auth.password_reset.ip', { limit:10, windowSeconds:3600, blockSeconds:3600 });
+  await enforceRateLimit(request, env, 'auth.password_reset.identity', { identity:email, limit:5, windowSeconds:3600, blockSeconds:3600 });
 
   // Always return the same public response whether the account exists or not.
   const response = () => json({ ok:true }, 200, { 'cache-control':'no-store' });
@@ -603,6 +635,7 @@ export async function passwordResetInfo(request, env) {
 
 export async function resetPassword(request, env) {
   if (!env?.NAVOFLO_DB) throw authError('NavoFlo database is unavailable.', 503, 'DB_UNAVAILABLE');
+  await enforceRateLimit(request, env, 'auth.password_reset_complete.ip', { limit:20, windowSeconds:900, blockSeconds:900 });
   const body = await request.json().catch(() => ({}));
   const token = String(body.token || '');
   if (!token) throw authError('Password reset token is required.', 400, 'RESET_TOKEN_REQUIRED');
@@ -700,6 +733,7 @@ export async function invitationInfo(request, env) {
 }
 
 export async function acceptInvitation(request, env) {
+  await enforceRateLimit(request, env, 'auth.invitation_accept.ip', { limit:30, windowSeconds:900, blockSeconds:900 });
   const body = await request.json().catch(() => ({}));
   const token = String(body.token || '');
   if (!token) throw authError('Invitation token is required.', 400, 'INVITE_TOKEN_REQUIRED');
@@ -757,16 +791,26 @@ export async function accountSessions(request, env) {
     WHERE user_id=?
       AND revoked_at IS NULL
       AND datetime(expires_at) > datetime('now')
+      AND datetime(last_seen_at) > datetime('now', '-' || ? || ' hours')
     ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, datetime(last_seen_at) DESC, id DESC
-  `).bind(user.id, user.session_id).all();
-  const sessions = (result.results || []).map(row => ({
-    id:Number(row.id),
-    created_at:row.created_at,
-    last_seen_at:row.last_seen_at,
-    expires_at:row.expires_at,
-    user_agent:row.user_agent || null,
-    current:Number(row.id) === Number(user.session_id)
-  }));
+  `).bind(user.id, sessionIdleHours(env), user.session_id).all();
+  const idleMs = sessionIdleHours(env) * 60 * 60 * 1000;
+  const sessions = (result.results || []).map(row => {
+    const rawLastSeen = String(row.last_seen_at || '');
+    const lastSeenText = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(rawLastSeen)
+      ? `${rawLastSeen.replace(' ', 'T')}Z`
+      : rawLastSeen;
+    const lastSeenMs = Date.parse(lastSeenText);
+    return {
+      id:Number(row.id),
+      created_at:row.created_at,
+      last_seen_at:row.last_seen_at,
+      expires_at:row.expires_at,
+      idle_expires_at:Number.isFinite(lastSeenMs) ? new Date(lastSeenMs + idleMs).toISOString() : null,
+      user_agent:row.user_agent || null,
+      current:Number(row.id) === Number(user.session_id)
+    };
+  });
   return json({ sessions }, 200, { 'cache-control':'no-store' });
 }
 
@@ -776,9 +820,11 @@ export async function revokeAccountSession(request, env, sessionId) {
   if (!Number.isInteger(id) || id <= 0) throw authError('Invalid session.', 400, 'INVALID_SESSION');
   const row = await env.NAVOFLO_DB.prepare(`
     SELECT id FROM auth_sessions
-    WHERE id=? AND user_id=? AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
+    WHERE id=? AND user_id=? AND revoked_at IS NULL
+      AND datetime(expires_at)>datetime('now')
+      AND datetime(last_seen_at)>datetime('now', '-' || ? || ' hours')
     LIMIT 1
-  `).bind(id, user.id).first();
+  `).bind(id, user.id, sessionIdleHours(env)).first();
   if (!row) throw authError('Session not found.', 404, 'SESSION_NOT_FOUND');
   await env.NAVOFLO_DB.prepare(`UPDATE auth_sessions SET revoked_at=datetime('now') WHERE id=? AND user_id=?`).bind(id, user.id).run();
   const current = Number(id) === Number(user.session_id);
@@ -818,6 +864,8 @@ export async function revokeAllUserSessions(env, userId) {
 }
 
 export function authJsonError(error) {
-  return json({ error:error.message || 'Authentication request failed.', code:error.code || 'AUTH_ERROR' }, error.status || 500, { 'cache-control':'no-store' });
+  const headers = { 'cache-control':'no-store' };
+  if (error?.retryAfter) headers['retry-after'] = String(error.retryAfter);
+  return json({ error:error.message || 'Authentication request failed.', code:error.code || 'AUTH_ERROR' }, error.status || 500, headers);
 }
 

@@ -37,6 +37,8 @@ import {
 import { licensingContext } from './lib/licensing.js';
 import { sessionUser } from './lib/auth.js';
 import { getOrganizationAudit } from './handlers/audit.js';
+import { getPreferences, putPreferences } from './handlers/preferences.js';
+import { apiBodyTooLarge, assertTrustedMutation, hardenResponse, maybeScheduleSecurityMaintenance, runSecurityMaintenance, securityJsonError } from './lib/security.js';
 
 const API = Object.freeze({
   '/api/stripe/create-checkout': { POST:createCheckout },
@@ -55,6 +57,7 @@ const API = Object.freeze({
   '/api/auth/invitation': { GET:getInvitation },
   '/api/auth/accept-invitation': { POST:postAcceptInvitation },
   '/api/audit': { GET:getOrganizationAudit },
+  '/api/preferences': { GET:getPreferences, PUT:putPreferences },
   '/api/licensing/me': { GET:getLicensingMe },
   '/api/licensing/devices': { GET:getLicensingDevices },
   '/api/licensing/members': { POST:createLicensingMember },
@@ -69,7 +72,7 @@ function methodNotAllowed(allowed){ return json({error:'Method not allowed.'},40
 
 class Navo3DLeaseInjector {
   element(element){
-    element.prepend('<script src="/js/license-lease-v89.js" data-product="navo3d" data-injected="worker-v8.9"></script>',{html:true});
+    element.prepend('<script src="/js/license-lease-v89.js?v=8.14" data-product="navo3d" data-injected="worker-v8.14"></script>',{html:true});
   }
 }
 function isNavo3DPath(pathname){
@@ -111,50 +114,70 @@ function featureForPath(pathname){
   return null;
 }
 
+async function routeRequest(request,env,ctx){
+  const url=new URL(request.url); const route=API[url.pathname];
+  if(route){ const handler=route[request.method]; if(!handler)return methodNotAllowed(Object.keys(route)); return handler({request,env,ctx}); }
+
+  const authSessionMatch=url.pathname.match(/^\/api\/auth\/sessions\/(\d+)\/revoke$/);
+  if(authSessionMatch){
+    if(request.method!=='POST')return methodNotAllowed(['POST']);
+    return postRevokeAuthSession({request,env,ctx,sessionId:authSessionMatch[1]});
+  }
+
+  const deviceMatch=url.pathname.match(/^\/api\/licensing\/devices\/(\d+)\/disconnect$/);
+  if(deviceMatch){
+    if(request.method!=='POST')return methodNotAllowed(['POST']);
+    return disconnectLicensingDevice({request,env,ctx,deviceId:deviceMatch[1]});
+  }
+
+  const memberMatch=url.pathname.match(/^\/api\/licensing\/members\/(\d+)(\/(license|invite|transfer))?$/);
+  if(memberMatch){
+    const userId=memberMatch[1], action=memberMatch[3]||'';
+    if(action==='license'){ if(request.method!=='POST')return methodNotAllowed(['POST']); return updateLicensingMemberLicense({request,env,ctx,userId}); }
+    if(action==='invite'){ if(request.method!=='POST')return methodNotAllowed(['POST']); return inviteLicensingMember({request,env,ctx,userId}); }
+    if(action==='transfer'){ if(request.method!=='POST')return methodNotAllowed(['POST']); return transferLicensingMember({request,env,ctx,userId}); }
+    if(request.method!=='DELETE')return methodNotAllowed(['DELETE']);
+    return deleteLicensingMember({request,env,ctx,userId});
+  }
+
+  if(url.pathname.startsWith('/api/'))return json({error:'API route not found.'},404);
+
+  if(String(env?.NAVOFLO_ENFORCE_LICENSES||'').toLowerCase()==='true'){
+    const feature=featureForPath(url.pathname);
+    if(feature){
+      const user=await sessionUser(request,env,{touch:false});
+      if(!user){
+        const target=url.pathname.startsWith('/en/')?'/en/login/?next='+encodeURIComponent(url.pathname+url.search):'/login/?next='+encodeURIComponent(url.pathname+url.search);
+        return Response.redirect(new URL(target,url.origin),302);
+      }
+      const context=await licensingContext(env,user.email,{includeMembers:false,touchLogin:true});
+      const authorized=Boolean(user.status==='active'&&context?.user?.licensed&&context?.entitlements?.[feature]);
+      if(!authorized)return licenseRequiredResponse(url,feature,context);
+    }
+  }
+  return serveAssetWithLeaseGate(request,env,url);
+}
+
 export default {
   async fetch(request,env,ctx){
-    const url=new URL(request.url); const route=API[url.pathname];
-    if(route){ const handler=route[request.method]; if(!handler)return methodNotAllowed(Object.keys(route)); return handler({request,env,ctx}); }
-
-    const authSessionMatch=url.pathname.match(/^\/api\/auth\/sessions\/(\d+)\/revoke$/);
-    if(authSessionMatch){
-      if(request.method!=='POST')return methodNotAllowed(['POST']);
-      return postRevokeAuthSession({request,env,ctx,sessionId:authSessionMatch[1]});
-    }
-
-    const deviceMatch=url.pathname.match(/^\/api\/licensing\/devices\/(\d+)\/disconnect$/);
-    if(deviceMatch){
-      if(request.method!=='POST')return methodNotAllowed(['POST']);
-      return disconnectLicensingDevice({request,env,ctx,deviceId:deviceMatch[1]});
-    }
-
-    const memberMatch=url.pathname.match(/^\/api\/licensing\/members\/(\d+)(\/(license|invite|transfer))?$/);
-    if(memberMatch){
-      const userId=memberMatch[1], action=memberMatch[3]||'';
-      if(action==='license'){ if(request.method!=='POST')return methodNotAllowed(['POST']); return updateLicensingMemberLicense({request,env,ctx,userId}); }
-      if(action==='invite'){ if(request.method!=='POST')return methodNotAllowed(['POST']); return inviteLicensingMember({request,env,ctx,userId}); }
-      if(action==='transfer'){ if(request.method!=='POST')return methodNotAllowed(['POST']); return transferLicensingMember({request,env,ctx,userId}); }
-      if(request.method!=='DELETE')return methodNotAllowed(['DELETE']);
-      return deleteLicensingMember({request,env,ctx,userId});
-    }
-
-    if(url.pathname.startsWith('/api/'))return json({error:'API route not found.'},404);
-
-    if(String(env?.NAVOFLO_ENFORCE_LICENSES||'').toLowerCase()==='true'){
-      const feature=featureForPath(url.pathname);
-      if(feature){
-        const user=await sessionUser(request,env,{touch:false});
-        if(!user){
-          const target=url.pathname.startsWith('/en/')?'/en/login/?next='+encodeURIComponent(url.pathname+url.search):'/login/?next='+encodeURIComponent(url.pathname+url.search);
-          return Response.redirect(new URL(target,url.origin),302);
-        }
-        const context=await licensingContext(env,user.email,{includeMembers:false,touchLogin:true});
-        const authorized=Boolean(user.status==='active'&&context?.user?.licensed&&context?.entitlements?.[feature]);
-        if(!authorized){
-          return licenseRequiredResponse(url,feature,context);
+    const url=new URL(request.url);
+    try{
+      if(url.pathname.startsWith('/api/')){
+        maybeScheduleSecurityMaintenance(env,ctx);
+        if(url.pathname!=='/api/stripe/webhook'){
+          assertTrustedMutation(request);
+          if(apiBodyTooLarge(request))return hardenResponse(json({error:'API request body is too large.',code:'REQUEST_TOO_LARGE'},413),request);
         }
       }
+      return hardenResponse(await routeRequest(request,env,ctx),request);
+    }catch(error){
+      if(error?.code==='UNTRUSTED_ORIGIN'||error?.code==='CROSS_SITE_BLOCKED'||error?.code==='RATE_LIMITED'){
+        return hardenResponse(securityJsonError(error),request);
+      }
+      throw error;
     }
-    return serveAssetWithLeaseGate(request,env,url);
+  },
+  async scheduled(_controller,env,ctx){
+    ctx.waitUntil(runSecurityMaintenance(env));
   }
 };

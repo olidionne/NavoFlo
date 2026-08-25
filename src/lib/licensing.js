@@ -1,5 +1,6 @@
 import { json, planConfig, safeOrigin, stripeRequest, taxRatesForProvince } from './stripe.js';
 import { createInvitation, identityEmail, randomToken, sessionUser, sha256 } from './auth.js';
+import { enforceRateLimit } from './security.js';
 
 const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
 const LEASE_SECONDS = 90;
@@ -233,6 +234,7 @@ async function ensureMemberRecord(env, context, payload = {}, pendingLicense = 0
 
 export async function addMember(request, env, context, payload = {}) {
   requireManager(context);
+  await enforceRateLimit(request, env, 'admin.member_invite', { identity:String(context.user.id), limit:30, windowSeconds:3600, blockSeconds:1800 });
   const email = normalizeEmail(payload.email);
   const assignLicense = payload.assign_license !== false;
   const existingView = (context.members || []).find(member => normalizeEmail(member.email) === email);
@@ -258,6 +260,7 @@ export async function addMember(request, env, context, payload = {}) {
 
 export async function resendMemberInvitation(request, env, context, userId) {
   requireManager(context);
+  await enforceRateLimit(request, env, 'admin.member_invite', { identity:String(context.user.id), limit:30, windowSeconds:3600, blockSeconds:1800 });
   const targetId=Number(userId);
   const member=await env.NAVOFLO_DB.prepare(`
     SELECT u.id,u.email,u.status FROM memberships m JOIN users u ON u.id=m.user_id
@@ -388,6 +391,7 @@ function itemPriceId(item){ return typeof item?.price==='string'?item.price:item
 
 export async function purchaseSeatForMember(request,env,context,payload={}){
   requireManager(context);
+  await enforceRateLimit(request,env,'billing.fast_track',{identity:String(context.user.id),limit:10,windowSeconds:3600,blockSeconds:3600});
   if(!context.subscription?.active) throw licensingError('The organization does not have an active subscription.',409,'SUBSCRIPTION_INACTIVE');
   const user=await ensureMemberRecord(env,context,payload,1);
   const invitation=await createInvitation(env,{organizationId:context.organization.id,userId:user.id,email:user.email,createdByUserId:context.user.id,request});
@@ -483,6 +487,7 @@ export async function acquireAppLease(request,env,context,payload={}){
     throw error;
   }
   if(conflicting&&payload.force){
+    await enforceRateLimit(request,env,'license.device_takeover',{identity:String(context.user.id),limit:20,windowSeconds:600,blockSeconds:600});
     await env.NAVOFLO_DB.prepare(`
       UPDATE app_leases SET revoked_at=datetime('now')
       WHERE license_assignment_id=? AND revoked_at IS NULL AND device_id<>?
@@ -616,5 +621,7 @@ export async function featureAuthorized(request,env,feature){
 export function licensingJsonError(error){
   const payload={error:error.message||'Licensing request failed.',code:error.code||'LICENSING_ERROR'};
   if(error.details)payload.details=error.details;
-  return json(payload,error.status||500);
+  const headers={};
+  if(error?.retryAfter)headers['retry-after']=String(error.retryAfter);
+  return json(payload,error.status||500,headers);
 }

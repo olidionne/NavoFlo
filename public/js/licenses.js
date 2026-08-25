@@ -51,7 +51,8 @@
     inactive: fr ? 'Inactif' : 'Inactive',
     disconnected: fr ? 'Déconnecté' : 'Disconnected',
     lastActivity: fr ? 'Dernière activité' : 'Last activity',
-    expires: fr ? 'Expire' : 'Expires',
+    expires: fr ? 'Expiration maximale' : 'Maximum expiry',
+    idleExpires: fr ? 'Expire si inactive' : 'Expires if inactive',
     created: fr ? 'Créée' : 'Created',
     noSessions: fr ? 'Aucune session active.' : 'No active sessions.',
     noDevices: fr ? 'Aucun poste Navo2D/Navo3D enregistré pour ce compte.' : 'No Navo2D/Navo3D device is registered for this account.',
@@ -257,7 +258,7 @@
       <div class="license-panel-head security-heading"><div><h2>${t.sessions}</h2><p>${t.sessionsIntro}</p></div>${sessions.filter(item => !item.current).length ? `<button class="button secondary security-secondary" data-revoke-others>${t.revokeOthers}</button>` : ''}</div>
       <div class="security-list">${sessions.length ? sessions.map(session => `<article class="security-row">
         <div class="security-icon" aria-hidden="true">W</div>
-        <div class="security-main"><div class="security-title"><strong>${esc(sessionLabel(session.user_agent))}</strong>${session.current ? `<span class="security-badge current">${t.current}</span>` : ''}</div><small>${t.lastActivity}: ${esc(fmtDateTime(session.last_seen_at))} · ${t.expires}: ${esc(fmtDateTime(session.expires_at))}</small><small>${t.created}: ${esc(fmtDateTime(session.created_at))}</small></div>
+        <div class="security-main"><div class="security-title"><strong>${esc(sessionLabel(session.user_agent))}</strong>${session.current ? `<span class="security-badge current">${t.current}</span>` : ''}</div><small>${t.lastActivity}: ${esc(fmtDateTime(session.last_seen_at))}${session.idle_expires_at ? ` · ${t.idleExpires}: ${esc(fmtDateTime(session.idle_expires_at))}` : ''}</small><small>${t.created}: ${esc(fmtDateTime(session.created_at))} · ${t.expires}: ${esc(fmtDateTime(session.expires_at))}</small></div>
         <button class="security-danger" data-revoke-session="${session.id}">${session.current ? t.logout : t.revoke}</button>
       </article>`).join('') : `<p class="license-muted">${t.noSessions}</p>`}</div>
     </section>
