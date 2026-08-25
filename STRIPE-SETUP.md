@@ -35,4 +35,4 @@ The primary Owner assignment is migrated to `license_type=admin` and is non-tran
 
 V8 includes a 180-second application lease API. `public/js/license-lease.js` refreshes every 60 seconds. A second workstation receives `LICENSE_IN_USE` and can take over only after explicit confirmation; takeover revokes the prior workstation lease.
 
-Keep `NAVOFLO_ENFORCE_LICENSES` disabled until the lease helper is wired directly into Navo2D/Navo3D startup.
+`NAVOFLO_ENFORCE_LICENSES` is enabled in this V8.8 deployment package. Navo2D lease enforcement has been validated; Navo3D route protection is prepared for its integration.

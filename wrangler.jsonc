@@ -14,5 +14,8 @@
       "database_id": "049d0b7d-cd2c-4dd6-af23-1ccd3634d737"
     }
   ],
+  "vars": {
+    "NAVOFLO_ENFORCE_LICENSES": "true"
+  },
   "keep_vars": true
 }
