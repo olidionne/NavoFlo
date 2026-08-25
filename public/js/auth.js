@@ -20,11 +20,11 @@
   const forgot=document.querySelector('[data-auth-forgot]');
   if(forgot){
     forgot.querySelector('[data-forgot-form]').addEventListener('submit',async e=>{
-      e.preventDefault();const b=e.submitter;b.disabled=true;show('');const f=new FormData(e.currentTarget);
+      e.preventDefault();const form=e.currentTarget,b=e.submitter;b.disabled=true;show('');const f=new FormData(form);
       try{
         await api('/api/auth/forgot-password',{method:'POST',body:JSON.stringify({email:f.get('email')})});
         show(fr?'Si un compte actif correspond à ce courriel, un lien de réinitialisation vient d’être envoyé. Vérifiez aussi vos indésirables.':'If an active account matches that email, a reset link has been sent. Please also check your spam folder.',true);
-        e.currentTarget.reset();b.disabled=false;
+        form.reset();b.disabled=false;
       }catch(err){show(err.message);b.disabled=false;}
     });
   }

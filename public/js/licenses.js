@@ -391,6 +391,20 @@
     }));
   }
 
+  function renderAccountFallback(error) {
+    const noOrganization = error?.code === 'NO_ORGANIZATION';
+    const title = noOrganization ? t.noOrg : (fr ? 'Impossible de charger le compte NavoFlo.' : 'Unable to load the NavoFlo account.');
+    const description = noOrganization
+      ? (fr ? 'Votre compte NavoFlo est toujours connecté, mais il n’est actuellement lié à aucune organisation active.' : 'Your NavoFlo account is still signed in, but it is not currently linked to an active organization.')
+      : (error?.message || (fr ? 'Une erreur est survenue.' : 'An error occurred.'));
+    root.innerHTML = `<section class="license-empty"><h1>${title}</h1><p>${esc(description)}</p><div class="license-empty-actions"><a class="button" href="${fr ? '/pricing/' : '/en/pricing/'}">${fr ? 'Voir les tarifs' : 'View pricing'}</a><button class="button secondary" type="button" data-fallback-logout>${t.logout}</button></div></section>`;
+    root.querySelector('[data-fallback-logout]')?.addEventListener('click', async event => {
+      event.currentTarget.disabled = true;
+      await api('/api/auth/logout', { method: 'POST', body: '{}' }).catch(() => {});
+      location.href = fr ? '/login/' : '/en/login/';
+    });
+  }
+
   root.textContent = t.loading;
   Promise.all([api('/api/licensing/me'), loadSecurity()])
     .then(([data]) => {
@@ -402,6 +416,6 @@
         location.href = (fr ? '/login/' : '/en/login/') + '?next=' + encodeURIComponent(location.pathname);
         return;
       }
-      root.innerHTML = `<section class="license-empty"><h1>${t.noOrg}</h1><p>${esc(error.message)}</p><a class="button" href="/pricing/">${fr ? 'Voir les tarifs' : 'View pricing'}</a></section>`;
+      renderAccountFallback(error);
     });
 })();
