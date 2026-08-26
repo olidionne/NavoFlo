@@ -302,8 +302,9 @@ async function closeModelDocument(id=activeModelDocumentId){
 }
 
 
-const navo3dPreferences={gridVisible:true,edgesVisible:true,selectionMode:'auto',propertiesOpen:false,materialClass:'hard',perspective:false};
-function navo3dPreferenceSnapshot(){return {...navo3dPreferences,edgesVisible:Boolean(edgesVisible),selectionMode,propertiesOpen:Boolean(navo3dPreferences.propertiesOpen),materialClass:sheetMetalState.materialClass,perspective:cameraProjectionMode==='perspective'};}
+const NAVO3D_DISPLAY_UNITS=new Set(['u','mm','cm','m','in']);
+const navo3dPreferences={gridVisible:true,edgesVisible:true,selectionMode:'auto',propertiesOpen:false,materialClass:'hard',perspective:false,displayUnit:'mm'};
+function navo3dPreferenceSnapshot(){return {...navo3dPreferences,edgesVisible:Boolean(edgesVisible),selectionMode,propertiesOpen:Boolean(navo3dPreferences.propertiesOpen),materialClass:sheetMetalState.materialClass,perspective:cameraProjectionMode==='perspective',displayUnit:NAVO3D_DISPLAY_UNITS.has(navo3dPreferences.displayUnit)?navo3dPreferences.displayUnit:'mm'};}
 const saveNavo3DPrefs=createPreferenceSaver('navo3d',navo3dPreferenceSnapshot,500);
 function applyNavo3DPreferences(p={}){
   if(typeof p.gridVisible==='boolean')navo3dPreferences.gridVisible=p.gridVisible;
@@ -312,6 +313,7 @@ function applyNavo3DPreferences(p={}){
   if(typeof p.propertiesOpen==='boolean')navo3dPreferences.propertiesOpen=p.propertiesOpen;
   if(AIR_BENDING_K_TABLE[p.materialClass])navo3dPreferences.materialClass=p.materialClass;
   if(typeof p.perspective==='boolean')navo3dPreferences.perspective=p.perspective;
+  if(NAVO3D_DISPLAY_UNITS.has(p.displayUnit))navo3dPreferences.displayUnit=p.displayUnit;
   cameraProjectionMode=navo3dPreferences.perspective?'perspective':'orthographic';edgesVisible=navo3dPreferences.edgesVisible;selectionMode=navo3dPreferences.selectionMode;sheetMetalState.materialClass=navo3dPreferences.materialClass;
 }
 
@@ -487,6 +489,10 @@ function bindUI() {
   E.gridToggle.addEventListener('click', toggleGrid);
   E.unitSelect.addEventListener('change', async () => {
     displayUnit=E.unitSelect.value;
+    if(NAVO3D_DISPLAY_UNITS.has(displayUnit)){
+      navo3dPreferences.displayUnit=displayUnit;
+      saveNavo3DPrefs();
+    }
     updateDisplayedUnits();
     await refreshMeasurementUnits();
   });
@@ -1230,8 +1236,8 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
       const result=await workerRequest('load-step',{buffer},[buffer]);
       currentStepResult=result;
       currentUnit='mm';
-      displayUnit='mm';
-      E.unitSelect.value='mm';
+      displayUnit=NAVO3D_DISPLAY_UNITS.has(navo3dPreferences.displayUnit)?navo3dPreferences.displayUnit:'mm';
+      E.unitSelect.value=displayUnit;
       currentStepProperties=[];
       scanStepProperties(main).then(properties=>{
         if(currentFile!==main)return;
