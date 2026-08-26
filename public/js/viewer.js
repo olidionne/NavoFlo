@@ -5,6 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.16';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -65,13 +66,16 @@ const E = {
   smManualToggle:$('sm-manual-k-toggle'), smManualRow:$('sm-manual-k-row'), smManualK:$('sm-manual-k'),
   smRatio:$('sm-ratio'), smBand:$('sm-band'), smK:$('sm-k'), smNeutralRadius:$('sm-neutral-radius'),
   smBendAllowance:$('sm-bend-allowance'), smBendDeduction:$('sm-bend-deduction'), smStatus:$('sm-status'),
+  smSetFixedFace:$('sm-set-fixed-face'), smFixedFace:$('sm-fixed-face'), smUnfold:$('sm-unfold'),
+  smFoldedView:$('sm-view-folded'), smFlatView:$('sm-view-flat'), smExportDxf:$('sm-export-dxf'),
+  smDetectedThickness:$('sm-detected-thickness'), smDetectedBends:$('sm-detected-bends'), smFlatSize:$('sm-flat-size'),
   statusFile:$('status-file'), statusFormat:$('status-format'), statusUnits:$('status-units'),
   docTabs:$('n3-doc-tabs'), docTabList:$('n3-doc-tab-list'), docTabAdd:$('n3-doc-tab-add')
 };
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.15.4';
+const WORKER_URL = '/js/step-worker.js?v=8.16';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -93,8 +97,19 @@ const SMT = FR ? {
   band1:'0 ≤ R/T ≤ 1',
   band2:'1 < R/T ≤ 3',
   band3:'R/T > 3',
-  calculationReady:'Paramètres de pliage calculés. Utilisables par le futur moteur STEP → DXF.',
-  measurementBusy:'Lecture de la géométrie exacte…'
+  calculationReady:'Paramètres de pliage calculés.',
+  measurementBusy:'Lecture de la géométrie exacte…',
+  fixedFaceReady:'Face fixe sélectionnée.',
+  fixedFaceNeed:'Sélectionnez une face plane STEP, puis cliquez « Face fixe ».',
+  fixedFacePlanar:'La face fixe doit être plane.',
+  unfoldBusy:'Analyse de la tôlerie et calcul du développé…',
+  unfoldReady:'Déplié calculé localement. Validez les dimensions avant production.',
+  unfoldFailed:'Impossible de déplier cette géométrie.',
+  flatView:'Vue dépliée',
+  foldedView:'Vue pliée',
+  exportReady:'DXF du développé généré.',
+  noFlat:'Calculez d’abord le développé.',
+  unsupportedTopology:'Cette pièce sort du MVP: épaisseur constante + faces planes + plis cylindriques standards requis.'
 } : {
   needStep:'Load a STEP file to use sheet-metal parameters.',
   needValues:'Enter thickness T and inside radius R.',
@@ -109,8 +124,19 @@ const SMT = FR ? {
   band1:'0 ≤ R/T ≤ 1',
   band2:'1 < R/T ≤ 3',
   band3:'R/T > 3',
-  calculationReady:'Bend parameters calculated. Ready for the future STEP → DXF engine.',
-  measurementBusy:'Reading exact geometry…'
+  calculationReady:'Bend parameters calculated.',
+  measurementBusy:'Reading exact geometry…',
+  fixedFaceReady:'Fixed face selected.',
+  fixedFaceNeed:'Select a planar STEP face, then click “Fixed face”.',
+  fixedFacePlanar:'The fixed face must be planar.',
+  unfoldBusy:'Analyzing sheet metal and calculating flat pattern…',
+  unfoldReady:'Flat pattern calculated locally. Validate dimensions before production.',
+  unfoldFailed:'This geometry could not be unfolded.',
+  flatView:'Flat view',
+  foldedView:'Folded view',
+  exportReady:'Flat-pattern DXF generated.',
+  noFlat:'Calculate the flat pattern first.',
+  unsupportedTopology:'This part is outside the MVP: constant thickness + planar faces + standard cylindrical bends are required.'
 };
 
 const sheetMetalState = {
@@ -119,9 +145,11 @@ const sheetMetalState = {
   radius:null,
   bendAngleDeg:90,
   manualKEnabled:false,
-  manualK:0.40
+  manualK:0.40,
+  fixedFace:null
 };
 
+let flatPatternRoot=null,flatPatternResult=null,flatPatternActive=false,flatPatternCameraState=null;
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, multiMeasureRoot, grid;
 let cameraProjectionMode='orthographic';
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
@@ -171,7 +199,7 @@ function captureActiveModelDocumentState(){
     doc.view={position:camera.position.toArray(),quaternion:camera.quaternion.toArray(),up:camera.up.toArray(),target:controls.target.toArray(),displayUnit,projectionMode:cameraProjectionMode,zoom:camera.isOrthographicCamera?camera.zoom:1};
   }
   doc.lastFormat=currentFormat||doc.lastFormat||'';
-  doc.sheetMetal={thickness:sheetMetalState.thickness,radius:sheetMetalState.radius,bendAngleDeg:sheetMetalState.bendAngleDeg,manualKEnabled:sheetMetalState.manualKEnabled,manualK:sheetMetalState.manualK};
+  doc.sheetMetal={thickness:sheetMetalState.thickness,radius:sheetMetalState.radius,bendAngleDeg:sheetMetalState.bendAngleDeg,manualKEnabled:sheetMetalState.manualKEnabled,manualK:sheetMetalState.manualK,fixedFace:sheetMetalState.fixedFace?{...sheetMetalState.fixedFace}:null};
 }
 function renderModelDocumentTabs(){
   if(!E.docTabs||!E.docTabList)return;
@@ -484,7 +512,7 @@ function bindUI() {
   E.save?.addEventListener('click',()=>saveCurrentModel(false));
   E.saveAs?.addEventListener('click',()=>saveCurrentModel(true));
   E.docTabAdd?.addEventListener('click',pickModelFiles);
-  E.fit.addEventListener('click', () => fitCurrentView());
+  E.fit.addEventListener('click', () => flatPatternActive?fitFlatPatternView():fitCurrentView());
   E.edges.addEventListener('click', toggleEdges);
   E.gridToggle.addEventListener('click', toggleGrid);
   E.unitSelect.addEventListener('change', async () => {
@@ -538,16 +566,19 @@ function bindUI() {
 
   E.sheetMetal.addEventListener('click', openSheetMetalPanel);
   E.smMaterial.addEventListener('change', () => {
+    clearFlatPattern();
     sheetMetalState.materialClass=E.smMaterial.value;
     navo3dPreferences.materialClass=sheetMetalState.materialClass;
     saveNavo3DPrefs();
     updateSheetMetalCalculation();
   });
   E.smThickness.addEventListener('input', () => {
+    clearFlatPattern();
     sheetMetalState.thickness=readSheetMetalLengthInput(E.smThickness);
     updateSheetMetalCalculation({preserveInputs:true});
   });
   E.smRadius.addEventListener('input', () => {
+    clearFlatPattern();
     sheetMetalState.radius=readSheetMetalLengthInput(E.smRadius);
     updateSheetMetalCalculation({preserveInputs:true});
   });
@@ -557,17 +588,24 @@ function bindUI() {
     updateSheetMetalCalculation({preserveInputs:true});
   });
   E.smManualToggle.addEventListener('change', () => {
+    clearFlatPattern();
     sheetMetalState.manualKEnabled=E.smManualToggle.checked;
     E.smManualRow.hidden=!sheetMetalState.manualKEnabled;
     updateSheetMetalCalculation({preserveInputs:true});
   });
   E.smManualK.addEventListener('input', () => {
+    clearFlatPattern();
     const value=Number(E.smManualK.value);
     sheetMetalState.manualK=Number.isFinite(value)?value:null;
     updateSheetMetalCalculation({preserveInputs:true});
   });
   E.smUseMeasure.addEventListener('click', captureSheetMetalThickness);
   E.smUseRadius.addEventListener('click', captureSheetMetalRadius);
+  E.smSetFixedFace?.addEventListener('click',captureSheetMetalFixedFace);
+  E.smUnfold?.addEventListener('click',runSheetMetalUnfold);
+  E.smFoldedView?.addEventListener('click',()=>setFlatPatternView(false));
+  E.smFlatView?.addEventListener('click',()=>setFlatPatternView(true));
+  E.smExportDxf?.addEventListener('click',exportFlatPatternDxf);
 
   initSheetMetalUI();
   E.edges.classList.toggle('active',edgesVisible);
@@ -794,12 +832,14 @@ function resetSheetMetalForModel() {
   sheetMetalState.bendAngleDeg=90;
   sheetMetalState.manualKEnabled=false;
   sheetMetalState.manualK=AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness ?? 0.40;
+  sheetMetalState.fixedFace=null;
 
   if(E.smAngle)E.smAngle.value='90';
   if(E.smManualToggle)E.smManualToggle.checked=false;
   if(E.smManualRow)E.smManualRow.hidden=true;
   if(E.smManualK)E.smManualK.value=String(sheetMetalState.manualK);
   syncSheetMetalInputs();
+  syncSheetMetalUnfoldUI();
 }
 
 function openSheetMetalPanel() {
@@ -933,6 +973,7 @@ function syncSheetMetalInputs() {
   }
 
   updateSheetMetalCalculation({preserveInputs:true});
+  syncSheetMetalUnfoldUI();
 }
 
 function updateSheetMetalCalculation({preserveInputs=false}={}) {
@@ -1007,6 +1048,7 @@ function captureSheetMetalThickness() {
     return;
   }
 
+  clearFlatPattern();
   sheetMetalState.thickness=currentMeasureResult.value;
   syncSheetMetalInputs();
   setSheetMetalStatus(SMT.capturedThickness,'ok');
@@ -1038,6 +1080,7 @@ async function captureSheetMetalRadius() {
       return;
     }
 
+    clearFlatPattern();
     sheetMetalState.radius=radius;
     syncSheetMetalInputs();
     setSheetMetalStatus(SMT.capturedRadius,'ok');
@@ -1045,6 +1088,161 @@ async function captureSheetMetalRadius() {
     console.warn('[NavoFlo sheet metal radius]',error);
     setSheetMetalStatus(SMT.exactRadiusUnavailable,'warn');
   }
+}
+
+
+function syncSheetMetalUnfoldUI(){
+  if(E.smFixedFace)E.smFixedFace.textContent=sheetMetalState.fixedFace?`Face #${sheetMetalState.fixedFace.elementId}`:'—';
+  if(E.smDetectedThickness){
+    const value=flatPatternResult?.thickness;
+    E.smDetectedThickness.textContent=Number.isFinite(value)?formatLength(value):'—';
+  }
+  if(E.smDetectedBends)E.smDetectedBends.textContent=flatPatternResult?.ok?String(flatPatternResult.bendCount):'—';
+  if(E.smFlatSize){
+    const b=flatPatternResult?.bounds;
+    E.smFlatSize.textContent=b?`${formatLength(b.width)} × ${formatLength(b.height)}`:'—';
+  }
+  E.smFoldedView?.classList.toggle('active',Boolean(flatPatternResult&&!flatPatternActive));
+  E.smFlatView?.classList.toggle('active',Boolean(flatPatternResult&&flatPatternActive));
+  if(E.smFoldedView)E.smFoldedView.disabled=!flatPatternResult;
+  if(E.smFlatView)E.smFlatView.disabled=!flatPatternResult;
+  if(E.smExportDxf)E.smExportDxf.disabled=!flatPatternResult;
+  if(E.smUnfold)E.smUnfold.disabled=!currentStepResult;
+}
+
+async function captureSheetMetalFixedFace({silent=false}={}){
+  if(!currentStepResult){if(!silent)setSheetMetalStatus(SMT.needStep,'warn');return false;}
+  const candidate=selected.length===1&&selected[0]?.kind==='face'?selected[0]:null;
+  if(!candidate){if(!silent)setSheetMetalStatus(SMT.fixedFaceNeed,'warn');return false;}
+  try{
+    const details=await workerRequest('inspect',{selection:serialSelection(candidate)});
+    if(!['plane','planar'].includes(String(details?.family||'').toLowerCase())){if(!silent)setSheetMetalStatus(SMT.fixedFacePlanar,'warn');return false;}
+    sheetMetalState.fixedFace={geometryId:String(candidate.geometryId),elementId:Number(candidate.elementId)};
+    clearFlatPattern();
+    syncSheetMetalUnfoldUI();
+    if(!silent)setSheetMetalStatus(`${SMT.fixedFaceReady} · Face #${candidate.elementId}`,'ok');
+    captureActiveModelDocumentState();
+    return true;
+  }catch(error){console.warn('[NavoFlo fixed sheet face]',error);if(!silent)setSheetMetalStatus(SMT.fixedFacePlanar,'warn');return false;}
+}
+
+function resolveUnfoldK(innerRadius,thickness){
+  if(sheetMetalState.manualKEnabled){
+    const k=Number(sheetMetalState.manualK);return Number.isFinite(k)?k:NaN;
+  }
+  return getAirBendingRule(sheetMetalState.materialClass,innerRadius,thickness)?.k ?? NaN;
+}
+
+async function runSheetMetalUnfold(){
+  if(!currentStepResult){setSheetMetalStatus(SMT.needStep,'warn');return;}
+  if(!sheetMetalState.fixedFace){
+    const captured=await captureSheetMetalFixedFace({silent:true});
+    if(!captured){setSheetMetalStatus(SMT.fixedFaceNeed,'warn');return;}
+  }
+  const fixed={...sheetMetalState.fixedFace};
+  const geometry=currentStepResult.geometries?.find(g=>String(g.id)===String(fixed.geometryId));
+  if(!geometry){setSheetMetalStatus(SMT.unfoldFailed+' · géométrie introuvable','warn');return;}
+  setSheetMetalStatus(SMT.unfoldBusy);
+  if(E.smUnfold)E.smUnfold.disabled=true;
+  try{
+    const exact=await workerRequest('sheetmetal-face-info',{geometryId:fixed.geometryId});
+    const result=analyzeAndUnfold({
+      geometry,
+      faceInfo:exact?.faces||[],
+      edgeInfo:exact?.edges||[],
+      logicalGroups:exact?.logicalGroups||[],
+      fixedFaceId:fixed.elementId,
+      thickness:sheetMetalState.thickness,
+      fallbackInsideRadius:sheetMetalState.radius,
+      kResolver:resolveUnfoldK
+    });
+    if(!result?.ok){
+      flatPatternResult=null;clearFlatPattern();syncSheetMetalUnfoldUI();
+      const reason=result?.message||SMT.unsupportedTopology;
+      setSheetMetalStatus(`${SMT.unfoldFailed} · ${reason}`,'warn');return;
+    }
+    flatPatternResult=result;
+    if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
+    const firstR=result.bendLines?.find(b=>Number.isFinite(b.insideRadius))?.insideRadius;
+    if((!Number.isFinite(sheetMetalState.radius)||sheetMetalState.radius<0)&&Number.isFinite(firstR))sheetMetalState.radius=firstR;
+    buildFlatPatternScene(result);
+    syncSheetMetalInputs();syncSheetMetalUnfoldUI();captureActiveModelDocumentState();
+    const warnings=(result.warnings||[]).filter(Boolean);
+    setSheetMetalStatus(`${SMT.unfoldReady} · ${result.panelCount} ${FR?'face(s)':'face(s)'} · ${result.bendCount} ${FR?'pli(s)':'bend(s)'}${warnings.length?` · ⚠ ${warnings[0]}`:''}`,'ok');
+    setFlatPatternView(true);
+  }catch(error){
+    console.error('[NavoFlo unfold]',error);clearFlatPattern();setSheetMetalStatus(`${SMT.unfoldFailed} · ${error?.message||error}`,'warn');
+  }finally{if(E.smUnfold)E.smUnfold.disabled=!currentStepResult;}
+}
+
+function flatPatternTrianglePositions(result){
+  const top=[],bottom=[],sides=[],t=Math.max(Number(result.thickness)||0,1e-6);
+  for(const tri of result.triangles||[]){
+    const a=[tri[0][0],tri[0][1],0],b=[tri[1][0],tri[1][1],0],c=[tri[2][0],tri[2][1],0];top.push(...a,...b,...c);
+    const ab=[a[0],a[1],-t],bb=[b[0],b[1],-t],cb=[c[0],c[1],-t];bottom.push(...cb,...bb,...ab);
+  }
+  for(const edge of result.boundaryEdges||[]){
+    const a=[edge[0][0],edge[0][1],0],b=[edge[1][0],edge[1][1],0],a2=[a[0],a[1],-t],b2=[b[0],b[1],-t];
+    sides.push(...a,...b,...b2,...a,...b2,...a2);
+  }
+  return new Float32Array([...top,...bottom,...sides]);
+}
+
+function buildFlatPatternScene(result){
+  if(flatPatternRoot){scene.remove(flatPatternRoot);disposeObject(flatPatternRoot);}
+  flatPatternRoot=new THREE.Group();flatPatternRoot.name='NavoFlo Flat Pattern';
+  const positions=flatPatternTrianglePositions(result),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));geometry.computeVertexNormals();
+  const material=new THREE.MeshStandardMaterial({color:0xc7ced1,metalness:0.05,roughness:0.58,side:THREE.DoubleSide});
+  const mesh=new THREE.Mesh(geometry,material);mesh.userData.flatPattern=true;flatPatternRoot.add(mesh);
+
+  if(result.boundaryEdges?.length){
+    const linePos=[];for(const [a,b] of result.boundaryEdges)linePos.push(a[0],a[1],0.02,b[0],b[1],0.02);
+    const lg=new THREE.BufferGeometry();lg.setAttribute('position',new THREE.Float32BufferAttribute(linePos,3));const lm=new THREE.LineBasicMaterial({color:0x172027,depthTest:false,depthWrite:false});const lines=new THREE.LineSegments(lg,lm);lines.renderOrder=70;flatPatternRoot.add(lines);
+  }
+  if(result.bendLines?.length){
+    const bendPos=[];for(const bend of result.bendLines)bendPos.push(bend.a[0],bend.a[1],0.04,bend.b[0],bend.b[1],0.04);
+    const bg=new THREE.BufferGeometry();bg.setAttribute('position',new THREE.Float32BufferAttribute(bendPos,3));const bm=new THREE.LineDashedMaterial({color:0x21c58b,dashSize:Math.max(result.thickness*2,1),gapSize:Math.max(result.thickness,0.5),depthTest:false,depthWrite:false});const bl=new THREE.LineSegments(bg,bm);bl.computeLineDistances();bl.renderOrder=72;flatPatternRoot.add(bl);
+  }
+  flatPatternRoot.visible=false;scene.add(flatPatternRoot);
+}
+
+function captureCameraState(){return camera&&controls?{position:camera.position.toArray(),quaternion:camera.quaternion.toArray(),up:camera.up.toArray(),target:controls.target.toArray(),mode:cameraProjectionMode,zoom:camera.isOrthographicCamera?camera.zoom:1}:null;}
+function restoreCameraState(state){
+  if(!state||!camera||!controls)return false;setProjectionMode(state.mode==='perspective'?'perspective':'orthographic',{preserveScale:false,persist:false});camera.position.fromArray(state.position);camera.quaternion.fromArray(state.quaternion);camera.up.fromArray(state.up);controls.target.fromArray(state.target);if(camera.isOrthographicCamera&&Number.isFinite(state.zoom))camera.zoom=state.zoom;camera.updateProjectionMatrix();updateZoomClipping();return true;
+}
+function fitFlatPatternView(){
+  if(!flatPatternRoot||!camera||!controls)return;const box=new THREE.Box3().setFromObject(flatPatternRoot);if(box.isEmpty())return;setProjectionMode('orthographic',{preserveScale:false,persist:false});
+  const center=box.getCenter(new THREE.Vector3()),size=box.getSize(new THREE.Vector3()),radius=Math.max(size.length()/2,1);camera.up.set(0,1,0);camera.position.set(center.x,center.y,center.z+radius*4);camera.lookAt(center);controls.target.copy(center);cadNav.pivot.copy(center);cadNav.wheelFocus.copy(center);configureOrthographicFrustum(camera);
+  const margin=1.12,halfW=Math.max(size.x/2,1e-6),halfH=Math.max(size.y/2,1e-6);camera.zoom=Math.max(1e-12,Math.min((camera.right-camera.left)/(2*halfW*margin),(camera.top-camera.bottom)/(2*halfH*margin)));camera.updateProjectionMatrix();updateZoomClipping();syncProjectionUI();
+}
+
+function setFlatPatternView(active){
+  active=Boolean(active&&flatPatternResult&&flatPatternRoot);if(active===flatPatternActive){if(active)fitFlatPatternView();return;}
+  if(active&&!flatPatternCameraState)flatPatternCameraState=captureCameraState();flatPatternActive=active;
+  if(modelRoot)modelRoot.visible=!active;if(flatPatternRoot)flatPatternRoot.visible=active;
+  for(const group of [selectionRoot,preselectionRoot,measureOverlayRoot,multiMeasureRoot])if(group)group.visible=!active;
+  if(E.measure)E.measure.disabled=active;if(E.multiMeasure)E.multiMeasure.disabled=active;if(E.section)E.section.disabled=active;
+  if(active){closeSelectOther();clearPreselection();fitFlatPatternView();}
+  else{if(flatPatternCameraState)restoreCameraState(flatPatternCameraState);flatPatternCameraState=null;enableTools(Boolean(currentModel));}
+  syncSheetMetalUnfoldUI();
+}
+
+function clearFlatPattern(){
+  const wasActive=flatPatternActive;
+  if(flatPatternActive){flatPatternActive=false;if(modelRoot)modelRoot.visible=true;for(const group of [selectionRoot,preselectionRoot,measureOverlayRoot,multiMeasureRoot])if(group)group.visible=true;}
+  if(flatPatternRoot){scene?.remove(flatPatternRoot);disposeObject(flatPatternRoot);flatPatternRoot=null;}
+  flatPatternResult=null;flatPatternCameraState=null;if(wasActive&&currentModel)enableTools(true);syncSheetMetalUnfoldUI();
+}
+
+async function exportFlatPatternDxf(){
+  if(!flatPatternResult){setSheetMetalStatus(SMT.noFlat,'warn');return;}
+  try{
+    const base=(currentFile?.name||'part').replace(/\.[^.]+$/,'')||'part',name=`${base}_FLAT.dxf`,text=flatPatternToDxf(flatPatternResult,{partName:base}),blob=new Blob([text],{type:'application/dxf'});
+    if(typeof window.showSaveFilePicker==='function'){
+      const handle=await window.showSaveFilePicker({suggestedName:name,types:[{description:'AutoCAD DXF',accept:{'application/dxf':['.dxf'],'text/plain':['.dxf']}}]});const writable=await handle.createWritable();await writable.write(blob);await writable.close();
+    }else{const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);}
+    setSheetMetalStatus(SMT.exportReady,'ok');
+  }catch(error){if(error?.name!=='AbortError')setSheetMetalStatus(`${SMT.unfoldFailed} · ${error?.message||error}`,'warn');}
 }
 
 
@@ -1077,7 +1275,8 @@ function syncFullscreenState() {
 
 function getModelRotationCenter() {
   if (!currentModel) return new THREE.Vector3(0,0,0);
-  const box=new THREE.Box3().setFromObject(modelRoot);
+  const targetRoot=flatPatternActive&&flatPatternRoot?flatPatternRoot:modelRoot;
+  const box=new THREE.Box3().setFromObject(targetRoot);
   if (box.isEmpty()) return new THREE.Vector3(0,0,0);
   return box.getCenter(new THREE.Vector3());
 }
@@ -1273,7 +1472,11 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
       sheetMetalState.bendAngleDeg=Number.isFinite(restoreSheetMetal.bendAngleDeg)?restoreSheetMetal.bendAngleDeg:90;
       sheetMetalState.manualKEnabled=Boolean(restoreSheetMetal.manualKEnabled);
       sheetMetalState.manualK=Number.isFinite(restoreSheetMetal.manualK)?restoreSheetMetal.manualK:(AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness??0.40);
+      sheetMetalState.fixedFace=restoreSheetMetal.fixedFace&&restoreSheetMetal.fixedFace.geometryId!=null&&Number.isFinite(Number(restoreSheetMetal.fixedFace.elementId))
+        ? {geometryId:String(restoreSheetMetal.fixedFace.geometryId),elementId:Number(restoreSheetMetal.fixedFace.elementId)}
+        : null;
       syncSheetMetalInputs();
+      syncSheetMetalUnfoldUI();
     }
   } catch (error) {
     console.error('[NavoFlo CAD Viewer]',error);
@@ -3140,6 +3343,7 @@ async function clearModel(showMessage=true) {
   clearSelections();
   clearMultiMeasurements();
   clearPreselection();
+  clearFlatPattern();
   if (currentStepResult && worker) {
     try {await workerRequest('release');} catch {}
   }
@@ -3183,6 +3387,9 @@ function enableTools(on) {
   document.querySelectorAll('[data-select-mode]').forEach(el=>el.disabled=!on);
   E.measureType.disabled=!on||!measureEnabled;
   E.sheetMetal.disabled=!on||!currentStepResult;
+  if(E.smSetFixedFace)E.smSetFixedFace.disabled=!on||!currentStepResult;
+  if(E.smUnfold)E.smUnfold.disabled=!on||!currentStepResult;
+  syncSheetMetalUnfoldUI();
 }
 function busy(on,label=T.loading,sub='') {
   E.loading.hidden=!on;E.loadingLabel.textContent=label;E.loadingSub.textContent=sub||'';

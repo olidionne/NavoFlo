@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/viewer.css?v=8.15.4">
+  <link rel="stylesheet" href="/css/viewer.css?v=8.16">
   <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.3">
   <script type="importmap">
   {
@@ -244,6 +244,26 @@
 
         <div id="sm-status" class="sheetmetal-status">Entrez l'épaisseur et le rayon intérieur, ou récupérez-les depuis une mesure STEP.</div>
 
+        <div class="sheetmetal-unfold-engine">
+          <div class="sheetmetal-engine-title">DÉPLIAGE STEP · NAVOUNFOLD MVP</div>
+          <p class="sheetmetal-engine-note">Dépliage géométrique local des tôles à épaisseur constante avec faces planes et plis cylindriques standards.</p>
+          <div class="sheetmetal-fixed-row">
+            <button id="sm-set-fixed-face" type="button">↳ Face fixe depuis sélection</button>
+            <span id="sm-fixed-face" class="sheetmetal-fixed-face">—</span>
+          </div>
+          <button id="sm-unfold" class="sheetmetal-unfold-primary" type="button">Déplier la tôle</button>
+          <div class="sheetmetal-view-toggle" role="group" aria-label="État de la pièce">
+            <button id="sm-view-folded" type="button" disabled>PLIÉE</button>
+            <button id="sm-view-flat" type="button" disabled>DÉPLIÉE</button>
+          </div>
+          <dl class="drawer-stats compact-stats sheetmetal-unfold-results">
+            <div><dt>T utilisé</dt><dd id="sm-detected-thickness">—</dd></div>
+            <div><dt>Plis</dt><dd id="sm-detected-bends">—</dd></div>
+            <div><dt>Encombrement</dt><dd id="sm-flat-size">—</dd></div>
+          </dl>
+          <button id="sm-export-dxf" class="sheetmetal-export" type="button" disabled>Exporter le développé DXF</button>
+        </div>
+
         <details class="sheetmetal-k-table">
           <summary>Table Air Bending CD-401</summary>
           <table>
@@ -292,6 +312,6 @@
 </section>
 </main>
 
-<script type="module" src="/js/viewer.js?v=8.15.8"></script>
+<script type="module" src="/js/viewer.js?v=8.16"></script>
 </body>
 </html>

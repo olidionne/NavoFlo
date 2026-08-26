@@ -187,6 +187,39 @@ function allLogicalFaceGroups(occt){
   return groups;
 }
 
+function sheetMetalFaceInfo(occt,geometryId){
+  const gid=String(geometryId),topo=topologyByGeometry.get(gid);
+  if(!topo)throw new Error(`No STEP topology for geometry ${gid}.`);
+  const faces=[];
+  for(const face of topo.faces||[]){
+    const id=Number(face.id),selection={geometryId:gid,kind:'face',elementId:id},sig=exactGeometrySignature(occt,selection);
+    const out={id,family:String(sig?.family||'other')};
+    if(Number.isFinite(Number(sig?.radius)))out.radius=Number(sig.radius);
+    const center=Array.isArray(sig?.localCenter)?sig.localCenter.map(Number).slice(0,3):null;
+    const axis=Array.isArray(sig?.axisDirection)?sig.axisDirection.map(Number).slice(0,3):null;
+    if(center?.length===3)out.localCenter=center;
+    if(axis?.length===3)out.axisDirection=axis;
+    const area=occt.MeasureExactFaceArea(exactModelId,shapeHandle(gid),'face',id);
+    if(area?.ok&&Number.isFinite(Number(area.value)))out.area=Number(area.value);
+    faces.push(out);
+  }
+  const edges=[];
+  for(const edge of topo.edges||[]){
+    const id=Number(edge.id),selection={geometryId:gid,kind:'edge',elementId:id},sig=exactGeometrySignature(occt,selection);
+    const out={id,family:String(sig?.family||'other')};
+    if(Number.isFinite(Number(sig?.radius)))out.radius=Number(sig.radius);
+    const center=Array.isArray(sig?.localCenter)?sig.localCenter.map(Number).slice(0,3):null;
+    const axis=Array.isArray(sig?.axisDirection)?sig.axisDirection.map(Number).slice(0,3):null;
+    if(center?.length===3)out.localCenter=center;
+    if(axis?.length===3)out.axisDirection=axis;
+    const length=occt.MeasureExactEdgeLength(exactModelId,shapeHandle(gid),'edge',id);
+    if(length?.ok&&Number.isFinite(Number(length.value)))out.length=Number(length.value);
+    edges.push(out);
+  }
+  const logicalGroups=allLogicalFaceGroups(occt).filter(group=>String(group.geometryId)===gid);
+  return{geometryId:gid,faces,edges,logicalGroups};
+}
+
 function shapeHandle(geometryId) {
   const handle = bindingByGeometry.get(String(geometryId));
   if (handle == null) throw new Error(`No exact B-Rep binding for geometry ${geometryId}.`);
@@ -415,6 +448,12 @@ self.onmessage = async (event) => {
     }
     if (action === 'logical-face-groups') {
       self.postMessage({id,ok:true,result:{groups:allLogicalFaceGroups(occt)}});
+      return;
+    }
+
+    if (action === 'sheetmetal-face-info') {
+      const result=sheetMetalFaceInfo(occt,payload.geometryId);
+      self.postMessage({id,ok:true,result});
       return;
     }
 

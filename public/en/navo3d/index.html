@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/viewer.css?v=8.15.4">
+  <link rel="stylesheet" href="/css/viewer.css?v=8.16">
   <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.3">
   <script type="importmap">
   {
@@ -244,6 +244,26 @@
 
         <div id="sm-status" class="sheetmetal-status">Enter thickness and inside radius, or capture them from a STEP measurement.</div>
 
+        <div class="sheetmetal-unfold-engine">
+          <div class="sheetmetal-engine-title">STEP UNFOLD · NAVOUNFOLD MVP</div>
+          <p class="sheetmetal-engine-note">Local geometric unfolding for constant-thickness sheet parts with planar faces and standard cylindrical bends.</p>
+          <div class="sheetmetal-fixed-row">
+            <button id="sm-set-fixed-face" type="button">↳ Fixed face from selection</button>
+            <span id="sm-fixed-face" class="sheetmetal-fixed-face">—</span>
+          </div>
+          <button id="sm-unfold" class="sheetmetal-unfold-primary" type="button">Unfold sheet</button>
+          <div class="sheetmetal-view-toggle" role="group" aria-label="Part state">
+            <button id="sm-view-folded" type="button" disabled>FOLDED</button>
+            <button id="sm-view-flat" type="button" disabled>FLAT</button>
+          </div>
+          <dl class="drawer-stats compact-stats sheetmetal-unfold-results">
+            <div><dt>T used</dt><dd id="sm-detected-thickness">—</dd></div>
+            <div><dt>Bends</dt><dd id="sm-detected-bends">—</dd></div>
+            <div><dt>Flat size</dt><dd id="sm-flat-size">—</dd></div>
+          </dl>
+          <button id="sm-export-dxf" class="sheetmetal-export" type="button" disabled>Export flat DXF</button>
+        </div>
+
         <details class="sheetmetal-k-table">
           <summary>CD-401 Air Bending table</summary>
           <table>
@@ -292,6 +312,6 @@
 </section>
 </main>
 
-<script type="module" src="/js/viewer.js?v=8.15.8"></script>
+<script type="module" src="/js/viewer.js?v=8.16"></script>
 </body>
 </html>

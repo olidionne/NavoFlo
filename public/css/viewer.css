@@ -1059,3 +1059,87 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
 /* V8.15.7 — Navo3D multi-measure */
 .cad-multi-dimension-label{border-color:rgba(53,211,154,.5);box-shadow:0 4px 18px rgba(0,0,0,.42),0 0 0 1px rgba(53,211,154,.08) inset}
 #multi-measure-toggle.active{border-color:rgba(53,211,154,.48)!important;background:rgba(53,211,154,.11)!important;color:#7af0c6!important}
+
+/* V8.16 — NavoUnfold geometric flat-pattern engine */
+.sheetmetal-unfold-engine{
+  display:grid;
+  gap:8px;
+  margin-top:12px;
+  padding:10px;
+  border:1px solid rgba(53,211,154,.16);
+  border-radius:9px;
+  background:linear-gradient(180deg,rgba(53,211,154,.045),rgba(255,255,255,.012));
+}
+.sheetmetal-engine-title{
+  color:#b9c9cf;
+  font:800 8.5px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;
+  letter-spacing:.06em;
+}
+.sheetmetal-engine-note{
+  margin:0;
+  color:#72838d;
+  font:600 7.8px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.sheetmetal-fixed-row{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:7px;
+  align-items:center;
+}
+.sheetmetal-fixed-row button,
+.sheetmetal-view-toggle button,
+.sheetmetal-export{
+  min-height:30px;
+  border:1px solid rgba(255,255,255,.10);
+  border-radius:7px;
+  background:#111a20;
+  color:#d4dde1;
+  font-size:8px;
+  font-weight:800;
+  cursor:pointer;
+}
+.sheetmetal-fixed-row button:hover,
+.sheetmetal-view-toggle button:hover:not(:disabled),
+.sheetmetal-export:hover:not(:disabled){
+  border-color:rgba(53,211,154,.35);
+  color:#e8f1f4;
+  background:#152229;
+}
+.sheetmetal-fixed-face{
+  min-width:58px;
+  padding:7px 8px;
+  border:1px solid rgba(255,255,255,.07);
+  border-radius:7px;
+  background:#080e13;
+  color:#91a3ad;
+  text-align:center;
+  font:750 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.sheetmetal-unfold-primary{
+  min-height:34px;
+  border:1px solid rgba(53,211,154,.72);
+  border-radius:8px;
+  background:#35d39a;
+  color:#06120d;
+  font-size:9px;
+  font-weight:900;
+  cursor:pointer;
+}
+.sheetmetal-unfold-primary:hover:not(:disabled){filter:brightness(1.06)}
+.sheetmetal-unfold-primary:disabled,
+.sheetmetal-fixed-row button:disabled,
+.sheetmetal-view-toggle button:disabled,
+.sheetmetal-export:disabled{opacity:.42;cursor:not-allowed}
+.sheetmetal-view-toggle{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:5px;
+}
+.sheetmetal-view-toggle button.active{
+  border-color:rgba(53,211,154,.45);
+  background:rgba(53,211,154,.13);
+  color:#8fe3c4;
+}
+.sheetmetal-unfold-results{margin:0;padding:0;border-top:1px solid rgba(255,255,255,.055)}
+.sheetmetal-unfold-results dd{color:#d4dde1}
+.sheetmetal-export{width:100%}
