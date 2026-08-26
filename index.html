@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en-CA">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Navo3D — STEP, STL, OBJ, GLB CAD Inspection</title>
+  <meta name="description" content="Navo3D locally inspects STEP/STP, STL, OBJ and GLB with selection, exact measurements and sheet-metal analysis.">
+  <meta name="theme-color" content="#080d12">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/viewer.css?v=8.15.4">
+  <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.3">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body class="viewer-v2">
+<header class="n3-appbar">
+  <a class="n3-brand" href="/en/" aria-label="NavoFlo">
+    <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+    <strong>NavoFlo</strong><i>/</i><b>Navo3D</b>
+  </a>
+  <span class="n3-app-local"><i></i> LOCAL</span>
+  <div class="n3-appbar-spacer"></div>
+  <nav class="suite-switch" aria-label="NavoFlo Suite"><a href="/en/navo2d/">Navo2D</a><a class="active" href="/en/navo3d/">Navo3D</a></nav>
+  <a class="n3-site-link" href="/en/">Main site</a>
+  <a class="n3-site-link" href="/legal/open-source.html">Licenses</a>
+  <div class="lang-switcher"><a href="/navo3d/">FR</a><a class="active" href="/en/navo3d/">EN</a></div>
+</header>
+
+<main class="n3-main">
+<section class="cad-shell-section">
+<div class="n3-workspace-wrap">
+  <div id="cad-workspace" class="cad-workspace">
+    <canvas id="viewer-canvas" aria-label="Navo3D"></canvas>
+
+    <div class="cad-toolbar" role="toolbar">
+      <label id="open-model-button" class="tool-button file-tool">
+        <input id="file-input" type="file" hidden accept=".step,.stp,.stl,.obj,.glb,.gltf,.bin,.png,.jpg,.jpeg,.webp" multiple>
+        <span class="tool-icon">＋</span><span>Open</span>
+      </label>
+      <button id="save-model" class="tool-button" type="button" disabled title="Save to source file"><span class="tool-icon">⌁</span><span>Save</span></button>
+      <button id="save-model-as" class="tool-button" type="button" disabled title="Save a copy"><span class="tool-icon">⇩</span><span>Save As…</span></button>
+
+      <div class="tool-divider"></div>
+
+      <div class="tool-group">
+        <span class="tool-group-label">Selection</span>
+        <div class="segmented" id="select-modes">
+          <button type="button" class="active" data-select-mode="auto" disabled title="Automatic selection · Shift+F1">Auto</button>
+          <button type="button" data-select-mode="face" disabled title="Face filter · Shift+F4">Face</button>
+          <button type="button" data-select-mode="edge" disabled title="Edge filter · Shift+F3">Edge</button>
+          <button type="button" data-select-mode="vertex" disabled title="Vertex filter · Shift+F2">Vertex</button>
+        </div>
+      </div>
+
+      <div class="tool-divider"></div>
+
+      <button id="measure-toggle" class="tool-button" type="button" disabled>
+        <span class="tool-icon">↔</span><span>Measure</span>
+      </button>
+      <button id="multi-measure-toggle" class="tool-button" type="button" disabled aria-pressed="false" title="Keep multiple dimensions visible">
+        <span class="tool-icon">≋</span><span>Multi-measure</span>
+      </button>
+      <select id="measure-type" class="tool-select" disabled aria-label="Measure">
+        <option value="smart">Smart</option>
+        <option value="center">Center ↔ center</option>
+        <option value="distance">Distance</option>
+        <option value="angle">Angle</option>
+      </select>
+
+      <button id="section-toggle" class="tool-button" type="button" disabled>
+        <span class="tool-icon">◫</span><span>Section</span>
+      </button>
+
+      <button id="edges-toggle" class="tool-button active" type="button" disabled>
+        <span class="tool-icon">▱</span><span>Edges</span>
+      </button>
+
+      <button id="grid-toggle" class="tool-button active" type="button" disabled>
+        <span class="tool-icon">#</span><span>Grid</span>
+      </button>
+
+      <select id="unit-select" class="tool-select unit-select" disabled aria-label="Measurement units" title="Measurement units">
+        <option value="u">Model units</option>
+        <option value="mm">mm</option>
+        <option value="cm">cm</option>
+        <option value="m">m</option>
+        <option value="in">in</option>
+      </select>
+
+      <div class="tool-divider"></div>
+
+      <div class="view-menu">
+        <button id="view-menu-button" class="tool-button" type="button" disabled>
+          <span class="tool-icon">◇</span><span>Views</span>
+        </button>
+        <div id="view-menu" class="toolbar-popover view-popover" hidden>
+          <button data-view="iso">Isometric</button>
+          <button data-view="front">Front</button>
+          <button data-view="back">Back</button>
+          <button data-view="left">Left</button>
+          <button data-view="right">Right</button>
+          <button data-view="top">Top</button>
+          <button data-view="bottom">Bottom</button>
+          <button id="perspective-toggle" class="view-setting" type="button" aria-pressed="false">Perspective</button>
+        </div>
+      </div>
+
+      <button id="fit-view" class="tool-button compact" type="button" disabled title="Fit">⌖</button>
+
+      <div class="toolbar-spacer"></div>
+
+      <button id="sheetmetal-toggle" class="tool-button" type="button" disabled title="Sheet metal unfold parameters">
+        <span class="tool-icon">⌁</span><span>Sheet</span>
+      </button>
+
+      <button id="properties-toggle" class="tool-button" type="button" disabled>
+        <span class="tool-icon">ⓘ</span><span>Properties</span>
+      </button>
+      <button id="fullscreen-toggle" class="tool-button" type="button" title="Fullscreen">
+        <span class="tool-icon fullscreen-icon">⛶</span><span>Fullscreen</span>
+      </button>
+      <button id="clear-model" class="tool-button compact danger" type="button" disabled title="Close">×</button>
+    </div>
+
+    <div id="n3-doc-tabs" class="cad-doc-tabs n3-doc-tabs" aria-label="Open documents">
+      <div id="n3-doc-tab-list" class="cad-doc-tab-list" role="tablist"></div>
+      <button id="n3-doc-tab-add" class="cad-doc-tab-add" type="button" title="Open another model" aria-label="Open another model">＋</button>
+    </div>
+
+    <div id="empty-drop" class="empty-drop">
+      <label for="file-input" class="empty-drop-inner" data-n3-open-picker>
+        <span class="drop-cube">N</span>
+        <strong>Drop your CAD model</strong>
+        <p>STEP · STP · STL · OBJ · GLB · GLTF</p>
+        <small>or click here to choose a file</small>
+      </label>
+    </div>
+
+    <div id="loading-overlay" class="cad-loading" hidden>
+      <i></i><strong id="loading-label">Loading…</strong>
+      <small id="loading-sub">Initializing local CAD kernel…</small>
+    </div>
+
+    <div id="section-panel" class="toolbar-popover section-panel" hidden>
+      <div class="popover-title">SECTION</div>
+      <label><span>Axis</span><select id="clip-axis"><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select></label>
+      <label><span>Position</span><input id="clip-slider" type="range" min="-100" max="100" value="0"></label>
+      <label class="check-row"><span>Invert</span><input id="clip-invert" type="checkbox"></label>
+    </div>
+
+    <aside id="properties-drawer" class="properties-drawer" hidden>
+      <div class="drawer-head"><span>PROPERTIES</span><button id="properties-close" type="button">×</button></div>
+      <dl class="drawer-stats">
+        <div><dt>File</dt><dd id="prop-file">—</dd></div>
+        <div><dt>Format</dt><dd id="prop-format">—</dd></div>
+        <div><dt>Units</dt><dd id="prop-units">—</dd></div>
+        <div><dt>Parts</dt><dd id="prop-parts">—</dd></div>
+        <div><dt>Geometries</dt><dd id="prop-geometries">—</dd></div>
+        <div><dt>Triangles</dt><dd id="prop-triangles">—</dd></div>
+      </dl>
+
+      <div id="step-meta-section" class="drawer-section" hidden>
+        <div class="drawer-section-title">STEP information</div>
+        <dl class="drawer-stats compact-stats">
+          <div><dt>Name</dt><dd id="step-name">—</dd></div>
+          <div><dt>Schema</dt><dd id="step-schema">—</dd></div>
+          <div><dt>Date</dt><dd id="step-date">—</dd></div>
+          <div><dt>Author</dt><dd id="step-author">—</dd></div>
+          <div><dt>Organization</dt><dd id="step-org">—</dd></div>
+          <div><dt>Origin</dt><dd id="step-origin">—</dd></div>
+        </dl>
+        <div class="drawer-section-title tree-title">STRUCTURE / PARTS</div>
+        <div id="step-tree" class="step-tree">—</div>
+
+        <div id="step-custom-section" class="step-custom-section" hidden>
+          <div class="drawer-section-title tree-title">CUSTOM / CONFIGURATION PROPERTIES</div>
+          <dl id="step-custom-properties" class="custom-properties-list"></dl>
+          <p id="step-custom-note" class="metadata-note"></p>
+        </div>
+      </div>
+
+
+      <div id="sheetmetal-section" class="drawer-section sheetmetal-section" hidden>
+        <div class="drawer-section-title">SHEET METAL · AIR BENDING</div>
+        <div class="sheetmetal-intro">
+          <strong>Automatic K-factor</strong>
+          <span>CD-401 rule based on inside-radius / thickness ratio.</span>
+        </div>
+
+        <label class="sheetmetal-field">
+          <span>Material family</span>
+          <select id="sm-material-class">
+            <option value="hard">Steel / hard materials</option>
+            <option value="medium">Aluminum · medium</option>
+            <option value="soft">Aluminum · soft</option>
+          </select>
+        </label>
+
+        <div class="sheetmetal-input-grid">
+          <label class="sheetmetal-field">
+            <span>Thickness T</span>
+            <div class="sheetmetal-number"><input id="sm-thickness" type="number" inputmode="decimal" min="0" step="any" placeholder="—"><em id="sm-thickness-unit">mm</em></div>
+          </label>
+          <label class="sheetmetal-field">
+            <span>Inside radius R</span>
+            <div class="sheetmetal-number"><input id="sm-radius" type="number" inputmode="decimal" min="0" step="any" placeholder="—"><em id="sm-radius-unit">mm</em></div>
+          </label>
+        </div>
+
+        <div class="sheetmetal-pick-actions">
+          <button id="sm-use-measure" type="button">↳ T from measure</button>
+          <button id="sm-use-radius" type="button">↳ R from selection</button>
+        </div>
+
+        <label class="sheetmetal-field">
+          <span>Bend angle</span>
+          <div class="sheetmetal-number"><input id="sm-angle" type="number" inputmode="decimal" min="0.01" max="179.99" step="0.1" value="90"><em>°</em></div>
+        </label>
+
+        <label class="sheetmetal-check">
+          <span>Override K-factor</span>
+          <input id="sm-manual-k-toggle" type="checkbox">
+        </label>
+        <label id="sm-manual-k-row" class="sheetmetal-field" hidden>
+          <span>Manual K-factor</span>
+          <div class="sheetmetal-number"><input id="sm-manual-k" type="number" inputmode="decimal" min="0" max="1" step="0.001" value="0.40"><em>K</em></div>
+        </label>
+
+        <dl class="drawer-stats compact-stats sheetmetal-results">
+          <div><dt>R / T</dt><dd id="sm-ratio">—</dd></div>
+          <div><dt>Range</dt><dd id="sm-band">—</dd></div>
+          <div><dt>K-factor</dt><dd id="sm-k">—</dd></div>
+          <div><dt>Neutral radius</dt><dd id="sm-neutral-radius">—</dd></div>
+          <div><dt>Bend allowance</dt><dd id="sm-bend-allowance">—</dd></div>
+          <div><dt>Bend deduction</dt><dd id="sm-bend-deduction">—</dd></div>
+        </dl>
+
+        <div id="sm-status" class="sheetmetal-status">Enter thickness and inside radius, or capture them from a STEP measurement.</div>
+
+        <details class="sheetmetal-k-table">
+          <summary>CD-401 Air Bending table</summary>
+          <table>
+            <thead><tr><th>R / T</th><th>Al soft</th><th>Al med.</th><th>Steel</th></tr></thead>
+            <tbody>
+              <tr><td>0 → 1</td><td>0.33</td><td>0.38</td><td>0.40</td></tr>
+              <tr><td>1 → 3</td><td>0.40</td><td>0.43</td><td>0.45</td></tr>
+              <tr><td>&gt; 3</td><td>0.50</td><td>0.50</td><td>0.50</td></tr>
+            </tbody>
+          </table>
+        </details>
+
+        <p class="sheetmetal-warning">Unfolding parameters. The final flat pattern must still be validated against the manufacturing procedure.</p>
+      </div>
+
+      <div class="drawer-section">
+        <div class="drawer-section-title">PC CAPABILITY</div>
+        <div class="pc-tier"><b>Suggested minimum</b><span>4 CPU threads · 8 GB RAM · WebAssembly · WebGL2</span></div>
+        <div class="pc-tier"><b>Recommended STEP</b><span>8+ CPU threads · 16 GB RAM</span></div>
+        <div class="pc-tier"><b>Large assemblies</b><span>32 GB RAM recommended</span></div>
+        <div id="pc-check" class="pc-check">Your browser: …</div>
+      </div>
+    </aside>
+
+    <div id="measure-card" class="measure-card-v2" hidden>
+      <div class="measure-card-head"><span>MEASURE</span><span id="measure-badge">EXACT STEP</span></div>
+      <div id="measure-main" class="measure-main">—</div>
+      <dl id="measure-details" class="measure-details"></dl>
+      <div id="selection-summary" class="selection-summary">Enable Measure, then select one or two entities.</div>
+      <button id="measure-clear" type="button">↺</button>
+    </div>
+
+    <div class="cad-statusbar">
+      <div class="status-left">
+        <span id="status-file">No model</span>
+        <span id="status-format">—</span>
+        <span id="status-units">—</span>
+      </div>
+      <div class="mouse-help">
+        <span>Hold wheel: rotate</span><span>Ctrl + wheel: pan</span><span>Wheel: zoom</span>
+      </div>
+      <span class="local-badge">LOCAL</span>
+    </div>
+  </div>
+</div>
+</section>
+</main>
+
+<script type="module" src="/js/viewer.js?v=8.15.7"></script>
+</body>
+</html>
