@@ -239,17 +239,62 @@ function makeRootMap(ctx,panel,tol){
 }
 function mapPoint(map,p){const d=V3.sub(p,map.origin3),u=V3.dot(d,map.u3),v=V3.dot(d,map.v3);return V2.add(map.origin2,V2.add(V2.scale(map.u2,u),V2.scale(map.v2,v)));}
 
+function projectedInteriorDirection(panel,boundary,axis){
+  if(!panel?.stats||!boundary?.mid)return null;
+  const raw=V3.sub(panel.stats.centroid,boundary.mid),flat=V3.sub(raw,V3.scale(axis,V3.dot(raw,axis)));
+  return V3.unit(flat);
+}
+function validStandardBendAngle(angle){return Number.isFinite(angle)&&Math.abs(angle)>BEND_MIN_ANGLE&&Math.abs(angle)<Math.PI-THREE_DEG;}
+function boundaryPairGeometry(cyl,a,b,planarGroups){
+  const pa=planarGroups.byId.get(a?.groupId),pb=planarGroups.byId.get(b?.groupId);if(!pa||!pb||a.groupId===b.groupId)return null;
+  const axis=V3.unit(cyl.axis);if(!axis)return null;
+  const axisDotA=Math.abs(V3.dot(pa.stats.normal,axis)),axisDotB=Math.abs(V3.dot(pb.stats.normal,axis));
+  // A true cylindrical sheet bend has its axis lying in both tangent flange planes.
+  // Hole/slot walls have the opposite topology: their cylinder axis is approximately
+  // normal to the two sheet skins. Reject those before they can masquerade as bends.
+  if(axisDotA>BEND_AXIS_PLANE_DOT_MAX||axisDotB>BEND_AXIS_PLANE_DOT_MAX)return null;
+  const planeAngle=Math.acos(clamp(Math.abs(V3.dot(pa.stats.normal,pb.stats.normal)),0,1));
+  // Cylinders joining parallel/coplanar planar faces are not ordinary bends (<180°).
+  // They are usually holes, grooves, rounds, split-face artifacts or hem topology.
+  if(planeAngle<BEND_MIN_ANGLE)return null;
+  const ia=projectedInteriorDirection(pa,a,axis),ib=projectedInteriorDirection(pb,b,axis);
+  const travelAngle=ia&&ib?signedAngle(V3.scale(ia,-1),ib,axis):0;
+  const normalAngle=signedAngle(pa.stats.normal,pb.stats.normal,axis);
+  const r0=radialToAxis(a.mid,cyl.center,axis),r1=radialToAxis(b.mid,cyl.center,axis),radialAngle=signedAngle(r0,r1,axis);
+  const candidates=[
+    {angle:radialAngle,source:'cylinder-boundaries',weight:3},
+    {angle:travelAngle,source:'panel-travel',weight:2},
+    {angle:normalAngle,source:'panel-normals',weight:1}
+  ].filter(x=>validStandardBendAngle(x.angle));
+  if(!candidates.length)return{ok:false,axisDotA,axisDotB,planeAngle,radialAngle,travelAngle,normalAngle};
+  // Prefer the exact cylinder sweep when it agrees with flange travel. If STEP
+  // boundaries are degenerate/split, panel-travel is considerably more reliable.
+  let chosen=candidates[0];
+  if(validStandardBendAngle(travelAngle)&&validStandardBendAngle(radialAngle)){
+    const delta=Math.abs(Math.abs(radialAngle)-Math.abs(travelAngle));
+    if(delta>ANGLE_DISAGREE_TOL)chosen={angle:travelAngle,source:'panel-travel',weight:4};
+  }else if(validStandardBendAngle(travelAngle)&&!validStandardBendAngle(radialAngle))chosen={angle:travelAngle,source:'panel-travel',weight:4};
+  const score=Math.min(Number(a.length)||0,Number(b.length)||0)+chosen.weight*1e-3;
+  return{ok:true,...chosen,score,axisDotA,axisDotB,planeAngle,radialAngle,travelAngle,normalAngle};
+}
+function chooseBendBoundaryPair(cyl,planarGroups){
+  let best=null;
+  for(let i=0;i<cyl.boundaries.length;i++)for(let j=i+1;j<cyl.boundaries.length;j++){
+    const a=cyl.boundaries[i],b=cyl.boundaries[j],geom=boundaryPairGeometry(cyl,a,b,planarGroups);
+    if(!geom?.ok)continue;if(!best||geom.score>best.geom.score)best={a,b,geom};
+  }
+  return best;
+}
+
 function createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarGroups,thickness,kResolver,fallbackRadius,tol,cylinders}){
   const pb=cyl.boundaries.find(b=>b.groupId===parentGroupId),cb=cyl.boundaries.find(b=>b.groupId===childGroupId);if(!pb||!cb)return{ok:false,code:'missing-tangent-boundary'};
   let axis3=cyl.axis.slice();const parentMid2=mapPoint(parentMap,pb.mid),axis2Raw=V2.sub(mapPoint(parentMap,V3.add(pb.mid,axis3)),parentMid2),axis2=V2.unit(axis2Raw);if(!axis2)return{ok:false,code:'bad-axis'};
   const parentPanel=planarGroups.byId.get(parentGroupId),childPanel=planarGroups.byId.get(childGroupId);if(!parentPanel||!childPanel)return{ok:false,code:'panel-missing'};
   const parentCentroid2=mapPoint(parentMap,parentPanel.stats.centroid),toInterior=V2.sub(parentCentroid2,parentMid2);let outward=V2.perp(axis2);if(V2.dot(outward,toInterior)>0)outward=V2.scale(outward,-1);
-  const r0=radialToAxis(pb.mid,cyl.center,axis3),r1=radialToAxis(cb.mid,cyl.center,axis3);let total=signedAngle(r0,r1,axis3),angleSource='cylinder-boundaries';
-  const panelNormalAngle=signedAngle(parentPanel.stats.normal,childPanel.stats.normal,axis3);
-  if(Math.abs(total)<1e-4||Math.abs(total)>=Math.PI-THREE_DEG){
-    if(Math.abs(panelNormalAngle)>1e-4&&Math.abs(panelNormalAngle)<Math.PI-THREE_DEG){total=panelNormalAngle;angleSource='panel-normals';}
-  }
-  if(Math.abs(total)<1e-4)return{ok:false,code:'zero-bend',diagnostics:{rawBoundaryAngleDeg:Math.abs(signedAngle(r0,r1,axis3))*180/Math.PI,panelNormalAngleDeg:Math.abs(panelNormalAngle)*180/Math.PI}};
+  const pairGeom=boundaryPairGeometry(cyl,pb,cb,planarGroups);
+  if(!pairGeom?.ok)return{ok:false,code:'not-sheet-bend',diagnostics:{axisDotParent:pairGeom?.axisDotA??null,axisDotChild:pairGeom?.axisDotB??null,rawBoundaryAngleDeg:Math.abs(pairGeom?.radialAngle||0)*180/Math.PI,panelTravelAngleDeg:Math.abs(pairGeom?.travelAngle||0)*180/Math.PI,panelNormalAngleDeg:Math.abs(pairGeom?.normalAngle||0)*180/Math.PI}};
+  let total=pairGeom.angle,angleSource=pairGeom.source;
+  if(Math.abs(total)<BEND_MIN_ANGLE)return{ok:false,code:'zero-bend',diagnostics:{rawBoundaryAngleDeg:Math.abs(pairGeom.radialAngle)*180/Math.PI,panelTravelAngleDeg:Math.abs(pairGeom.travelAngle)*180/Math.PI,panelNormalAngleDeg:Math.abs(pairGeom.normalAngle)*180/Math.PI}};
   if(Math.abs(total)>=Math.PI-THREE_DEG)return{ok:false,code:'bend-180-unsupported',angleDeg:Math.abs(total)*180/Math.PI};
   const radiusResolution=resolveInsideRadius(cyl,cylinders,thickness,tol,fallbackRadius),innerRadius=radiusResolution.value;
   if(!radiusResolution.ok||!Number.isFinite(innerRadius)||innerRadius<0)return{ok:false,code:'inside-radius-unresolved',diagnostics:{cylinderRadius:cyl.radius,radialNormalScore:cyl.radialNormalScore,thickness,fallbackRadius:Number(fallbackRadius)}};
@@ -266,6 +311,9 @@ function createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarG
   return{ok:true,parentGroupId,childGroupId,cyl,pb,cb,axis3,axis2,outward,parentMid2,targetMid2,totalAngle:total,angleDeg:Math.abs(total)*180/Math.PI,angleSource,innerRadius,radiusSource:radiusResolution.source,k,neutralRadius,bendAllowance,childMap,partnerRadius:radiusResolution.partner?.other?.radius??null};
 }
 const THREE_DEG=3*Math.PI/180;
+const BEND_MIN_ANGLE=0.5*Math.PI/180;
+const BEND_AXIS_PLANE_DOT_MAX=0.20;
+const ANGLE_DISAGREE_TOL=2*Math.PI/180;
 
 function projectPanelTriangles(ctx,panel,map){const out=[];for(const fid of panel.faceIds||[])for(const tri of ctx.statsById.get(fid)?.triangles||[])out.push(tri.map(p=>mapPoint(map,p)));return out;}
 function mapBendPoint(mapping,p){
@@ -352,8 +400,15 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)return{ok:false,code:'thickness-unresolved',message:'Sheet thickness could not be detected. Enter T and try again.',detectedThickness:autoThickness};
 
   const warnings=[];if(autoThickness&&Number.isFinite(Number(thickness))&&Number(thickness)>0){const delta=Math.abs(Number(thickness)-autoThickness.value);if(delta>Math.max(resolvedThickness*0.12,tol*20))warnings.push('Entered thickness differs from the cylindrical-face thickness estimate.');}
+  let rejectedNonBendCylinders=0;
   const candidateBends=cylinders.map(c=>{
-    const unique=[];for(const b of c.boundaries){if(!unique.some(x=>x.groupId===b.groupId))unique.push(b);}return unique.length>=2?{...c,boundaries:unique.slice(0,2)}:null;
+    const unique=[];for(const b of c.boundaries){if(!unique.some(x=>x.groupId===b.groupId))unique.push(b);}
+    if(unique.length<2)return null;
+    const candidate={...c,boundaries:unique},pair=chooseBendBoundaryPair(candidate,planarGroups);
+    if(!pair){rejectedNonBendCylinders++;return null;}
+    // Keep only the tangent flange pair selected geometrically. This is essential for
+    // slots/holes and STEP faces with more than two planar neighbours.
+    candidate.boundaries=[pair.a,pair.b];candidate.pairGeometry=pair.geom;return candidate;
   }).filter(Boolean);
   const bendsByGroup=new Map();for(const bend of candidateBends){for(const b of bend.boundaries){if(!bendsByGroup.has(b.groupId))bendsByGroup.set(b.groupId,[]);bendsByGroup.get(b.groupId).push(bend);}}
   const rootMap=makeRootMap(ctx,fixedPanel,tol);if(!rootMap)return{ok:false,code:'fixed-face-map',message:'Unable to establish a coordinate system on the fixed face.'};
@@ -371,7 +426,7 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   }
   if(cycleLinks.length)warnings.push('Closed/cyclic sheet topology detected; a spanning tree was unfolded. Add a seam for a production flat pattern.');
   if(!usedBends.length){
-    const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,fixedPanelCandidateBends:connected,tolerance:tol,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
+    const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,fixedPanelCandidateBends:connected,tolerance:tol,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
     const message=connected?'A cylindrical bend touches the fixed panel, but its geometry could not be resolved safely. Check T / inside radius / K-factor.':'No standard cylindrical bend connected to the fixed panel was detected.';
     return{ok:false,code:connected?'bend-resolution-failed':'no-bends',message,detectedThickness:autoThickness,warnings,diagnostics};
   }
@@ -381,6 +436,6 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
   if(!triangles.length||!boundaryEdges.length)return{ok:false,code:'flat-empty',message:'The flat pattern could not be reconstructed.',warnings};
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 1.2',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 1.3',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
 }
 
