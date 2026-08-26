@@ -85,6 +85,12 @@ function sameAxisLine(a,b,tol){
   if(Math.abs(V3.dot(a.axis,b.axis))<0.9998)return false;
   return lineDistanceParallel(a.center,a.axis,b.center)<=Math.max(tol*10,Math.max(a.radius||0,b.radius||0,1)*1e-5);
 }
+function compatibleAxisLine(a,b,tol,thickness=0){
+  if(!a?.axis||!b?.axis||!a?.center||!b?.center)return false;
+  if(Math.abs(V3.dot(a.axis,b.axis))<0.997)return false;
+  const radialTol=Math.max(tol*80,Math.max(a.radius||0,b.radius||0,1)*5e-4,Number(thickness||0)*0.12);
+  return lineDistanceParallel(a.center,a.axis,b.center)<=radialTol;
+}
 function radialToAxis(point,center,axis){const d=V3.sub(point,center),q=V3.add(center,V3.scale(axis,V3.dot(d,axis)));return V3.sub(point,q);}
 function signedAngle(a,b,axis){const ua=V3.unit(a),ub=V3.unit(b);if(!ua||!ub)return 0;return Math.atan2(V3.dot(axis,V3.cross(ua,ub)),clamp(V3.dot(ua,ub),-1,1));}
 function angleCandidateInSpan(phi,total){
@@ -165,7 +171,14 @@ function buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups){
       boundaries.push({groupId,faceIds:panel.faceIds.slice(),faceId:panel.faceIds[0],edges:edges.map(e=>Number(e.id)),mid,minOffset:Math.min(...offsets),maxOffset:Math.max(...offsets),axisMid,axisMin:Math.min(...axisValues),axisMax:Math.max(...axisValues),length:edges.reduce((s,e)=>s+straightEdgeLength(e),0),points});
     }
     boundaries.sort((a,b)=>b.length-a.length);
-    return{id:`cyl-${index}`,faceIds,faceSet,edgeIds:[...edgeIds],axis,center,radius,boundaries};
+    let orientWeighted=0,orientArea=0;
+    for(const fid of faceIds){
+      const st=ctx.statsById.get(fid);if(!st||!(st.area>EPS))continue;
+      const radial=V3.unit(radialToAxis(st.centroid,center,axis));if(!radial)continue;
+      orientWeighted+=clamp(V3.dot(st.normal,radial),-1,1)*st.area;orientArea+=st.area;
+    }
+    const radialNormalScore=orientArea>EPS?orientWeighted/orientArea:NaN;
+    return{id:`cyl-${index}`,faceIds,faceSet,edgeIds:[...edgeIds],axis,center,radius,boundaries,radialNormalScore};
   }).filter(Boolean);
 }
 
@@ -184,8 +197,36 @@ function detectThickness(cylinders,tol){
 
 function cylinderPartner(cyl,cylinders,thickness,tol){
   if(!Number.isFinite(thickness)||thickness<=0)return null;let best=null;
-  for(const other of cylinders){if(other===cyl||!sameAxisLine(cyl,other,tol))continue;const diff=Math.abs(cyl.radius-other.radius),err=Math.abs(diff-thickness);if(!best||err<best.err)best={other,diff,err};}
-  const allowed=Math.max(thickness*0.22,tol*30);return best&&best.err<=allowed?best:null;
+  for(const other of cylinders){
+    if(other===cyl||!compatibleAxisLine(cyl,other,tol,thickness))continue;
+    const diff=Math.abs(cyl.radius-other.radius),err=Math.abs(diff-thickness);
+    const axisPenalty=(1-Math.abs(V3.dot(cyl.axis,other.axis)))*thickness*5;
+    const linePenalty=lineDistanceParallel(cyl.center,cyl.axis,other.center);
+    const score=err+axisPenalty+linePenalty;
+    if(!best||score<best.score)best={other,diff,err,score};
+  }
+  const allowed=Math.max(thickness*0.30,tol*80);return best&&best.err<=allowed?best:null;
+}
+
+function resolveInsideRadius(cyl,cylinders,thickness,tol,fallbackRadius){
+  const partner=cylinderPartner(cyl,cylinders,thickness,tol);
+  if(partner){
+    return{ok:true,value:Math.min(cyl.radius,partner.other.radius),source:'paired-cylinders',partner};
+  }
+  const fallback=fallbackRadius==null?NaN:Number(fallbackRadius);
+  if(Number.isFinite(fallback)&&fallback>=0)return{ok:true,value:fallback,source:'user-radius',partner:null};
+  const score=Number(cyl.radialNormalScore);
+  if(Number.isFinite(score)){
+    // Outward tessellation normals are expected for a closed STEP solid. A concave
+    // cylindrical face therefore points toward its axis (inner bend); a convex one
+    // points away from it (outer bend). This lets us recover R even when the opposite
+    // cylinder was split or omitted by the exporter.
+    if(score<=-0.15)return{ok:true,value:cyl.radius,source:'concave-cylinder',partner:null};
+    if(score>=0.15&&Number.isFinite(thickness)&&cyl.radius>thickness){
+      return{ok:true,value:Math.max(0,cyl.radius-thickness),source:'convex-cylinder-minus-thickness',partner:null};
+    }
+  }
+  return{ok:false,value:NaN,source:'unresolved',partner:null};
 }
 
 function makeRootMap(ctx,panel,tol){
@@ -203,15 +244,26 @@ function createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarG
   let axis3=cyl.axis.slice();const parentMid2=mapPoint(parentMap,pb.mid),axis2Raw=V2.sub(mapPoint(parentMap,V3.add(pb.mid,axis3)),parentMid2),axis2=V2.unit(axis2Raw);if(!axis2)return{ok:false,code:'bad-axis'};
   const parentPanel=planarGroups.byId.get(parentGroupId),childPanel=planarGroups.byId.get(childGroupId);if(!parentPanel||!childPanel)return{ok:false,code:'panel-missing'};
   const parentCentroid2=mapPoint(parentMap,parentPanel.stats.centroid),toInterior=V2.sub(parentCentroid2,parentMid2);let outward=V2.perp(axis2);if(V2.dot(outward,toInterior)>0)outward=V2.scale(outward,-1);
-  const r0=radialToAxis(pb.mid,cyl.center,axis3),r1=radialToAxis(cb.mid,cyl.center,axis3);let total=signedAngle(r0,r1,axis3);if(Math.abs(total)<1e-4)return{ok:false,code:'zero-bend'};
+  const r0=radialToAxis(pb.mid,cyl.center,axis3),r1=radialToAxis(cb.mid,cyl.center,axis3);let total=signedAngle(r0,r1,axis3),angleSource='cylinder-boundaries';
+  const panelNormalAngle=signedAngle(parentPanel.stats.normal,childPanel.stats.normal,axis3);
+  if(Math.abs(total)<1e-4||Math.abs(total)>=Math.PI-THREE_DEG){
+    if(Math.abs(panelNormalAngle)>1e-4&&Math.abs(panelNormalAngle)<Math.PI-THREE_DEG){total=panelNormalAngle;angleSource='panel-normals';}
+  }
+  if(Math.abs(total)<1e-4)return{ok:false,code:'zero-bend',diagnostics:{rawBoundaryAngleDeg:Math.abs(signedAngle(r0,r1,axis3))*180/Math.PI,panelNormalAngleDeg:Math.abs(panelNormalAngle)*180/Math.PI}};
   if(Math.abs(total)>=Math.PI-THREE_DEG)return{ok:false,code:'bend-180-unsupported',angleDeg:Math.abs(total)*180/Math.PI};
-  const partner=cylinderPartner(cyl,cylinders,thickness,tol);let innerRadius=partner?Math.min(cyl.radius,partner.other.radius):(fallbackRadius==null?NaN:Number(fallbackRadius));
-  if(!Number.isFinite(innerRadius)||innerRadius<0)return{ok:false,code:'inside-radius-unresolved'};
-  const k=Number(kResolver?.(innerRadius,thickness));if(!Number.isFinite(k)||k<0||k>1)return{ok:false,code:'k-factor-invalid'};
+  const radiusResolution=resolveInsideRadius(cyl,cylinders,thickness,tol,fallbackRadius),innerRadius=radiusResolution.value;
+  if(!radiusResolution.ok||!Number.isFinite(innerRadius)||innerRadius<0)return{ok:false,code:'inside-radius-unresolved',diagnostics:{cylinderRadius:cyl.radius,radialNormalScore:cyl.radialNormalScore,thickness,fallbackRadius:Number(fallbackRadius)}};
+  const k=Number(kResolver?.(innerRadius,thickness));if(!Number.isFinite(k)||k<0||k>1)return{ok:false,code:'k-factor-invalid',diagnostics:{innerRadius,thickness,k}};
   const neutralRadius=innerRadius+k*thickness,bendAllowance=Math.abs(total)*neutralRadius,targetMid2=V2.add(parentMid2,V2.scale(outward,bendAllowance));
-  const toChildInteriorRaw=V3.sub(childPanel.stats.centroid,cb.mid),toChildInterior=V3.sub(toChildInteriorRaw,V3.scale(axis3,V3.dot(toChildInteriorRaw,axis3))),childV3=V3.unit(toChildInterior);if(!childV3)return{ok:false,code:'child-plane-direction'};
+  const toChildInteriorRaw=V3.sub(childPanel.stats.centroid,cb.mid),toChildInterior=V3.sub(toChildInteriorRaw,V3.scale(axis3,V3.dot(toChildInteriorRaw,axis3)));
+  let childV3=V3.unit(toChildInterior);
+  if(!childV3){
+    childV3=V3.unit(V3.cross(childPanel.stats.normal,axis3))||V3.unit(V3.cross(axis3,childPanel.stats.normal));
+    if(childV3&&V3.dot(childV3,toChildInteriorRaw)<0)childV3=V3.scale(childV3,-1);
+  }
+  if(!childV3)return{ok:false,code:'child-plane-direction'};
   const childMap={origin3:cb.mid,origin2:targetMid2,u3:axis3,v3:childV3,u2:axis2,v2:outward};
-  return{ok:true,parentGroupId,childGroupId,cyl,pb,cb,axis3,axis2,outward,parentMid2,targetMid2,totalAngle:total,angleDeg:Math.abs(total)*180/Math.PI,innerRadius,k,neutralRadius,bendAllowance,childMap,partnerRadius:partner?.other?.radius??null};
+  return{ok:true,parentGroupId,childGroupId,cyl,pb,cb,axis3,axis2,outward,parentMid2,targetMid2,totalAngle:total,angleDeg:Math.abs(total)*180/Math.PI,angleSource,innerRadius,radiusSource:radiusResolution.source,k,neutralRadius,bendAllowance,childMap,partnerRadius:radiusResolution.partner?.other?.radius??null};
 }
 const THREE_DEG=3*Math.PI/180;
 
@@ -313,13 +365,13 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
       if(usedCylinderIds.has(cyl.id))continue;const other=cyl.boundaries.find(b=>b.groupId!==parentGroupId);if(!other)continue;const childGroupId=other.groupId;
       if(panelMaps.has(childGroupId)){cycleLinks.push({parentGroupId,childGroupId,cylinder:cyl.id});usedCylinderIds.add(cyl.id);continue;}
       const mapping=createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarGroups,thickness:resolvedThickness,kResolver,fallbackRadius:fallbackInsideRadius,tol,cylinders});
-      if(!mapping.ok){warnings.push(`Bend ${cyl.faceIds.join('/')} skipped: ${mapping.code}.`);usedCylinderIds.add(cyl.id);continue;}
+      if(!mapping.ok){warnings.push(`Bend ${cyl.faceIds.join('/')} skipped: ${mapping.code}.`);cyl.lastFailure={code:mapping.code,diagnostics:mapping.diagnostics||null};usedCylinderIds.add(cyl.id);continue;}
       panelMaps.set(childGroupId,mapping.childMap);panelOrder.push(childGroupId);usedBends.push(mapping);usedCylinderIds.add(cyl.id);queue.push(childGroupId);
     }
   }
   if(cycleLinks.length)warnings.push('Closed/cyclic sheet topology detected; a spanning tree was unfolded. Add a seam for a production flat pattern.');
   if(!usedBends.length){
-    const connected=(bendsByGroup.get(fixedGroupId)||[]).length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,fixedPanelCandidateBends:connected,tolerance:tol};
+    const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,fixedPanelCandidateBends:connected,tolerance:tol,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
     const message=connected?'A cylindrical bend touches the fixed panel, but its geometry could not be resolved safely. Check T / inside radius / K-factor.':'No standard cylindrical bend connected to the fixed panel was detected.';
     return{ok:false,code:connected?'bend-resolution-failed':'no-bends',message,detectedThickness:autoThickness,warnings,diagnostics};
   }
@@ -329,6 +381,6 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
   if(!triangles.length||!boundaryEdges.length)return{ok:false,code:'flat-empty',message:'The flat pattern could not be reconstructed.',warnings};
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 1.1',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 1.2',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,tolerance:tol}};
 }
 

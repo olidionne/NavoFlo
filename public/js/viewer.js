@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.16.1';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.16.2';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -1180,7 +1180,9 @@ async function runSheetMetalUnfold(){
       flatPatternResult=null;clearFlatPattern();syncSheetMetalUnfoldUI();
       console.warn('[NavoUnfold diagnostics]',result);
       const reason=describeUnfoldFailure(result);
-      setSheetMetalStatus(`${SMT.unfoldFailed} · ${reason}`,'warn');return;
+      const failCode=result?.diagnostics?.failures?.find(f=>f?.failure?.code)?.failure?.code;
+      const detail=failCode?` · [${failCode}]`:'';
+      setSheetMetalStatus(`${SMT.unfoldFailed} · ${reason}${detail}`,'warn');return;
     }
     flatPatternResult=result;
     if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
