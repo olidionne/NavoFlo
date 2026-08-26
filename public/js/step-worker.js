@@ -233,6 +233,14 @@ function sheetMetalFaceInfo(occt,geometryId){
       const b=Array.isArray(length.localEndPoint)?length.localEndPoint.map(Number).slice(0,3):null;
       if(a?.length===3&&a.every(Number.isFinite))out.localStartPoint=a;
       if(b?.length===3&&b.every(Number.isFinite))out.localEndPoint=b;
+      if(!out.localStartPoint||!out.localEndPoint){
+        const topoEdge=(topo.edges||[]).find(e=>Number(e.id)===id),pts=Array.from(topoEdge?.points||[]).map(Number);
+        if(pts.length>=6){
+          const sa=pts.slice(0,3),sb=pts.slice(-3);
+          if(!out.localStartPoint&&sa.every(Number.isFinite))out.localStartPoint=sa;
+          if(!out.localEndPoint&&sb.every(Number.isFinite))out.localEndPoint=sb;
+        }
+      }
     }
     edges.push(out);
   }
@@ -428,7 +436,7 @@ self.onmessage = async (event) => {
       bindingByGeometry = new Map(
         Array.from(raw.exactGeometryBindings ?? []).map(b => [String(b.geometryId), Number(b.exactShapeHandle)])
       );
-      topologyByGeometry = new Map(Array.from(raw.geometries ?? []).map(g=>[String(g.id),{faces:Array.from(g.faces??[]).map(f=>({id:Number(f.id),edgeIndices:Array.from(f.edgeIndices??[]).map(Number)})),edges:Array.from(g.edges??[]).map(e=>({id:Number(e.id),ownerFaceIds:Array.from(e.ownerFaceIds??[]).map(Number)}))}]));
+      topologyByGeometry = new Map(Array.from(raw.geometries ?? []).map(g=>[String(g.id),{faces:Array.from(g.faces??[]).map(f=>({id:Number(f.id),edgeIndices:Array.from(f.edgeIndices??[]).map(Number)})),edges:Array.from(g.edges??[]).map(e=>({id:Number(e.id),ownerFaceIds:Array.from(e.ownerFaceIds??[]).map(Number),points:Array.from(e.points??[]).map(Number)}))}]));
       logicalFaceGroupCache = new Map();
   logicalEdgeGroupCache = new Map();
 

@@ -46,6 +46,21 @@ function isCyl(v){return ['cylinder','cylindrical'].includes(family(v));}
 function p3FromArray(arr,i){return [Number(arr[i])||0,Number(arr[i+1])||0,Number(arr[i+2])||0];}
 function edgePoints(edge){const a=edge?.points||[];const out=[];for(let i=0;i+2<a.length;i+=3)out.push(p3FromArray(a,i));return out;}
 
+function exactEdgePoints(ctx,edge){
+  const info=ctx?.edgeInfoById?.get(Number(edge?.id));
+  const a=Array.isArray(info?.localStartPoint)?info.localStartPoint.map(Number).slice(0,3):null;
+  const b=Array.isArray(info?.localEndPoint)?info.localEndPoint.map(Number).slice(0,3):null;
+  if(a?.length===3&&b?.length===3&&a.every(Number.isFinite)&&b.every(Number.isFinite))return[a,b];
+  return edgePoints(edge);
+}
+function exactStraightEdge(ctx,edge,tol){
+  const info=ctx?.edgeInfoById?.get(Number(edge?.id));
+  if(['line','linear'].includes(family(info?.family))){const len=Number(info?.length);if(Number.isFinite(len)&&len>tol)return true;const pts=exactEdgePoints(ctx,edge);return pts.length>=2&&V3.dist(pts[0],pts.at(-1))>tol;}
+  return isStraightEdge(edge,tol);
+}
+function exactStraightEdgeDirection(ctx,edge){const pts=exactEdgePoints(ctx,edge);return pts.length>=2?V3.unit(V3.sub(pts.at(-1),pts[0])):null;}
+function exactStraightEdgeLength(ctx,edge){const info=ctx?.edgeInfoById?.get(Number(edge?.id)),v=Number(info?.length);if(Number.isFinite(v)&&v>=0)return v;const pts=exactEdgePoints(ctx,edge);return pts.length>=2?V3.dist(pts[0],pts.at(-1)):0;}
+
 function geometryScale(geometry){
   const p=geometry?.positions||[];if(p.length<3)return{diag:1,tol:1e-6};
   let min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
@@ -167,8 +182,8 @@ function buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups){
     const faceSet=new Set(faceIds),edgeIds=new Set();for(const fid of faceIds){for(const eid of ctx.faceById.get(fid)?.edgeIndices||[])edgeIds.add(Number(eid));}
     const neighborEdges=new Map();
     for(const eid of edgeIds){
-      const edge=ctx.edgeById.get(eid);if(!edge||!isStraightEdge(edge,tol))continue;
-      const edir=straightEdgeDirection(edge);if(!edir||Math.abs(V3.dot(edir,axis))<0.985)continue;
+      const edge=ctx.edgeById.get(eid);if(!edge||!exactStraightEdge(ctx,edge,tol))continue;
+      const edir=exactStraightEdgeDirection(ctx,edge)||axis;if(Math.abs(V3.dot(edir,axis))<0.985)continue;
       for(const owner of ctx.edgeOwnersById.get(eid)||[]){
         const oid=Number(owner);if(faceSet.has(oid)||!isPlanar(ctx.infoById.get(oid)?.family))continue;const groupId=planarGroups.faceToGroup.get(oid);if(!groupId)continue;
         if(!neighborEdges.has(groupId))neighborEdges.set(groupId,new Map());neighborEdges.get(groupId).set(eid,edge);
@@ -176,9 +191,15 @@ function buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups){
     }
     const boundaries=[];
     for(const [groupId,edgeMap] of neighborEdges){
-      const edges=[...edgeMap.values()],panel=planarGroups.byId.get(groupId),points=edges.flatMap(edgePoints);if(points.length<2||!panel)continue;
+      const edges=[...edgeMap.values()],panel=planarGroups.byId.get(groupId);if(!panel)continue;
+      let points=edges.flatMap(e=>exactEdgePoints(ctx,e)),length=edges.reduce((s,e)=>s+exactStraightEdgeLength(ctx,e),0);
+      if(points.length<2){
+        const n=V3.unit(panel.stats.normal),pc=panel.stats.centroid;if(!n||!pc||!(length>tol))continue;
+        const q=V3.add(center,V3.scale(axis,V3.dot(V3.sub(pc,center),axis))),signedPlane=V3.dot(V3.sub(pc,q),n),midExact=V3.add(q,V3.scale(n,signedPlane)),half=length/2;
+        points=[V3.sub(midExact,V3.scale(axis,half)),V3.add(midExact,V3.scale(axis,half))];
+      }
       const mid=V3.avg(points),offsets=points.map(p=>V3.dot(V3.sub(p,mid),axis)),axisMid=V3.dot(mid,axis),axisValues=points.map(p=>V3.dot(p,axis));
-      boundaries.push({groupId,faceIds:panel.faceIds.slice(),faceId:panel.faceIds[0],edges:edges.map(e=>Number(e.id)),mid,minOffset:Math.min(...offsets),maxOffset:Math.max(...offsets),axisMid,axisMin:Math.min(...axisValues),axisMax:Math.max(...axisValues),length:edges.reduce((s,e)=>s+straightEdgeLength(e),0),points});
+      boundaries.push({groupId,faceIds:panel.faceIds.slice(),faceId:panel.faceIds[0],edges:edges.map(e=>Number(e.id)),mid,minOffset:Math.min(...offsets),maxOffset:Math.max(...offsets),axisMid,axisMin:Math.min(...axisValues),axisMax:Math.max(...axisValues),length,points});
     }
     boundaries.sort((a,b)=>b.length-a.length);
     let orientWeighted=0,orientArea=0;
@@ -241,8 +262,8 @@ function resolveInsideRadius(cyl,cylinders,thickness,tol,fallbackRadius){
 
 function makeRootMap(ctx,panel,tol){
   if(!panel?.faceIds?.length||!panel.stats)return null;let u3=null;
-  const candidates=[];for(const fid of panel.faceIds){const face=ctx.faceById.get(fid);for(const rawEid of face?.edgeIndices||[]){const edge=ctx.edgeById.get(Number(rawEid));if(edge&&isStraightEdge(edge,tol))candidates.push(edge);}}
-  candidates.sort((a,b)=>straightEdgeLength(b)-straightEdgeLength(a));if(candidates.length)u3=straightEdgeDirection(candidates[0]);
+  const candidates=[];for(const fid of panel.faceIds){const face=ctx.faceById.get(fid);for(const rawEid of face?.edgeIndices||[]){const edge=ctx.edgeById.get(Number(rawEid));if(edge&&exactStraightEdge(ctx,edge,tol))candidates.push(edge);}}
+  candidates.sort((a,b)=>exactStraightEdgeLength(ctx,b)-exactStraightEdgeLength(ctx,a));if(candidates.length)u3=exactStraightEdgeDirection(ctx,candidates[0]);
   if(!u3){for(const fid of panel.faceIds){const st=ctx.statsById.get(fid);if(st?.triangles?.length){u3=V3.unit(V3.sub(st.triangles[0][1],st.triangles[0][0]));if(u3)break;}}}
   if(!u3)return null;const st=panel.stats;u3=V3.unit(V3.sub(u3,V3.scale(st.normal,V3.dot(u3,st.normal))))||u3;const v3=V3.unit(V3.cross(st.normal,u3));if(!v3)return null;
   return{origin3:st.centroid,origin2:[0,0],u3,v3,u2:[1,0],v2:[0,1]};
@@ -292,12 +313,23 @@ function boundaryPairGeometry(cyl,a,b,planarGroups){
   return{ok:true,...chosen,score,axisDotA,axisDotB,axisGeometrySuspicious,planeAngle,radialAngle,travelAngle,normalAngle};
 }
 function chooseBendBoundaryPair(cyl,planarGroups){
-  let best=null;
+  let best=null,fallback=null;
   for(let i=0;i<cyl.boundaries.length;i++)for(let j=i+1;j<cyl.boundaries.length;j++){
     const a=cyl.boundaries[i],b=cyl.boundaries[j],geom=boundaryPairGeometry(cyl,a,b,planarGroups);
-    if(!geom?.ok)continue;if(!best||geom.score>best.geom.score)best={a,b,geom};
+    if(geom?.ok){if(!best||geom.score>best.geom.score)best={a,b,geom};continue;}
+    // Exact-topology fallback: two long axial B-Rep boundaries on distinct planar
+    // panels plus a non-zero radial sweep are sufficient to identify a standard
+    // cylindrical sheet bend. This avoids rejecting valid STEP bends when one
+    // imported panel normal/centroid is numerically awkward. Hole walls do not
+    // qualify here because their plane/cylinder boundaries are circular, not axial.
+    const axis=V3.unit(cyl.axis),pa=planarGroups.byId.get(a.groupId),pb=planarGroups.byId.get(b.groupId);
+    if(!axis||!pa||!pb||a.groupId===b.groupId)continue;
+    const r0=radialToAxis(a.mid,cyl.center,axis),r1=radialToAxis(b.mid,cyl.center,axis),radialAngle=signedAngle(r0,r1,axis);
+    if(!validStandardBendAngle(radialAngle))continue;
+    const g={ok:true,angle:radialAngle,source:'exact-topology-radial',weight:5,score:Math.min(Number(a.length)||0,Number(b.length)||0)+0.005,axisDotA:Math.abs(V3.dot(pa.stats.normal,axis)),axisDotB:Math.abs(V3.dot(pb.stats.normal,axis)),axisGeometrySuspicious:false,planeAngle:Math.acos(clamp(Math.abs(V3.dot(pa.stats.normal,pb.stats.normal)),0,1)),radialAngle,travelAngle:0,normalAngle:0};
+    if(!fallback||g.score>fallback.geom.score)fallback={a,b,geom:g};
   }
-  return best;
+  return best||fallback;
 }
 
 function createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarGroups,thickness,kResolver,fallbackRadius,tol,cylinders}){
@@ -450,6 +482,6 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
   if(!triangles.length||!boundaryEdges.length)return{ok:false,code:'flat-empty',message:'The flat pattern could not be reconstructed.',warnings};
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 1.4',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 1.5',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
 }
 
