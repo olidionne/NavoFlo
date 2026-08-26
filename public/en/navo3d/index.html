@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/viewer.css?v=8.17.2">
+  <link rel="stylesheet" href="/css/viewer.css?v=8.17.3">
   <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.3">
   <script type="importmap">
   {
@@ -38,7 +38,10 @@
 <div class="n3-workspace-wrap">
   <div id="cad-workspace" class="cad-workspace">
     <canvas id="viewer-canvas" aria-label="Navo3D"></canvas>
-    <button id="sheetmetal-toggle" class="sheetmetal-float-toggle" type="button" hidden disabled title="Automatically unfold sheet metal"><span class="tool-icon">⌁</span><span>Unfold</span></button>
+    <div id="cad-floating-actions" class="cad-floating-actions" aria-label="CAD quick actions">
+      <button id="sheetmetal-toggle" class="cad-float-action sheetmetal-float-toggle" type="button" hidden disabled title="Automatically unfold sheet metal"><span class="tool-icon">⌁</span><span>Unfold</span></button>
+      <button id="dxf-export-float" class="cad-float-action dxf-float-export" type="button" hidden disabled title="Export DXF automatically"><span class="tool-icon">⇩</span><span>Export DXF</span></button>
+    </div>
 
     <div class="cad-toolbar" role="toolbar">
       <label id="open-model-button" class="tool-button file-tool">
@@ -245,6 +248,6 @@
 </section>
 </main>
 
-<script type="module" src="/js/viewer.js?v=8.17.2"></script>
+<script type="module" src="/js/viewer.js?v=8.17.3"></script>
 </body>
 </html>

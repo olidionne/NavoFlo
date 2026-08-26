@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.2';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.3';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -59,7 +59,7 @@ const E = {
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
   stepDate:$('step-date'), stepAuthor:$('step-author'), stepOrg:$('step-org'),
   stepOrigin:$('step-origin'), stepTree:$('step-tree'), stepCustomSection:$('step-custom-section'), stepCustomProperties:$('step-custom-properties'), stepCustomNote:$('step-custom-note'),
-  sheetMetal:$('sheetmetal-toggle'), sheetMetalSection:$('sheetmetal-section'),
+  floatingActions:$('cad-floating-actions'), sheetMetal:$('sheetmetal-toggle'), dxfExportFloat:$('dxf-export-float'), sheetMetalSection:$('sheetmetal-section'),
   smMaterial:$('sm-material-class'), smThickness:$('sm-thickness'), smThicknessUnit:$('sm-thickness-unit'),
   smRadius:$('sm-radius'), smRadiusUnit:$('sm-radius-unit'), smAngle:$('sm-angle'),
   smUseMeasure:$('sm-use-measure'), smUseRadius:$('sm-use-radius'),
@@ -75,7 +75,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.17.2';
+const WORKER_URL = '/js/step-worker.js?v=8.17.3';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -614,6 +614,7 @@ function bindUI() {
   E.smSetFixedFace?.addEventListener('click',captureSheetMetalFixedFace);
   E.smUnfold?.addEventListener('click',()=>runSheetMetalUnfold({activate:true,force:true}));
   E.smExportDxf?.addEventListener('click',exportFlatPatternDxf);
+  E.dxfExportFloat?.addEventListener('click',exportFlatPatternDxf);
 
   initSheetMetalUI();
   E.edges.classList.toggle('active',edgesVisible);
@@ -1104,15 +1105,28 @@ function syncSheetMetalUnfoldUI(){
   const recognized=Boolean(currentStepResult&&sheetMetalCapability.recognized);
   const hasBends=recognized&&sheetMetalCapability.bendCount>0;
   const flatPlate=recognized&&sheetMetalCapability.flatPlate;
+  const busyUnfold=Boolean(sheetMetalUnfoldPromise);
 
   if(E.sheetMetalSection)E.sheetMetalSection.hidden=!recognized;
   if(E.sheetMetal){
     E.sheetMetal.hidden=!hasBends;
-    E.sheetMetal.disabled=!hasBends||Boolean(sheetMetalUnfoldPromise);
+    E.sheetMetal.disabled=!hasBends||busyUnfold;
     E.sheetMetal.classList.toggle('active',Boolean(flatPatternActive));
     const label=E.sheetMetal.querySelector('span:last-child');
     if(label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Déplier':'Unfold');
     E.sheetMetal.title=flatPatternActive?(FR?'Revenir à la pièce pliée':'Return to folded part'):(FR?'Déplier automatiquement la tôle':'Automatically unfold sheet metal');
+  }
+
+  // V8.17.3 — DXF is a first-class quick action. As soon as the automatic
+  // preflight proves that a STEP can generate a safe flat DXF, expose the
+  // action directly in the viewport. Flat plates therefore get a DXF button
+  // even though they correctly have no "Unfold" button.
+  if(E.dxfExportFloat){
+    E.dxfExportFloat.hidden=!recognized;
+    E.dxfExportFloat.disabled=!recognized||busyUnfold;
+    E.dxfExportFloat.title=flatPlate
+      ? (FR?'Exporter le contour 1:1 en DXF':'Export the 1:1 contour as DXF')
+      : (FR?'Déplier automatiquement si nécessaire puis exporter le DXF':'Automatically unfold if needed, then export DXF');
   }
 
   if(E.smSectionTitle)E.smSectionTitle.textContent=flatPlate?(FR?'DXF':'DXF'):(FR?'TÔLERIE':'SHEET METAL');
@@ -1141,8 +1155,9 @@ function syncSheetMetalUnfoldUI(){
     E.smFlatSize.textContent=b?`${formatLength(b.width)} × ${formatLength(b.height)}`:'—';
   }
   if(flatPlate&&flatPatternResult?.ok&&E.smStatus&&!E.smStatus.classList.contains('warn'))setSheetMetalStatus(SMT.flatPlateReady,'ok');
-  if(E.smExportDxf)E.smExportDxf.disabled=!recognized||Boolean(sheetMetalUnfoldPromise);
-  if(E.smUnfold)E.smUnfold.disabled=!currentStepResult||Boolean(sheetMetalUnfoldPromise);
+  if(E.smExportDxf)E.smExportDxf.disabled=!recognized||busyUnfold;
+  if(E.smUnfold)E.smUnfold.disabled=!currentStepResult||busyUnfold;
+  positionFloatingCadActions();
 }
 
 async function captureSheetMetalFixedFace({silent=false}={}){
@@ -1426,11 +1441,33 @@ async function exportFlatPatternDxf(){
 }
 
 
+function positionFloatingCadActions(){
+  if(!E.floatingActions||!E.workspace)return;
+  const workspaceRect=E.workspace.getBoundingClientRect();
+  const baseRight=14,gap=14;
+  let right=baseRight;
+
+  if(E.propsDrawer&&!E.propsDrawer.hidden){
+    const drawerRect=E.propsDrawer.getBoundingClientRect();
+    const actionsWidth=Math.max(E.floatingActions.offsetWidth||220,140);
+    const freeLeft=Math.max(0,drawerRect.left-workspaceRect.left);
+    const besideRight=Math.max(baseRight,workspaceRect.right-drawerRect.left+gap);
+
+    // Prefer sitting beside Properties. On a narrow screen there may not be
+    // enough room; in that case stay at the viewport edge with a higher z-index
+    // than the drawer. The action is never hidden underneath Properties.
+    right=freeLeft>=actionsWidth+gap*2?besideRight:baseRight;
+  }
+
+  E.floatingActions.style.right=`${Math.round(right)}px`;
+}
+
+
 function syncPropertiesState(persist=true) {
   const open = !E.propsDrawer.hidden;
   E.workspace.classList.toggle('properties-open', open);
   if(persist){navo3dPreferences.propertiesOpen=open;saveNavo3DPrefs();}
-  requestAnimationFrame(resize);
+  requestAnimationFrame(()=>{resize();positionFloatingCadActions();});
 }
 
 function toggleFullscreen() {
@@ -1584,7 +1621,7 @@ function resize() {
   const w=Math.max(1,Math.floor(rect.width)), h=Math.max(1,Math.floor(rect.height));
   renderer.setSize(w,h,false);
   if(camera?.isPerspectiveCamera)camera.aspect=w/h;else if(camera?.isOrthographicCamera){const aspect=w/h;camera.left=-aspect;camera.right=aspect;camera.top=1;camera.bottom=-1;}
-  camera?.updateProjectionMatrix();updateDimensionLabelPosition();
+  camera?.updateProjectionMatrix();updateDimensionLabelPosition();positionFloatingCadActions();
 }
 
 function render() {

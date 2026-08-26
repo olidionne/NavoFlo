@@ -1144,12 +1144,24 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
 .sheetmetal-unfold-results dd{color:#d4dde1}
 .sheetmetal-export{width:100%}
 
-/* V8.17.2 — one-click floating unfold control, shown only after a real bend is detected */
-.sheetmetal-float-toggle{
+/* V8.17.3 — floating CAD actions.
+   They are positioned as one action rail so Properties can never cover them.
+   JS measures the real drawer edge and moves this rail beside it. On narrow
+   screens the rail remains above the drawer (higher z-index) instead of hiding. */
+.cad-floating-actions{
   position:absolute;
-  z-index:24;
+  z-index:34;
   top:116px;
   right:14px;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+  pointer-events:none;
+  transition:right .16s ease;
+}
+.cad-floating-actions:empty{display:none}
+.cad-float-action{
   min-width:104px;
   height:38px;
   display:inline-flex;
@@ -1159,22 +1171,27 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
   padding:0 14px;
   border:1px solid rgba(53,211,154,.48);
   border-radius:9px;
-  background:rgba(12,29,27,.94);
+  background:rgba(12,29,27,.96);
   color:#c9f7e6;
-  box-shadow:0 10px 28px rgba(0,0,0,.3);
+  box-shadow:0 10px 28px rgba(0,0,0,.34);
   backdrop-filter:blur(12px);
   font:750 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
   cursor:pointer;
+  pointer-events:auto;
+  white-space:nowrap;
 }
-.sheetmetal-float-toggle[hidden]{display:none!important}
-.sheetmetal-float-toggle:hover:not(:disabled){background:#153a31;border-color:#35d39a;color:#fff}
+.cad-float-action[hidden]{display:none!important}
+.cad-float-action:hover:not(:disabled){background:#153a31;border-color:#35d39a;color:#fff}
+.cad-float-action:focus-visible{outline:3px solid rgba(53,211,154,.28);outline-offset:2px}
+.cad-float-action:disabled{opacity:.55;cursor:wait}
 .sheetmetal-float-toggle.active{background:#1f7058;border-color:#46e0a9;color:#fff}
-.sheetmetal-float-toggle:focus-visible{outline:3px solid rgba(53,211,154,.28);outline-offset:2px}
-.sheetmetal-float-toggle:disabled{opacity:.55;cursor:wait}
-.cad-workspace.properties-open .sheetmetal-float-toggle{right:356px}
-.cad-workspace.is-fullscreen.properties-open .sheetmetal-float-toggle{right:402px}
+.dxf-float-export{
+  border-color:rgba(92,190,255,.48);
+  background:rgba(13,27,38,.96);
+  color:#d5efff;
+}
+.dxf-float-export:hover:not(:disabled){background:#16384d;border-color:#73c8ff;color:#fff}
 @media(max-width:700px){
-  .sheetmetal-float-toggle{top:112px;right:10px;min-width:92px;height:36px;padding:0 11px}
-  .cad-workspace.properties-open .sheetmetal-float-toggle,
-  .cad-workspace.is-fullscreen.properties-open .sheetmetal-float-toggle{display:none!important}
+  .cad-floating-actions{top:112px;right:10px;gap:6px;flex-wrap:wrap;max-width:calc(100% - 20px)}
+  .cad-float-action{min-width:92px;height:36px;padding:0 11px}
 }

@@ -1,7 +1,7 @@
-import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.2';
+import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.3';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.17.2
+ * NavoFlo Sheet Metal Engine — V8.17.3
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -674,7 +674,14 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   }
   if(!fixedPanel)return{ok:false,code:'fixed-panel-missing',message:'A usable planar sheet panel could not be selected automatically.'};
 
-  const autoThickness=detectThickness(cylinders,tol)||detectPlanarThickness(planarGroups,tol);let resolvedThickness=Number(thickness);
+  // V8.17.3 — for a zero-bend/prismatic plate, trust the two dominant parallel
+  // planar skins before any cylindrical radius pairing. Counterbores, concentric
+  // holes and machined circular details can otherwise look like a thickness pair
+  // even though the part is simply a flat plate ready for DXF.
+  const planarThickness=detectPlanarThickness(planarGroups,tol);
+  const cylindricalThickness=detectThickness(cylinders,tol);
+  const autoThickness=(candidateBends.length===0&&planarThickness)?planarThickness:(cylindricalThickness||planarThickness);
+  let resolvedThickness=Number(thickness);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)resolvedThickness=Number(autoThickness?.value);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)return{ok:false,code:'thickness-unresolved',message:'Sheet thickness could not be detected. Enter T and try again.',detectedThickness:autoThickness,fixedFaceId:fixed};
 
