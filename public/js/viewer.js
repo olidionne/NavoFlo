@@ -22,7 +22,7 @@ const T = FR ? {
   exactFail:'Mesure exacte non disponible pour cette sélection.', browser:'Votre navigateur',
   compatible:'Compatible STEP', limited:'Compatible, mais limité pour les gros STEP',
   incompatible:'Compatibilité STEP limitée', threads:'threads', ram:'RAM', source:'Source',
-  through:'traversant', depth:'Profondeur', hole:'Trou', reset:'Mesure effacée', fullscreen:'Plein écran', exitFullscreen:'Quitter le plein écran', metadataNone:'Aucune propriété personnalisée STEP détectée.', metadataFound:'propriété(s) STEP détectée(s)', metadataScan:'Lecture locale du fichier STEP.'
+  through:'traversant', depth:'Profondeur', hole:'Trou', reset:'Mesure effacée', fullscreen:'Plein écran', exitFullscreen:'Quitter le plein écran', metadataNone:'Aucune propriété personnalisée STEP détectée.', metadataFound:'propriété(s) STEP détectée(s)', metadataScan:'Lecture locale du fichier STEP.', multiMeasure:'Multi-cotation', multiAdded:'Cote conservée · poursuivez la sélection.'
 } : {
   noModel:'No model', loading:'Loading…', stepEngine:'Initializing local CAD kernel…',
   stepOpen:'Opening STEP and extracting B-Rep…', meshOpen:'Loading mesh…',
@@ -38,7 +38,7 @@ const T = FR ? {
   exactFail:'Exact measurement is unavailable for this selection.', browser:'Your browser',
   compatible:'STEP compatible', limited:'Compatible, but limited for large STEP files',
   incompatible:'Limited STEP compatibility', threads:'threads', ram:'RAM', source:'Source',
-  through:'through', depth:'Depth', hole:'Hole', reset:'Measurement cleared', fullscreen:'Fullscreen', exitFullscreen:'Exit fullscreen', metadataNone:'No custom STEP properties detected.', metadataFound:'STEP property/properties detected', metadataScan:'Local STEP file scan.'
+  through:'through', depth:'Depth', hole:'Hole', reset:'Measurement cleared', fullscreen:'Fullscreen', exitFullscreen:'Exit fullscreen', metadataNone:'No custom STEP properties detected.', metadataFound:'STEP property/properties detected', metadataScan:'Local STEP file scan.', multiMeasure:'Multi-measure', multiAdded:'Dimension kept · continue selecting.'
 };
 
 const $ = id => document.getElementById(id);
@@ -46,7 +46,7 @@ const E = {
   workspace:$('cad-workspace'), canvas:$('viewer-canvas'), input:$('file-input'),
   empty:$('empty-drop'), loading:$('loading-overlay'), loadingLabel:$('loading-label'), loadingSub:$('loading-sub'),
   clear:$('clear-model'), save:$('save-model'), saveAs:$('save-model-as'), openButton:$('open-model-button'), fit:$('fit-view'), edges:$('edges-toggle'), gridToggle:$('grid-toggle'), unitSelect:$('unit-select'),
-  measure:$('measure-toggle'), measureType:$('measure-type'), measureClear:$('measure-clear'),
+  measure:$('measure-toggle'), multiMeasure:$('multi-measure-toggle'), measureType:$('measure-type'), measureClear:$('measure-clear'),
   measureCard:$('measure-card'), measureMain:$('measure-main'), measureDetails:$('measure-details'),
   measureBadge:$('measure-badge'), selectionSummary:$('selection-summary'),
   section:$('section-toggle'), sectionPanel:$('section-panel'), clipAxis:$('clip-axis'),
@@ -122,12 +122,12 @@ const sheetMetalState = {
   manualK:0.40
 };
 
-let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, grid;
+let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, multiMeasureRoot, grid;
 let cameraProjectionMode='orthographic';
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
 let currentStats = null, currentStepHeader = null, currentStepResult = null, currentStepProperties = [];
 let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
-let selectionMode = 'auto', measureEnabled = false, selected = [], currentMeasureResult = null, selectionHighlightMap = new Map();
+let selectionMode = 'auto', measureEnabled = false, multiMeasureEnabled=false, selected = [], currentMeasureResult = null, selectionHighlightMap = new Map();
 let edgesVisible = true, clipEnabled = false;
 let modelBounds = null, modelSize = 1;
 let hoverRAF = 0, preselected = null, selectOtherMenu = null;
@@ -149,6 +149,7 @@ const cadNav = {
 };
 let dimensionLabel = null, dimensionLabelPoint = null, dimensionTether = null;
 let dimensionLabelOffset={x:0,y:0},dimensionLabelDrag=null;
+let multiMeasureRecords=[],multiMeasureSeq=0;
 let worker = null, workerSeq = 0, workerPending = new Map();
 let meshObjectUrls = [];
 let baseMaterials = new Set();
@@ -442,6 +443,7 @@ async function init() {
   selectionRoot = new THREE.Group(); scene.add(selectionRoot);
   preselectionRoot = new THREE.Group(); scene.add(preselectionRoot);
   measureOverlayRoot = new THREE.Group(); scene.add(measureOverlayRoot);
+  multiMeasureRoot = new THREE.Group(); scene.add(multiMeasureRoot);
 
   createGrid(10);
   bindUI();
@@ -489,6 +491,7 @@ function bindUI() {
     await refreshMeasurementUnits();
   });
   E.measure.addEventListener('click', toggleMeasure);
+  E.multiMeasure?.addEventListener('click', toggleMultiMeasure);
   E.measureClear.addEventListener('click', clearMeasurement);
   E.measureType.addEventListener('change', () => {
     clearSelections();
@@ -1202,6 +1205,7 @@ function resize() {
 function render() {
   renderer?.render(scene,camera);
   updateDimensionLabelPosition();
+  updateMultiMeasureLabels();
 }
 
 async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
@@ -2275,8 +2279,8 @@ async function acceptSelection(selection, event={}) {
     if (selected.length===1) {
       const details=await workerRequest('inspect',{selection:serialSelection(selected[0])});
       if(epoch!==selectionEpoch || selected.map(selectionKey).join('|')!==selectedKeysAtRequest)return;
-      showSingleExact(details);
-      E.selectionSummary.textContent=T.selectSecond;
+      const pinned=showSingleExact(details);
+      if(!pinned)E.selectionSummary.textContent=T.selectSecond;
     } else if (selected.length===2) {
       const mode=E.measureType.value;
       let result;
@@ -2404,6 +2408,7 @@ function highlightSelection(s,index,parent=selectionRoot) {
 function toggleMeasure() {
   if (!currentModel) return;
   measureEnabled=!measureEnabled;
+  if(!measureEnabled&&multiMeasureEnabled){multiMeasureEnabled=false;E.multiMeasure?.classList.remove('active');E.multiMeasure?.setAttribute('aria-pressed','false');}
   E.measure.classList.toggle('active',measureEnabled);
   E.measureType.disabled=!measureEnabled;
   E.workspace.classList.toggle('selecting',measureEnabled);
@@ -2415,6 +2420,14 @@ function toggleMeasure() {
   } else {
     E.measureCard.hidden=true;
   }
+}
+function toggleMultiMeasure(){
+  if(!currentModel)return;
+  if(!measureEnabled)toggleMeasure();
+  multiMeasureEnabled=!multiMeasureEnabled;
+  E.multiMeasure?.classList.toggle('active',multiMeasureEnabled);
+  E.multiMeasure?.setAttribute('aria-pressed',multiMeasureEnabled?'true':'false');
+  if(multiMeasureEnabled){E.measureCard.hidden=false;E.selectionSummary.textContent=FR?'Multi-cotation active · les cotes terminées restent visibles.':'Multi-measure active · completed dimensions stay visible.';}
 }
 
 function clearSelections() {
@@ -2437,6 +2450,7 @@ function clearSelections() {
 
 function clearMeasurement() {
   clearSelections();
+  clearMultiMeasurements();
 }
 
 function showSingleExact(d) {
@@ -2462,10 +2476,13 @@ function showSingleExact(d) {
     ]);
   }
 
+  let viewportDimension=false;
   if(Number.isFinite(d.diameter)&&d.diameter>0){
-    drawExactDiameterDimension(d,`Ø ${formatLength(d.diameter)}`);
+    viewportDimension=drawExactDiameterDimension(d,`Ø ${formatLength(d.diameter)}`);
   }else if(Number.isFinite(d.radius)&&d.radius>0){
-    drawExactRadiusDimension(d,`R ${formatLength(d.radius)}`);
+    viewportDimension=drawExactRadiusDimension(d,`R ${formatLength(d.radius)}`);
+  }else if(d.kind==='edge'&&Number.isFinite(d.length)&&d.length>0){
+    viewportDimension=drawExactEdgeLengthDimension(d,selected[0],formatLength(d.length));
   }
 
   if (d.hole?.diameter) {
@@ -2474,6 +2491,8 @@ function showSingleExact(d) {
   }
 
   renderDetails(details);
+  if(multiMeasureEnabled&&viewportDimension){pinCurrentMeasurement();E.selectionSummary.textContent=T.multiAdded;return true;}
+  return false;
 }
 function getMeasureAnnotationPoints(result) {
   const validPoint=p=>Array.isArray(p) && p.length===3 && p.every(Number.isFinite);
@@ -2598,6 +2617,7 @@ function showPairExact(r) {
   }
 
   E.selectionSummary.textContent=`${labelSelection(selected[0])}  →  ${labelSelection(selected[1])}`;
+  if(multiMeasureEnabled){pinCurrentMeasurement();E.selectionSummary.textContent=T.multiAdded;}
 }
 
 function showMeshPointDistance(a,b) {
@@ -2619,6 +2639,29 @@ function showMeasureError(message) {
   E.measureMain.textContent='—';
   renderDetails([]);
   E.selectionSummary.textContent=message;
+}
+
+
+function edgeWorldPolyline(selection){
+  const source=edgeObjectsForSelection(selection)[0];if(!source)return[];
+  const attr=source.geometry?.getAttribute?.('position');if(!attr||attr.count<2)return[];
+  const points=[];for(let i=0;i<attr.count;i++)points.push(new THREE.Vector3().fromBufferAttribute(attr,i).applyMatrix4(source.matrixWorld));return points;
+}
+function drawExactEdgeLengthDimension(details,selection,labelText){
+  const points=edgeWorldPolyline(selection);if(points.length<2)return false;
+  const a=points[0],b=points[points.length-1],dir=b.clone().sub(a);if(dir.lengthSq()<1e-16)return false;dir.normalize();
+  const family=String(details?.family||'').toLowerCase();
+  if(family!=='line'){
+    const anchor=selection?.point?.clone?.()||points[Math.floor(points.length/2)].clone();
+    let viewDir=new THREE.Vector3();camera.getWorldDirection(viewDir);let side=camera.up.clone().cross(viewDir).normalize();if(side.lengthSq()<1e-12)side.set(1,0,0);
+    const labelPoint=anchor.clone().addScaledVector(side,Math.max(modelSize*.025,details.length*.08||0));addMeasureSegment(anchor,labelPoint,0x35d39a,41);addMeasureMarker(anchor);setDimensionLabel(labelText,labelPoint);return true;
+  }
+  let viewDir=new THREE.Vector3();camera.getWorldDirection(viewDir).normalize();let offsetDir=viewDir.clone().cross(dir);
+  if(offsetDir.lengthSq()<1e-10)offsetDir=camera.up.clone().cross(dir);if(offsetDir.lengthSq()<1e-10)offsetDir.set(0,1,0);offsetDir.normalize();
+  const span=a.distanceTo(b),offset=Math.max(modelSize*.018,Math.min(modelSize*.055,span*.20)),q1=a.clone().addScaledVector(offsetDir,offset),q2=b.clone().addScaledVector(offsetDir,offset);
+  addMeasureSegment(a,q1,0x35d39a,39);addMeasureSegment(b,q2,0x35d39a,39);addMeasureSegment(q1,q2,0x35d39a,42);
+  const arrow=Math.max(modelSize*.005,Math.min(span*.12,modelSize*.012)),wing=viewDir.clone();addLinearArrow3D(q1,dir,wing,arrow);addLinearArrow3D(q2,dir.clone().negate(),wing,arrow);addMeasureMarker(q1);addMeasureMarker(q2);
+  const labelPoint=q1.clone().add(q2).multiplyScalar(.5).addScaledVector(offsetDir,Math.max(modelSize*.007,span*.035));setDimensionLabel(labelText,labelPoint);return true;
 }
 
 
@@ -2679,6 +2722,36 @@ function addExactCenterMarker(point) {
   );
   cross.renderOrder=46;
   measureOverlayRoot.add(cross);
+}
+
+
+function disposeMeasureGroup(group){
+  group?.traverse?.(obj=>{if(obj!==group){obj.geometry?.dispose?.();if(obj.material&&!Array.isArray(obj.material))obj.material.dispose?.();else if(Array.isArray(obj.material))obj.material.forEach(m=>m?.dispose?.());}});group?.parent?.remove?.(group);
+}
+function createPinnedMeasureLabel(text,point,offset={x:0,y:0}){
+  if(!text||!point)return null;
+  const label=document.createElement('div');label.className='cad-dimension-label cad-multi-dimension-label';label.textContent=text;label.title=FR?'Cote multi · glissez pour déplacer':'Multi dimension · drag to move';E.workspace.append(label);
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('cad-dimension-tether','cad-multi-dimension-tether');svg.setAttribute('aria-hidden','true');const line=document.createElementNS('http://www.w3.org/2000/svg','line');svg.append(line);E.workspace.append(svg);
+  const rec={id:++multiMeasureSeq,label,svg,line,point:point.clone(),offset:{x:Number(offset.x)||0,y:Number(offset.y)||0},drag:null,group:null};
+  label.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();rec.drag={pointerId:event.pointerId,startX:event.clientX,startY:event.clientY,offsetX:rec.offset.x,offsetY:rec.offset.y};label.setPointerCapture?.(event.pointerId);label.classList.add('dragging');});
+  label.addEventListener('pointermove',event=>{if(!rec.drag||rec.drag.pointerId!==event.pointerId)return;event.preventDefault();rec.offset.x=rec.drag.offsetX+(event.clientX-rec.drag.startX);rec.offset.y=rec.drag.offsetY+(event.clientY-rec.drag.startY);updatePinnedMeasureLabel(rec);});
+  const end=event=>{if(!rec.drag||rec.drag.pointerId!==event.pointerId)return;rec.drag=null;label.classList.remove('dragging');};label.addEventListener('pointerup',end);label.addEventListener('pointercancel',end);
+  label.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();rec.offset={x:0,y:0};updatePinnedMeasureLabel(rec);});
+  updatePinnedMeasureLabel(rec);return rec;
+}
+function updatePinnedMeasureLabel(rec){
+  if(!rec?.label||!rec.point||!camera)return;const projected=rec.point.clone().project(camera);if(projected.z < -1 || projected.z > 1){rec.label.style.visibility='hidden';rec.svg.hidden=true;return;}
+  const rect=E.workspace.getBoundingClientRect(),anchorX=(projected.x*.5+.5)*rect.width,anchorY=(-projected.y*.5+.5)*rect.height,x=anchorX+rec.offset.x,y=anchorY+rec.offset.y;rec.label.style.visibility='visible';rec.label.style.left=`${x}px`;rec.label.style.top=`${y}px`;
+  const moved=Math.hypot(rec.offset.x,rec.offset.y)>5;rec.svg.hidden=!moved;rec.svg.style.display=moved?'':'none';if(moved){rec.line.setAttribute('x1',String(anchorX));rec.line.setAttribute('y1',String(anchorY));rec.line.setAttribute('x2',String(x));rec.line.setAttribute('y2',String(y));}
+}
+function updateMultiMeasureLabels(){for(const rec of multiMeasureRecords)updatePinnedMeasureLabel(rec);}
+function pinCurrentMeasurement(){
+  if(!measureOverlayRoot?.children?.length&&!dimensionLabelPoint)return false;
+  const group=new THREE.Group();while(measureOverlayRoot.children.length)group.add(measureOverlayRoot.children[0]);multiMeasureRoot.add(group);
+  const text=dimensionLabel&&!dimensionLabel.hidden?dimensionLabel.textContent:'';const rec=createPinnedMeasureLabel(text,dimensionLabelPoint,dimensionLabelOffset);if(rec)rec.group=group;multiMeasureRecords.push(rec||{id:++multiMeasureSeq,group,label:null,svg:null,line:null,point:null,offset:{x:0,y:0}});clearDimensionLabel();return true;
+}
+function clearMultiMeasurements(){
+  for(const rec of multiMeasureRecords){rec.label?.remove?.();rec.svg?.remove?.();disposeMeasureGroup(rec.group);}multiMeasureRecords=[];if(multiMeasureRoot)while(multiMeasureRoot.children.length)disposeMeasureGroup(multiMeasureRoot.children[0]);
 }
 
 function ensureDimensionTether(){
@@ -3059,6 +3132,7 @@ async function parseStepHeader(file) {
 async function clearModel(showMessage=true) {
   closeSelectOther();
   clearSelections();
+  clearMultiMeasurements();
   clearPreselection();
   if (currentStepResult && worker) {
     try {await workerRequest('release');} catch {}
@@ -3071,10 +3145,10 @@ async function clearModel(showMessage=true) {
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();logicalEdgeGroupCache=new Map();logicalHiddenEdgeKeys.clear();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];
   resetSheetMetalForModel();
-  modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;
+  modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;multiMeasureEnabled=false;
   cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;
   cadNav.pivot.set(0,0,0);cadNav.wheelFocus.set(0,0,0);updateCadCursor();
-  E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.toggle('active',edgesVisible);E.gridToggle.classList.toggle('active',navo3dPreferences.gridVisible);E.measure.classList.remove('active');
+  E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.toggle('active',edgesVisible);E.gridToggle.classList.toggle('active',navo3dPreferences.gridVisible);E.measure.classList.remove('active');E.multiMeasure?.classList.remove('active');E.multiMeasure?.setAttribute('aria-pressed','false');
   E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.sheetMetalSection.hidden=true;E.empty.classList.remove('hidden');
   E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';E.unitSelect.value='u';
   enableTools(false);revokeObjectUrls();
@@ -3099,7 +3173,7 @@ function clearGroup(group) {
 function revokeObjectUrls(){meshObjectUrls.forEach(u=>{try{URL.revokeObjectURL(u)}catch{}});meshObjectUrls=[]}
 
 function enableTools(on) {
-  [E.clear,E.save,E.saveAs,E.fit,E.edges,E.gridToggle,E.unitSelect,E.measure,E.section,E.viewButton,E.props].filter(Boolean).forEach(el=>el.disabled=!on);
+  [E.clear,E.save,E.saveAs,E.fit,E.edges,E.gridToggle,E.unitSelect,E.measure,E.multiMeasure,E.section,E.viewButton,E.props].filter(Boolean).forEach(el=>el.disabled=!on);
   document.querySelectorAll('[data-select-mode]').forEach(el=>el.disabled=!on);
   E.measureType.disabled=!on||!measureEnabled;
   E.sheetMetal.disabled=!on||!currentStepResult;

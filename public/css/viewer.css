@@ -1055,3 +1055,7 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
 /* V8.15.4 — eDrawings-like view settings */
 .view-popover .view-setting{margin-top:4px;padding-top:1px;border-top:1px solid rgba(255,255,255,.08);border-radius:0}
 .view-popover .view-setting.active{color:#35d39a;background:rgba(53,211,154,.08)}
+
+/* V8.15.7 — Navo3D multi-measure */
+.cad-multi-dimension-label{border-color:rgba(53,211,154,.5);box-shadow:0 4px 18px rgba(0,0,0,.42),0 0 0 1px rgba(53,211,154,.08) inset}
+#multi-measure-toggle.active{border-color:rgba(53,211,154,.48)!important;background:rgba(53,211,154,.11)!important;color:#7af0c6!important}
