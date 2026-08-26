@@ -5,7 +5,8 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.7';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.8';
+import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.8';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -56,6 +57,8 @@ const E = {
   props:$('properties-toggle'), propsDrawer:$('properties-drawer'), propsClose:$('properties-close'), fullscreen:$('fullscreen-toggle'),
   propFile:$('prop-file'), propFormat:$('prop-format'), propType:$('prop-type'), propUnits:$('prop-units'),
   propParts:$('prop-parts'), propGeometries:$('prop-geometries'), propTriangles:$('prop-triangles'),
+  profileStandardSection:$('profile-standard-section'), profileAiscLabel:$('profile-aisc-label'), profileMetricLabel:$('profile-metric-label'),
+  profileWeight:$('profile-weight'), profileConfidence:$('profile-confidence'), profileSource:$('profile-source'),
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
   stepDate:$('step-date'), stepAuthor:$('step-author'), stepOrg:$('step-org'),
   stepOrigin:$('step-origin'), stepTree:$('step-tree'), stepCustomSection:$('step-custom-section'), stepCustomProperties:$('step-custom-properties'), stepCustomNote:$('step-custom-note'),
@@ -153,6 +156,7 @@ const sheetMetalState = {
 
 let flatPatternRoot=null,flatPatternResult=null,flatPatternActive=false,flatPatternCameraState=null,sheetMetalUnfoldPromise=null;
 let sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:false,profileType:null,profileData:null};
+let currentProfileMatch=null,profileMatchEpoch=0;
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, multiMeasureRoot, grid;
 let sectionCapRoot=null,sectionCapPlaneMesh=null;
 let cameraProjectionMode='orthographic';
@@ -844,6 +848,7 @@ function resetSheetMetalForModel() {
   sheetMetalState.manualK=AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness ?? 0.40;
   sheetMetalState.fixedFace=null;
   sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:false,profileType:null,profileData:null};
+  currentProfileMatch=null;profileMatchEpoch++;
 
   if(E.smAngle)E.smAngle.value='90';
   if(E.smManualToggle)E.smManualToggle.checked=false;
@@ -1266,7 +1271,8 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
         flatPatternResult=null;clearFlatPattern();
         if(bestProfile){
           sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
-          syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();
+          syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateProfileStandardUI();
+          void resolveProfileStandardMatch(sheetMetalCapability.profileData);
           if(!quiet)console.info('[NavoFlo profile detection]',bestProfile);
           return null;
         }
@@ -1282,7 +1288,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       }
 
       const result=best.result;
-      flatPatternResult=result;
+      flatPatternResult=result;clearProfileStandardMatch();
       sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),profile:false,profileType:null,profileData:null};
       sheetMetalState.fixedFace={geometryId:String(best.geometry.id),elementId:Number(result.fixedFaceId)};
       if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
@@ -3548,10 +3554,51 @@ function fitCamera(view='iso') {
 }
 
 
+
+function profileConfidenceLabel(level){
+  if(level==='high')return FR?'Élevée':'High';
+  if(level==='probable')return FR?'Probable':'Probable';
+  return FR?'À confirmer':'To confirm';
+}
+function updateProfileStandardUI(){
+  if(!E.profileStandardSection)return;
+  const active=Boolean(currentStepResult&&sheetMetalCapability.profile);
+  E.profileStandardSection.hidden=!active;if(!active)return;
+  const m=currentProfileMatch;
+  if(!m){
+    if(E.profileAiscLabel)E.profileAiscLabel.textContent=FR?'Analyse locale…':'Local analysis…';
+    if(E.profileMetricLabel)E.profileMetricLabel.textContent='—';
+    if(E.profileWeight)E.profileWeight.textContent='—';
+    if(E.profileConfidence)E.profileConfidence.textContent='—';
+    if(E.profileSource)E.profileSource.textContent='AISC Shapes Database v16.0 · LOCAL';
+    return;
+  }
+  if(E.profileAiscLabel)E.profileAiscLabel.textContent=m.imperialLabel||m.imperialEdi||'—';
+  if(E.profileMetricLabel)E.profileMetricLabel.textContent=m.metricLabel||m.metricEdi||'—';
+  if(E.profileWeight)E.profileWeight.textContent=Number.isFinite(m.weightKgM)?`${m.weightKgM.toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:2})} kg/m`:'—';
+  if(E.profileConfidence)E.profileConfidence.textContent=`${profileConfidenceLabel(m.level)} · ${Math.round((Number(m.confidence)||0)*100)} %`;
+  if(E.profileSource)E.profileSource.textContent=`${m.sourceVersion||'AISC Shapes Database v16.0'} · LOCAL`;
+}
+async function resolveProfileStandardMatch(profile){
+  const epoch=++profileMatchEpoch;currentProfileMatch=null;updateProfileStandardUI();
+  if(!profile)return;
+  try{
+    const match=await matchAiscProfile(profile);
+    if(epoch!==profileMatchEpoch||!sheetMetalCapability.profile||sheetMetalCapability.profileData!==profile)return;
+    currentProfileMatch=match||null;updateProfileStandardUI();updateGeometryTypeIndicator();
+  }catch(error){
+    if(epoch!==profileMatchEpoch)return;
+    console.warn('[NavoFlo AISC profile matcher]',error);currentProfileMatch=null;updateProfileStandardUI();
+  }
+}
+function clearProfileStandardMatch(){currentProfileMatch=null;profileMatchEpoch++;updateProfileStandardUI();}
+
 function updateGeometryTypeIndicator(){
   if(!E.propType)return;
   if(!currentStepResult){E.propType.textContent=currentModel?(FR?'Maillage':'Mesh'):'—';return;}
   if(sheetMetalCapability.profile){
+    const match=currentProfileMatch,label=match&&(match.level==='high'||match.level==='probable')?(match.imperialLabel||match.metricLabel):null;
+    if(label){E.propType.textContent=`${FR?'Profilé AISC':'AISC profile'} · ${label}`;return;}
     const aspect=Number(sheetMetalCapability.profileData?.aspect),suffix=Number.isFinite(aspect)?` · L/C ${aspect.toFixed(1)}`:'';
     E.propType.textContent=(FR?'Profilé / extrusion':'Profile / extrusion')+suffix;return;
   }
@@ -3564,6 +3611,7 @@ function fillProperties() {
   E.propFile.textContent=currentFile?.name||'—';
   E.propFormat.textContent=currentFormat||'—';
   updateGeometryTypeIndicator();
+  updateProfileStandardUI();
   E.propUnits.textContent=unitLabel(displayUnit);
   E.propParts.textContent=String(currentStats?.partCount??1);
   E.propGeometries.textContent=String(currentStats?.geometryCount??surfaceMeshes.length);

@@ -427,6 +427,26 @@ function profilePlaneBasis(axis){
   const n=canonicalAxis(axis);if(!n)return null;const refs=[[1,0,0],[0,1,0],[0,0,1]].sort((a,b)=>Math.abs(V3.dot(a,n))-Math.abs(V3.dot(b,n)));
   const u=V3.unit(V3.cross(n,refs[0]));if(!u)return null;const v=V3.unit(V3.cross(n,u));if(!v)return null;return{n,u,v};
 }
+
+// V8.17.8 — approximate solid volume from the rendered STEP triangulation.
+// For a constant-section profile, volume / axial length gives the average
+// cross-section area. Machining/drilled holes can only reduce that value, which
+// makes it a useful conservative fingerprint when comparing against stock
+// structural-shape tables.
+function triangulatedSolidVolume(geometry){
+  const p=geometry?.positions||[],idx=geometry?.indices||[];if(p.length<9||idx.length<3)return null;
+  let sixV=0;
+  for(let i=0;i+2<idx.length;i+=3){
+    const ia=Number(idx[i])*3,ib=Number(idx[i+1])*3,ic=Number(idx[i+2])*3;
+    if(ic+2>=p.length)continue;
+    const ax=Number(p[ia]),ay=Number(p[ia+1]),az=Number(p[ia+2]);
+    const bx=Number(p[ib]),by=Number(p[ib+1]),bz=Number(p[ib+2]);
+    const cx=Number(p[ic]),cy=Number(p[ic+1]),cz=Number(p[ic+2]);
+    if(![ax,ay,az,bx,by,bz,cx,cy,cz].every(Number.isFinite))continue;
+    sixV+=ax*(by*cz-bz*cy)+ay*(bz*cx-bx*cz)+az*(bx*cy-by*cx);
+  }
+  const v=Math.abs(sixV/6);return Number.isFinite(v)&&v>EPS?v:null;
+}
 function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   const lines=[];
   for(const edge of geometry.edges||[]){
@@ -456,19 +476,21 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   const traceStep=Math.max(tol*20,crossSpan*1e-5,1e-6),traceKeys=new Set();
   for(const e of longEdges){const p=V3.scale(V3.add(e.a,e.b),0.5),u=V3.dot(p,basis.u),v=V3.dot(p,basis.v);traceKeys.add(`${Math.round(u/traceStep)},${Math.round(v/traceStep)}`);}
   if(traceKeys.size<4)return null;
-  let totalArea=0,longitudinalArea=0;
+  let totalArea=0,longitudinalArea=0,longitudinalPlaneCount=0,longitudinalCylinderCount=0;const longitudinalCylinderRadii=[];
   for(const info of ctx.infoById.values()){
     const area=Number(info?.area);if(!(area>EPS))continue;totalArea+=area;const fam=family(info.family);
     if(isPlanar(fam)){
-      const n=V3.unit(Array.isArray(info.localNormal)?info.localNormal.map(Number).slice(0,3):[]);if(n&&Math.abs(V3.dot(n,basis.n))<=0.08)longitudinalArea+=area;
+      const n=V3.unit(Array.isArray(info.localNormal)?info.localNormal.map(Number).slice(0,3):[]);if(n&&Math.abs(V3.dot(n,basis.n))<=0.08){longitudinalArea+=area;longitudinalPlaneCount++;}
     }else if(isCyl(fam)){
-      const a=V3.unit(Array.isArray(info.axisDirection)?info.axisDirection.map(Number).slice(0,3):[]);if(a&&Math.abs(V3.dot(a,basis.n))>=0.995)longitudinalArea+=area;
+      const a=V3.unit(Array.isArray(info.axisDirection)?info.axisDirection.map(Number).slice(0,3):[]);if(a&&Math.abs(V3.dot(a,basis.n))>=0.995){longitudinalArea+=area;longitudinalCylinderCount++;const r=Number(info.radius);if(Number.isFinite(r)&&r>0)longitudinalCylinderRadii.push(r);}
     }
   }
   const sideAreaRatio=totalArea>EPS?longitudinalArea/totalArea:1;if(sideAreaRatio<0.52)return null;
   const coverage=median(longEdges.map(e=>Math.min(1,e.length/length)))||0;
   const confidence=clamp(0.45+Math.min((aspect-2.45)/6,0.25)+Math.min((longEdges.length-5)/20,0.15)+Math.min(Math.max(sideAreaRatio-0.52,0)*0.35,0.15),0,1);
-  return{kind:'constant-section-profile',axis:basis.n,length,crossSpan,spanU,spanV,aspect,longEdgeCount:longEdges.length,traceCount:traceKeys.size,sideAreaRatio,coverage,confidence};
+  const volume=triangulatedSolidVolume(geometry),averageSectionArea=volume&&length>EPS?volume/length:null;
+  const approxMassKgPerM=Number.isFinite(averageSectionArea)?averageSectionArea*0.00785:null;
+  return{kind:'constant-section-profile',axis:basis.n,length,crossSpan,spanU,spanV,aspect,longEdgeCount:longEdges.length,traceCount:traceKeys.size,sideAreaRatio,coverage,confidence,averageSectionArea,approxMassKgPerM,longitudinalPlaneCount,longitudinalCylinderCount,longitudinalCylinderRadii};
 }
 
 // V8.17.7 — manufacturing-neutral geometry arbitration.
