@@ -200,7 +200,21 @@ function sheetMetalFaceInfo(occt,geometryId){
     if(center?.length===3)out.localCenter=center;
     if(axis?.length===3)out.axisDirection=axis;
     const area=occt.MeasureExactFaceArea(exactModelId,shapeHandle(gid),'face',id);
-    if(area?.ok&&Number.isFinite(Number(area.value)))out.area=Number(area.value);
+    if(area?.ok&&Number.isFinite(Number(area.value))){
+      out.area=Number(area.value);
+      const centroid=Array.isArray(area.localCentroid)?area.localCentroid.map(Number).slice(0,3):null;
+      if(centroid?.length===3&&centroid.every(Number.isFinite)){
+        out.localCentroid=centroid;
+        // Tessellation normals are adequate for display, but unfolding must use the
+        // exact B-Rep plane normal. Evaluate it at the exact face centroid so STEP
+        // meshing/triangle winding cannot turn a valid bend into a false 0°/no-bend.
+        if(String(out.family).toLowerCase()==='plane'){
+          const normal=occt.EvaluateExactFaceNormal(exactModelId,shapeHandle(gid),'face',id,centroid);
+          const n=Array.isArray(normal?.localNormal)?normal.localNormal.map(Number).slice(0,3):null;
+          if(normal?.ok&&n?.length===3&&n.every(Number.isFinite))out.localNormal=n;
+        }
+      }
+    }
     faces.push(out);
   }
   const edges=[];
@@ -213,7 +227,13 @@ function sheetMetalFaceInfo(occt,geometryId){
     if(center?.length===3)out.localCenter=center;
     if(axis?.length===3)out.axisDirection=axis;
     const length=occt.MeasureExactEdgeLength(exactModelId,shapeHandle(gid),'edge',id);
-    if(length?.ok&&Number.isFinite(Number(length.value)))out.length=Number(length.value);
+    if(length?.ok&&Number.isFinite(Number(length.value))){
+      out.length=Number(length.value);
+      const a=Array.isArray(length.localStartPoint)?length.localStartPoint.map(Number).slice(0,3):null;
+      const b=Array.isArray(length.localEndPoint)?length.localEndPoint.map(Number).slice(0,3):null;
+      if(a?.length===3&&a.every(Number.isFinite))out.localStartPoint=a;
+      if(b?.length===3&&b.every(Number.isFinite))out.localEndPoint=b;
+    }
     edges.push(out);
   }
   const logicalGroups=allLogicalFaceGroups(occt).filter(group=>String(group.geometryId)===gid);

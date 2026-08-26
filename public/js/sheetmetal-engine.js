@@ -106,7 +106,17 @@ function buildFaceContext(geometry,faceInfo,edgeInfo=[]){
   const edgeInfoById=new Map((edgeInfo||[]).map(e=>[Number(e.id),e]));
   const statsById=new Map(),edgeOwnersById=new Map();
   for(const face of geometry.faces||[]){
-    const fid=Number(face.id);statsById.set(fid,faceStats(geometry,face));
+    const fid=Number(face.id),info=infoById.get(fid)||{},stats=faceStats(geometry,face);
+    // NavoUnfold is a B-Rep operation: when the STEP worker provides exact OCCT
+    // centroid/normal data, use it instead of inferring the plane from tessellation.
+    // This is especially important on large sheet faces whose mesh winding may be
+    // split/reversed independently by the STEP importer.
+    const exactCentroid=Array.isArray(info.localCentroid)?info.localCentroid.map(Number).slice(0,3):null;
+    const exactNormal=V3.unit(Array.isArray(info.localNormal)?info.localNormal.map(Number).slice(0,3):[]);
+    if(exactCentroid?.length===3&&exactCentroid.every(Number.isFinite))stats.centroid=exactCentroid;
+    if(exactNormal)stats.normal=exactNormal;
+    if(Number.isFinite(Number(info.area))&&Number(info.area)>EPS)stats.area=Number(info.area);
+    statsById.set(fid,stats);
     for(const rawEid of face.edgeIndices||[]){const eid=Number(rawEid);if(!edgeOwnersById.has(eid))edgeOwnersById.set(eid,new Set());edgeOwnersById.get(eid).add(fid);}
   }
   for(const edge of geometry.edges||[]){const eid=Number(edge.id);if(!edgeOwnersById.has(eid))edgeOwnersById.set(eid,new Set());for(const rawOwner of edge.ownerFaceIds||[])edgeOwnersById.get(eid).add(Number(rawOwner));}
@@ -252,7 +262,7 @@ function boundaryPairGeometry(cyl,a,b,planarGroups){
   // A true cylindrical sheet bend has its axis lying in both tangent flange planes.
   // Hole/slot walls have the opposite topology: their cylinder axis is approximately
   // normal to the two sheet skins. Reject those before they can masquerade as bends.
-  if(axisDotA>BEND_AXIS_PLANE_DOT_MAX||axisDotB>BEND_AXIS_PLANE_DOT_MAX)return null;
+  const axisGeometrySuspicious=axisDotA>BEND_AXIS_PLANE_DOT_MAX||axisDotB>BEND_AXIS_PLANE_DOT_MAX;
   const planeAngle=Math.acos(clamp(Math.abs(V3.dot(pa.stats.normal,pb.stats.normal)),0,1));
   // Cylinders joining parallel/coplanar planar faces are not ordinary bends (<180°).
   // They are usually holes, grooves, rounds, split-face artifacts or hem topology.
@@ -266,7 +276,7 @@ function boundaryPairGeometry(cyl,a,b,planarGroups){
     {angle:travelAngle,source:'panel-travel',weight:2},
     {angle:normalAngle,source:'panel-normals',weight:1}
   ].filter(x=>validStandardBendAngle(x.angle));
-  if(!candidates.length)return{ok:false,axisDotA,axisDotB,planeAngle,radialAngle,travelAngle,normalAngle};
+  if(!candidates.length)return{ok:false,axisDotA,axisDotB,axisGeometrySuspicious,planeAngle,radialAngle,travelAngle,normalAngle};
   // Prefer the exact cylinder sweep when it agrees with flange travel. If STEP
   // boundaries are degenerate/split, panel-travel is considerably more reliable.
   let chosen=candidates[0];
@@ -274,8 +284,12 @@ function boundaryPairGeometry(cyl,a,b,planarGroups){
     const delta=Math.abs(Math.abs(radialAngle)-Math.abs(travelAngle));
     if(delta>ANGLE_DISAGREE_TOL)chosen={angle:travelAngle,source:'panel-travel',weight:4};
   }else if(validStandardBendAngle(travelAngle)&&!validStandardBendAngle(radialAngle))chosen={angle:travelAngle,source:'panel-travel',weight:4};
-  const score=Math.min(Number(a.length)||0,Number(b.length)||0)+chosen.weight*1e-3;
-  return{ok:true,...chosen,score,axisDotA,axisDotB,planeAngle,radialAngle,travelAngle,normalAngle};
+  // Exact planar normals are authoritative. If a legacy/tessellated normal still
+  // looks suspicious, keep the topologically/radially valid bend but penalize it
+  // rather than deleting it. Through-holes remain rejected by the parallel-panel
+  // angle test above.
+  const score=Math.min(Number(a.length)||0,Number(b.length)||0)+chosen.weight*1e-3-(axisGeometrySuspicious?1e-4:0);
+  return{ok:true,...chosen,score,axisDotA,axisDotB,axisGeometrySuspicious,planeAngle,radialAngle,travelAngle,normalAngle};
 }
 function chooseBendBoundaryPair(cyl,planarGroups){
   let best=null;
@@ -436,6 +450,6 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
   if(!triangles.length||!boundaryEdges.length)return{ok:false,code:'flat-empty',message:'The flat pattern could not be reconstructed.',warnings};
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 1.3',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 1.4',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
 }
 
