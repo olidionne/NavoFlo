@@ -1,7 +1,7 @@
-import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.4';
+import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.5';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.17.4
+ * NavoFlo Sheet Metal Engine — V8.17.5
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -160,6 +160,27 @@ function buildPlanarGroups(geometry,ctx,tol){
     const owners=[...ownersSet].filter(id=>planarSet.has(id));
     for(let i=0;i<owners.length;i++)for(let j=i+1;j<owners.length;j++){
       const a=owners[i],b=owners[j];if(coplanarFaceStats(ctx.statsById.get(a),ctx.statsById.get(b),tol)){neighbors.get(a).add(b);neighbors.get(b).add(a);}
+    }
+  }
+
+  // V8.17.5 — coplanar skin-fragment stitching.
+  // A hole/cut that reaches two bend boundaries can split one physical planar
+  // sheet skin into several OCCT faces that no longer share an edge with each
+  // other. They are still the same rigid panel when they are coplanar *and*
+  // touch the same non-planar B-Rep face (bend or cut wall). Stitch those
+  // fragments through that common topological neighbor. This is stricter than
+  // globally merging equal planes, so separate folded flanges that merely happen
+  // to be coplanar remain independent.
+  const nonPlanarToPlanar=new Map();
+  for(const ownersSet of ctx.edgeOwnersById.values()){
+    const owners=[...ownersSet].map(Number),planars=owners.filter(id=>planarSet.has(id)),nonPlanars=owners.filter(id=>!planarSet.has(id));
+    if(!planars.length||!nonPlanars.length)continue;
+    for(const nid of nonPlanars){if(!nonPlanarToPlanar.has(nid))nonPlanarToPlanar.set(nid,new Set());for(const pid of planars)nonPlanarToPlanar.get(nid).add(pid);}
+  }
+  for(const planarFaces of nonPlanarToPlanar.values()){
+    const ids=[...planarFaces];
+    for(let i=0;i<ids.length;i++)for(let j=i+1;j<ids.length;j++){
+      const a=ids[i],b=ids[j];if(coplanarFaceStats(ctx.statsById.get(a),ctx.statsById.get(b),tol)){neighbors.get(a).add(b);neighbors.get(b).add(a);}
     }
   }
   const groups=[],faceToGroup=new Map(),seen=new Set();
@@ -648,7 +669,7 @@ function primitiveEndpointPair(primitive){
 function boundaryPrimitivesClosed(primitives,tol){
   const degree=new Map(),key=p=>quantKey(p,tol),add=p=>degree.set(key(p),(degree.get(key(p))||0)+1);
   for(const primitive of primitives||[]){const pair=primitiveEndpointPair(primitive);if(pair){add(pair[0]);add(pair[1]);}}
-  return degree.size===0||[...degree.values()].every(v=>v===2);
+  return degree.size===0||[...degree.values()].every(v=>v>=2&&v%2===0);
 }
 
 function makeBendLine(mapping){
