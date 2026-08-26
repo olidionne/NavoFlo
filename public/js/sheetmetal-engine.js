@@ -1,5 +1,5 @@
 /*
- * NavoFlo Sheet Metal Engine — V8.16 MVP
+ * NavoFlo Sheet Metal Engine — V8.16.8 MVP
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -503,19 +503,38 @@ function makeBendLine(mapping){
 }
 
 function dxfNum(v){if(!Number.isFinite(v))return'0';const n=Math.abs(v)<1e-10?0:v;return String(Number(n.toFixed(8)));}
-export function flatPatternToDxf(result,{partName='NavoFlo_Flat_Pattern'}={}){
-  if(!result?.ok)throw new Error('No valid flat pattern.');const lines=[];const add=(c,v)=>{lines.push(String(c),String(v));};
-  add(0,'SECTION');add(2,'HEADER');add(9,'$ACADVER');add(1,'AC1009');add(9,'$MEASUREMENT');add(70,1);add(0,'ENDSEC');
+const DXF_UNIT_DEFS={
+  in:{insunits:1,measurement:0,scaleFromMm:1/25.4},
+  ft:{insunits:2,measurement:0,scaleFromMm:1/(25.4*12)},
+  mm:{insunits:4,measurement:1,scaleFromMm:1},
+  cm:{insunits:5,measurement:1,scaleFromMm:0.1},
+  m:{insunits:6,measurement:1,scaleFromMm:0.001}
+};
+export function flatPatternToDxf(result,{partName='NavoFlo_Flat_Pattern',units='mm'}={}){
+  if(!result?.ok)throw new Error('No valid flat pattern.');
+  const unitKey=String(units||'mm').toLowerCase(),unitDef=DXF_UNIT_DEFS[unitKey];
+  if(!unitDef)throw new Error(`Unsupported DXF unit: ${units}`);
+  const lines=[];const add=(c,v)=>{lines.push(String(c),String(v));},scale=unitDef.scaleFromMm,sv=v=>Number(v)*scale,sp=p=>[sv(p[0]),sv(p[1])];
+  // AC1015 (AutoCAD 2000) is the first DXF generation where $INSUNITS is a
+  // standard header variable. Without it AutoCAD opens the drawing as Unitless
+  // even if $MEASUREMENT=1. NavoUnfold geometry is natively millimetric.
+  add(0,'SECTION');add(2,'HEADER');
+  add(9,'$ACADVER');add(1,'AC1015');
+  add(9,'$INSUNITS');add(70,unitDef.insunits);
+  add(9,'$MEASUREMENT');add(70,unitDef.measurement);
+  add(9,'$LUNITS');add(70,2);
+  add(9,'$LUPREC');add(70,4);
+  add(0,'ENDSEC');
   add(0,'SECTION');add(2,'TABLES');add(0,'TABLE');add(2,'LAYER');add(70,2);
   for(const [name,color] of [['CUT',7],['BEND',3]]){add(0,'LAYER');add(2,name);add(70,0);add(62,color);add(6,'CONTINUOUS');}
   add(0,'ENDTAB');add(0,'ENDSEC');add(0,'SECTION');add(2,'ENTITIES');
-  const entity=(layer,a,b)=>{add(0,'LINE');add(8,layer);add(10,dxfNum(a[0]));add(20,dxfNum(a[1]));add(30,0);add(11,dxfNum(b[0]));add(21,dxfNum(b[1]));add(31,0);};
+  const entity=(layer,a,b)=>{a=sp(a);b=sp(b);add(0,'LINE');add(8,layer);add(10,dxfNum(a[0]));add(20,dxfNum(a[1]));add(30,0);add(11,dxfNum(b[0]));add(21,dxfNum(b[1]));add(31,0);};
   const primitives=Array.isArray(result.boundaryPrimitives)&&result.boundaryPrimitives.length?result.boundaryPrimitives:null;
   if(primitives){
     for(const primitive of primitives){
       if(primitive.kind==='line')entity('CUT',primitive.a,primitive.b);
-      else if(primitive.kind==='circle'){add(0,'CIRCLE');add(8,'CUT');add(10,dxfNum(primitive.center[0]));add(20,dxfNum(primitive.center[1]));add(30,0);add(40,dxfNum(primitive.radius));}
-      else if(primitive.kind==='arc'){add(0,'ARC');add(8,'CUT');add(10,dxfNum(primitive.center[0]));add(20,dxfNum(primitive.center[1]));add(30,0);add(40,dxfNum(primitive.radius));add(50,dxfNum((primitive.startRad*180/Math.PI+360)%360));add(51,dxfNum((primitive.endRad*180/Math.PI+360)%360));}
+      else if(primitive.kind==='circle'){const center=sp(primitive.center);add(0,'CIRCLE');add(8,'CUT');add(10,dxfNum(center[0]));add(20,dxfNum(center[1]));add(30,0);add(40,dxfNum(sv(primitive.radius)));}
+      else if(primitive.kind==='arc'){const center=sp(primitive.center);add(0,'ARC');add(8,'CUT');add(10,dxfNum(center[0]));add(20,dxfNum(center[1]));add(30,0);add(40,dxfNum(sv(primitive.radius)));add(50,dxfNum((primitive.startRad*180/Math.PI+360)%360));add(51,dxfNum((primitive.endRad*180/Math.PI+360)%360));}
       else if(primitive.kind==='polyline'){for(let i=0;i+1<primitive.points.length;i++)entity('CUT',primitive.points[i],primitive.points[i+1]);}
     }
   }else for(const [a,b] of result.boundaryEdges)entity('CUT',a,b);
