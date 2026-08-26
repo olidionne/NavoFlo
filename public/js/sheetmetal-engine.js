@@ -98,12 +98,46 @@ function buildFaceContext(geometry,faceInfo,edgeInfo=[]){
   const edgeById=new Map((geometry.edges||[]).map(e=>[Number(e.id),e]));
   const infoById=new Map((faceInfo||[]).map(f=>[Number(f.id),f]));
   const edgeInfoById=new Map((edgeInfo||[]).map(e=>[Number(e.id),e]));
-  const statsById=new Map();
-  for(const face of geometry.faces||[])statsById.set(Number(face.id),faceStats(geometry,face));
-  return{faceById,edgeById,infoById,edgeInfoById,statsById};
+  const statsById=new Map(),edgeOwnersById=new Map();
+  for(const face of geometry.faces||[]){
+    const fid=Number(face.id);statsById.set(fid,faceStats(geometry,face));
+    for(const rawEid of face.edgeIndices||[]){const eid=Number(rawEid);if(!edgeOwnersById.has(eid))edgeOwnersById.set(eid,new Set());edgeOwnersById.get(eid).add(fid);}
+  }
+  for(const edge of geometry.edges||[]){const eid=Number(edge.id);if(!edgeOwnersById.has(eid))edgeOwnersById.set(eid,new Set());for(const rawOwner of edge.ownerFaceIds||[])edgeOwnersById.get(eid).add(Number(rawOwner));}
+  return{faceById,edgeById,infoById,edgeInfoById,statsById,edgeOwnersById};
 }
 
-function buildCylinderGroups(geometry,ctx,logicalGroups,tol){
+function coplanarFaceStats(a,b,tol){
+  if(!a||!b)return false;const na=V3.unit(a.normal),nb=V3.unit(b.normal);if(!na||!nb)return false;
+  if(Math.abs(V3.dot(na,nb))<0.9995)return false;
+  const d=V3.sub(b.centroid,a.centroid),planeGap=Math.abs(V3.dot(d,na));
+  return planeGap<=Math.max(tol*25,1e-7);
+}
+
+function combinePanelStats(ctx,faceIds){
+  let area=0,centroid=[0,0,0],normal=[0,0,0],refNormal=null;
+  for(const fid of faceIds){const st=ctx.statsById.get(fid);if(!st)continue;const w=Math.max(st.area,EPS);if(!refNormal)refNormal=st.normal;const sign=refNormal&&V3.dot(st.normal,refNormal)<0?-1:1;area+=w;centroid=V3.add(centroid,V3.scale(st.centroid,w));normal=V3.add(normal,V3.scale(st.normal,w*sign));}
+  if(area>EPS)centroid=V3.scale(centroid,1/area);return{area,centroid,normal:V3.unit(normal)||refNormal||[0,0,1]};
+}
+
+function buildPlanarGroups(geometry,ctx,tol){
+  const planarIds=(geometry.faces||[]).map(f=>Number(f.id)).filter(fid=>isPlanar(ctx.infoById.get(fid)?.family));
+  const planarSet=new Set(planarIds),neighbors=new Map(planarIds.map(id=>[id,new Set()]));
+  for(const ownersSet of ctx.edgeOwnersById.values()){
+    const owners=[...ownersSet].filter(id=>planarSet.has(id));
+    for(let i=0;i<owners.length;i++)for(let j=i+1;j<owners.length;j++){
+      const a=owners[i],b=owners[j];if(coplanarFaceStats(ctx.statsById.get(a),ctx.statsById.get(b),tol)){neighbors.get(a).add(b);neighbors.get(b).add(a);}
+    }
+  }
+  const groups=[],faceToGroup=new Map(),seen=new Set();
+  for(const start of planarIds){if(seen.has(start))continue;const faceIds=[],queue=[start];seen.add(start);
+    while(queue.length){const id=queue.shift();faceIds.push(id);for(const n of neighbors.get(id)||[]){if(!seen.has(n)){seen.add(n);queue.push(n);}}}
+    const group={id:`panel-${groups.length}`,faceIds,faceSet:new Set(faceIds),stats:combinePanelStats(ctx,faceIds)};groups.push(group);for(const fid of faceIds)faceToGroup.set(fid,group.id);
+  }
+  const byId=new Map(groups.map(g=>[g.id,g]));return{groups,byId,faceToGroup};
+}
+
+function buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups){
   const grouped=new Set(),groups=[];
   for(const raw of logicalGroups||[]){
     const ids=(raw.faceIds||[]).map(Number).filter(id=>isCyl(ctx.infoById.get(id)?.family));
@@ -118,14 +152,17 @@ function buildCylinderGroups(geometry,ctx,logicalGroups,tol){
     const neighborEdges=new Map();
     for(const eid of edgeIds){
       const edge=ctx.edgeById.get(eid);if(!edge||!isStraightEdge(edge,tol))continue;
-      const edir=straightEdgeDirection(edge);if(!edir||Math.abs(V3.dot(edir,axis))<0.995)continue;
-      for(const owner of edge.ownerFaceIds||[]){const oid=Number(owner);if(faceSet.has(oid)||!isPlanar(ctx.infoById.get(oid)?.family))continue;if(!neighborEdges.has(oid))neighborEdges.set(oid,[]);neighborEdges.get(oid).push(edge);}
+      const edir=straightEdgeDirection(edge);if(!edir||Math.abs(V3.dot(edir,axis))<0.985)continue;
+      for(const owner of ctx.edgeOwnersById.get(eid)||[]){
+        const oid=Number(owner);if(faceSet.has(oid)||!isPlanar(ctx.infoById.get(oid)?.family))continue;const groupId=planarGroups.faceToGroup.get(oid);if(!groupId)continue;
+        if(!neighborEdges.has(groupId))neighborEdges.set(groupId,new Map());neighborEdges.get(groupId).set(eid,edge);
+      }
     }
     const boundaries=[];
-    for(const [faceId,edges] of neighborEdges){
-      const points=edges.flatMap(edgePoints);if(points.length<2)continue;const mid=V3.avg(points),offsets=points.map(p=>V3.dot(V3.sub(p,mid),axis));
-      const axisMid=V3.dot(mid,axis),axisValues=points.map(p=>V3.dot(p,axis));
-      boundaries.push({faceId,edges:edges.map(e=>Number(e.id)),mid,minOffset:Math.min(...offsets),maxOffset:Math.max(...offsets),axisMid,axisMin:Math.min(...axisValues),axisMax:Math.max(...axisValues),length:edges.reduce((s,e)=>s+straightEdgeLength(e),0),points});
+    for(const [groupId,edgeMap] of neighborEdges){
+      const edges=[...edgeMap.values()],panel=planarGroups.byId.get(groupId),points=edges.flatMap(edgePoints);if(points.length<2||!panel)continue;
+      const mid=V3.avg(points),offsets=points.map(p=>V3.dot(V3.sub(p,mid),axis)),axisMid=V3.dot(mid,axis),axisValues=points.map(p=>V3.dot(p,axis));
+      boundaries.push({groupId,faceIds:panel.faceIds.slice(),faceId:panel.faceIds[0],edges:edges.map(e=>Number(e.id)),mid,minOffset:Math.min(...offsets),maxOffset:Math.max(...offsets),axisMid,axisMin:Math.min(...axisValues),axisMax:Math.max(...axisValues),length:edges.reduce((s,e)=>s+straightEdgeLength(e),0),points});
     }
     boundaries.sort((a,b)=>b.length-a.length);
     return{id:`cyl-${index}`,faceIds,faceSet,edgeIds:[...edgeIds],axis,center,radius,boundaries};
@@ -151,34 +188,34 @@ function cylinderPartner(cyl,cylinders,thickness,tol){
   const allowed=Math.max(thickness*0.22,tol*30);return best&&best.err<=allowed?best:null;
 }
 
-function makeRootMap(ctx,faceId,tol){
-  const face=ctx.faceById.get(faceId),st=ctx.statsById.get(faceId);if(!face||!st)return null;let u3=null;
-  const candidates=(face.edgeIndices||[]).map(id=>ctx.edgeById.get(Number(id))).filter(e=>e&&isStraightEdge(e,tol)).sort((a,b)=>straightEdgeLength(b)-straightEdgeLength(a));
-  if(candidates.length)u3=straightEdgeDirection(candidates[0]);
-  if(!u3&&st.triangles.length)u3=V3.unit(V3.sub(st.triangles[0][1],st.triangles[0][0]));
-  if(!u3)return null;u3=V3.unit(V3.sub(u3,V3.scale(st.normal,V3.dot(u3,st.normal))))||u3;const v3=V3.unit(V3.cross(st.normal,u3));if(!v3)return null;
+function makeRootMap(ctx,panel,tol){
+  if(!panel?.faceIds?.length||!panel.stats)return null;let u3=null;
+  const candidates=[];for(const fid of panel.faceIds){const face=ctx.faceById.get(fid);for(const rawEid of face?.edgeIndices||[]){const edge=ctx.edgeById.get(Number(rawEid));if(edge&&isStraightEdge(edge,tol))candidates.push(edge);}}
+  candidates.sort((a,b)=>straightEdgeLength(b)-straightEdgeLength(a));if(candidates.length)u3=straightEdgeDirection(candidates[0]);
+  if(!u3){for(const fid of panel.faceIds){const st=ctx.statsById.get(fid);if(st?.triangles?.length){u3=V3.unit(V3.sub(st.triangles[0][1],st.triangles[0][0]));if(u3)break;}}}
+  if(!u3)return null;const st=panel.stats;u3=V3.unit(V3.sub(u3,V3.scale(st.normal,V3.dot(u3,st.normal))))||u3;const v3=V3.unit(V3.cross(st.normal,u3));if(!v3)return null;
   return{origin3:st.centroid,origin2:[0,0],u3,v3,u2:[1,0],v2:[0,1]};
 }
 function mapPoint(map,p){const d=V3.sub(p,map.origin3),u=V3.dot(d,map.u3),v=V3.dot(d,map.v3);return V2.add(map.origin2,V2.add(V2.scale(map.u2,u),V2.scale(map.v2,v)));}
 
-function createBendMapping({cyl,parentFaceId,childFaceId,parentMap,ctx,thickness,kResolver,fallbackRadius,tol,cylinders}){
-  const pb=cyl.boundaries.find(b=>b.faceId===parentFaceId),cb=cyl.boundaries.find(b=>b.faceId===childFaceId);if(!pb||!cb)return{ok:false,code:'missing-tangent-boundary'};
+function createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarGroups,thickness,kResolver,fallbackRadius,tol,cylinders}){
+  const pb=cyl.boundaries.find(b=>b.groupId===parentGroupId),cb=cyl.boundaries.find(b=>b.groupId===childGroupId);if(!pb||!cb)return{ok:false,code:'missing-tangent-boundary'};
   let axis3=cyl.axis.slice();const parentMid2=mapPoint(parentMap,pb.mid),axis2Raw=V2.sub(mapPoint(parentMap,V3.add(pb.mid,axis3)),parentMid2),axis2=V2.unit(axis2Raw);if(!axis2)return{ok:false,code:'bad-axis'};
-  const parentCentroid2=mapPoint(parentMap,ctx.statsById.get(parentFaceId).centroid),toInterior=V2.sub(parentCentroid2,parentMid2);let outward=V2.perp(axis2);if(V2.dot(outward,toInterior)>0)outward=V2.scale(outward,-1);
+  const parentPanel=planarGroups.byId.get(parentGroupId),childPanel=planarGroups.byId.get(childGroupId);if(!parentPanel||!childPanel)return{ok:false,code:'panel-missing'};
+  const parentCentroid2=mapPoint(parentMap,parentPanel.stats.centroid),toInterior=V2.sub(parentCentroid2,parentMid2);let outward=V2.perp(axis2);if(V2.dot(outward,toInterior)>0)outward=V2.scale(outward,-1);
   const r0=radialToAxis(pb.mid,cyl.center,axis3),r1=radialToAxis(cb.mid,cyl.center,axis3);let total=signedAngle(r0,r1,axis3);if(Math.abs(total)<1e-4)return{ok:false,code:'zero-bend'};
   if(Math.abs(total)>=Math.PI-THREE_DEG)return{ok:false,code:'bend-180-unsupported',angleDeg:Math.abs(total)*180/Math.PI};
   const partner=cylinderPartner(cyl,cylinders,thickness,tol);let innerRadius=partner?Math.min(cyl.radius,partner.other.radius):(fallbackRadius==null?NaN:Number(fallbackRadius));
   if(!Number.isFinite(innerRadius)||innerRadius<0)return{ok:false,code:'inside-radius-unresolved'};
   const k=Number(kResolver?.(innerRadius,thickness));if(!Number.isFinite(k)||k<0||k>1)return{ok:false,code:'k-factor-invalid'};
-  const neutralRadius=innerRadius+k*thickness,bendAllowance=Math.abs(total)*neutralRadius;
-  const targetMid2=V2.add(parentMid2,V2.scale(outward,bendAllowance));
-  const childStats=ctx.statsById.get(childFaceId),toChildInteriorRaw=V3.sub(childStats.centroid,cb.mid),toChildInterior=V3.sub(toChildInteriorRaw,V3.scale(axis3,V3.dot(toChildInteriorRaw,axis3))),childV3=V3.unit(toChildInterior);if(!childV3)return{ok:false,code:'child-plane-direction'};
+  const neutralRadius=innerRadius+k*thickness,bendAllowance=Math.abs(total)*neutralRadius,targetMid2=V2.add(parentMid2,V2.scale(outward,bendAllowance));
+  const toChildInteriorRaw=V3.sub(childPanel.stats.centroid,cb.mid),toChildInterior=V3.sub(toChildInteriorRaw,V3.scale(axis3,V3.dot(toChildInteriorRaw,axis3))),childV3=V3.unit(toChildInterior);if(!childV3)return{ok:false,code:'child-plane-direction'};
   const childMap={origin3:cb.mid,origin2:targetMid2,u3:axis3,v3:childV3,u2:axis2,v2:outward};
-  return{ok:true,parentFaceId,childFaceId,cyl,pb,cb,axis3,axis2,outward,parentMid2,targetMid2,totalAngle:total,angleDeg:Math.abs(total)*180/Math.PI,innerRadius,k,neutralRadius,bendAllowance,childMap,partnerRadius:partner?.other?.radius??null};
+  return{ok:true,parentGroupId,childGroupId,cyl,pb,cb,axis3,axis2,outward,parentMid2,targetMid2,totalAngle:total,angleDeg:Math.abs(total)*180/Math.PI,innerRadius,k,neutralRadius,bendAllowance,childMap,partnerRadius:partner?.other?.radius??null};
 }
 const THREE_DEG=3*Math.PI/180;
 
-function projectPanelTriangles(ctx,faceId,map){return ctx.statsById.get(faceId).triangles.map(tri=>tri.map(p=>mapPoint(map,p)));}
+function projectPanelTriangles(ctx,panel,map){const out=[];for(const fid of panel.faceIds||[])for(const tri of ctx.statsById.get(fid)?.triangles||[])out.push(tri.map(p=>mapPoint(map,p)));return out;}
 function mapBendPoint(mapping,p){
   const {cyl,pb,axis3,axis2,outward,parentMid2,totalAngle,neutralRadius}=mapping,r0=radialToAxis(pb.mid,cyl.center,axis3),sign=Math.sign(totalAngle)||1,radial=radialToAxis(p,cyl.center,axis3),raw=signedAngle(r0,radial,axis3),phi=angleCandidateInSpan(raw,totalAngle),s=phi*sign*neutralRadius,ax=V3.dot(V3.sub(p,pb.mid),axis3);
   return V2.add(parentMid2,V2.add(V2.scale(axis2,ax),V2.scale(outward,s)));
@@ -201,12 +238,12 @@ function isStraight2D(points,tol){
   for(const p of points){const ap=V2.sub(p,a),t=V2.dot(ap,u),q=V2.add(a,V2.scale(u,t));err=Math.max(err,V2.dist(p,q));}return err<=Math.max(tol*5,len*1e-5);
 }
 function ccwSweep(a,b){let d=(b-a)%TAU;if(d<0)d+=TAU;return d;}
-function boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,tol){
-  const bendByFace=new Map(),skinFaces=new Set(panelMaps.keys());for(const bend of usedBends)for(const fid of bend.cyl.faceIds){bendByFace.set(Number(fid),bend);skinFaces.add(Number(fid));}
+function boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,tol,planarGroups){
+  const bendByFace=new Map(),skinFaces=new Set();for(const groupId of panelMaps.keys())for(const fid of planarGroups.byId.get(groupId)?.faceIds||[])skinFaces.add(Number(fid));for(const bend of usedBends)for(const fid of bend.cyl.faceIds){bendByFace.set(Number(fid),bend);skinFaces.add(Number(fid));}
   const primitives=[];
   for(const edge of geometry.edges||[]){
-    const eid=Number(edge.id),owners=(edge.ownerFaceIds||[]).map(Number).filter(id=>skinFaces.has(id));if(owners.length!==1)continue;const owner=owners[0],pts=edgePoints(edge);if(pts.length<2)continue;
-    const panelMap=panelMaps.get(owner),bendMap=bendByFace.get(owner);if(!panelMap&&!bendMap)continue;const mapped=pts.map(p=>panelMap?mapPoint(panelMap,p):mapBendPoint(bendMap,p));
+    const eid=Number(edge.id),owners=[...(ctx.edgeOwnersById.get(eid)||[])].map(Number).filter(id=>skinFaces.has(id));if(owners.length!==1)continue;const owner=owners[0],pts=edgePoints(edge);if(pts.length<2)continue;
+    const groupId=planarGroups.faceToGroup.get(owner),panelMap=groupId?panelMaps.get(groupId):null,bendMap=bendByFace.get(owner);if(!panelMap&&!bendMap)continue;const mapped=pts.map(p=>panelMap?mapPoint(panelMap,p):mapBendPoint(bendMap,p));
     const info=ctx.edgeInfoById.get(eid)||{},ef=family(info.family);
     if(panelMap&&['circle','circular'].includes(ef)&&Number.isFinite(Number(info.radius))&&Array.isArray(info.localCenter)){
       const center=mapPoint(panelMap,info.localCenter.map(Number).slice(0,3)),radius=Number(info.radius),length=Number(info.length),desired=Number.isFinite(length)&&radius>EPS?length/radius:NaN;
@@ -255,32 +292,43 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const {diag,tol}=geometryScale(geometry),ctx=buildFaceContext(geometry,faceInfo,edgeInfo),fixed=Number(fixedFaceId),fixedInfo=ctx.infoById.get(fixed);
   if(!ctx.faceById.has(fixed))return{ok:false,code:'fixed-face-missing',message:'The selected fixed face is not part of this geometry.'};
   if(!isPlanar(fixedInfo?.family))return{ok:false,code:'fixed-face-not-planar',message:'The fixed face must be planar.'};
-  const cylinders=buildCylinderGroups(geometry,ctx,logicalGroups,tol),autoThickness=detectThickness(cylinders,tol);let resolvedThickness=Number(thickness);
+
+  const planarGroups=buildPlanarGroups(geometry,ctx,tol),fixedGroupId=planarGroups.faceToGroup.get(fixed),fixedPanel=planarGroups.byId.get(fixedGroupId);
+  if(!fixedPanel)return{ok:false,code:'fixed-panel-missing',message:'The selected face could not be assigned to a planar sheet panel.'};
+  const cylinders=buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups),autoThickness=detectThickness(cylinders,tol);let resolvedThickness=Number(thickness);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)resolvedThickness=Number(autoThickness?.value);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)return{ok:false,code:'thickness-unresolved',message:'Sheet thickness could not be detected. Enter T and try again.',detectedThickness:autoThickness};
 
   const warnings=[];if(autoThickness&&Number.isFinite(Number(thickness))&&Number(thickness)>0){const delta=Math.abs(Number(thickness)-autoThickness.value);if(delta>Math.max(resolvedThickness*0.12,tol*20))warnings.push('Entered thickness differs from the cylindrical-face thickness estimate.');}
-  const candidateBends=cylinders.filter(c=>c.boundaries.length>=2).map(c=>({...c,boundaries:c.boundaries.slice(0,2)}));
-  const bendsByFace=new Map();for(const bend of candidateBends){for(const b of bend.boundaries){if(!bendsByFace.has(b.faceId))bendsByFace.set(b.faceId,[]);bendsByFace.get(b.faceId).push(bend);}}
-  const rootMap=makeRootMap(ctx,fixed,tol);if(!rootMap)return{ok:false,code:'fixed-face-map',message:'Unable to establish a coordinate system on the fixed face.'};
+  const candidateBends=cylinders.map(c=>{
+    const unique=[];for(const b of c.boundaries){if(!unique.some(x=>x.groupId===b.groupId))unique.push(b);}return unique.length>=2?{...c,boundaries:unique.slice(0,2)}:null;
+  }).filter(Boolean);
+  const bendsByGroup=new Map();for(const bend of candidateBends){for(const b of bend.boundaries){if(!bendsByGroup.has(b.groupId))bendsByGroup.set(b.groupId,[]);bendsByGroup.get(b.groupId).push(bend);}}
+  const rootMap=makeRootMap(ctx,fixedPanel,tol);if(!rootMap)return{ok:false,code:'fixed-face-map',message:'Unable to establish a coordinate system on the fixed face.'};
 
-  const panelMaps=new Map([[fixed,rootMap]]),panelOrder=[fixed],usedBends=[],usedCylinderIds=new Set(),queue=[fixed],cycleLinks=[];
+  const panelMaps=new Map([[fixedGroupId,rootMap]]),panelOrder=[fixedGroupId],usedBends=[],usedCylinderIds=new Set(),queue=[fixedGroupId],cycleLinks=[];
   while(queue.length){
-    const parentFaceId=queue.shift(),parentMap=panelMaps.get(parentFaceId);
-    for(const cyl of bendsByFace.get(parentFaceId)||[]){
-      if(usedCylinderIds.has(cyl.id))continue;const other=cyl.boundaries.find(b=>b.faceId!==parentFaceId);if(!other)continue;const childFaceId=other.faceId;
-      if(panelMaps.has(childFaceId)){cycleLinks.push({parentFaceId,childFaceId,cylinder:cyl.id});usedCylinderIds.add(cyl.id);continue;}
-      const mapping=createBendMapping({cyl,parentFaceId,childFaceId,parentMap,ctx,thickness:resolvedThickness,kResolver,fallbackRadius:fallbackInsideRadius,tol,cylinders});
+    const parentGroupId=queue.shift(),parentMap=panelMaps.get(parentGroupId);
+    for(const cyl of bendsByGroup.get(parentGroupId)||[]){
+      if(usedCylinderIds.has(cyl.id))continue;const other=cyl.boundaries.find(b=>b.groupId!==parentGroupId);if(!other)continue;const childGroupId=other.groupId;
+      if(panelMaps.has(childGroupId)){cycleLinks.push({parentGroupId,childGroupId,cylinder:cyl.id});usedCylinderIds.add(cyl.id);continue;}
+      const mapping=createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarGroups,thickness:resolvedThickness,kResolver,fallbackRadius:fallbackInsideRadius,tol,cylinders});
       if(!mapping.ok){warnings.push(`Bend ${cyl.faceIds.join('/')} skipped: ${mapping.code}.`);usedCylinderIds.add(cyl.id);continue;}
-      panelMaps.set(childFaceId,mapping.childMap);panelOrder.push(childFaceId);usedBends.push(mapping);usedCylinderIds.add(cyl.id);queue.push(childFaceId);
+      panelMaps.set(childGroupId,mapping.childMap);panelOrder.push(childGroupId);usedBends.push(mapping);usedCylinderIds.add(cyl.id);queue.push(childGroupId);
     }
   }
   if(cycleLinks.length)warnings.push('Closed/cyclic sheet topology detected; a spanning tree was unfolded. Add a seam for a production flat pattern.');
-  if(!usedBends.length)return{ok:false,code:'no-bends',message:'No standard cylindrical bend connected to the fixed face was detected.',detectedThickness:autoThickness,warnings};
+  if(!usedBends.length){
+    const connected=(bendsByGroup.get(fixedGroupId)||[]).length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,fixedPanelCandidateBends:connected,tolerance:tol};
+    const message=connected?'A cylindrical bend touches the fixed panel, but its geometry could not be resolved safely. Check T / inside radius / K-factor.':'No standard cylindrical bend connected to the fixed panel was detected.';
+    return{ok:false,code:connected?'bend-resolution-failed':'no-bends',message,detectedThickness:autoThickness,warnings,diagnostics};
+  }
 
-  const panelTriangles=[];for(const faceId of panelOrder)panelTriangles.push(...projectPanelTriangles(ctx,faceId,panelMaps.get(faceId)));
+  const panelTriangles=[];for(const groupId of panelOrder){const panel=planarGroups.byId.get(groupId);if(panel)panelTriangles.push(...projectPanelTriangles(ctx,panel,panelMaps.get(groupId)));}
   const bendTriangles=[];for(const bend of usedBends)bendTriangles.push(...projectBendTriangles(ctx,bend));
-  const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
+  const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
   if(!triangles.length||!boundaryEdges.length)return{ok:false,code:'flat-empty',message:'The flat pattern could not be reconstructed.',warnings};
-  return{ok:true,version:'NavoUnfold MVP 1',fixedFaceId:fixed,geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds:panelOrder,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{cylinders:cylinders.length,candidateBends:candidateBends.length,tolerance:tol}};
+  const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
+  return{ok:true,version:'NavoUnfold MVP 1.1',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,tolerance:tol}};
 }
+

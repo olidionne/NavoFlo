@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.16';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.16.1';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -1133,6 +1133,26 @@ function resolveUnfoldK(innerRadius,thickness){
   return getAirBendingRule(sheetMetalState.materialClass,innerRadius,thickness)?.k ?? NaN;
 }
 
+function describeUnfoldFailure(result){
+  const code=String(result?.code||'');
+  const messages=FR?{
+    'no-bends':'Aucun pli cylindrique standard relié au panneau fixe n’a été détecté.',
+    'bend-resolution-failed':'Un pli touche le panneau fixe, mais ses paramètres n’ont pas pu être résolus de façon fiable. Vérifiez T, le rayon intérieur et le facteur K.',
+    'thickness-unresolved':'L’épaisseur de tôle n’a pas pu être détectée. Entrez T puis réessayez.',
+    'fixed-face-map':'Impossible d’établir le repère de la face fixe.',
+    'flat-empty':'Le développé n’a pas pu être reconstruit.',
+    'fixed-face-not-planar':'La face fixe doit être plane.'
+  }:{
+    'no-bends':'No standard cylindrical bend connected to the fixed panel was detected.',
+    'bend-resolution-failed':'A bend touches the fixed panel, but its parameters could not be resolved safely. Check T, inside radius and K-factor.',
+    'thickness-unresolved':'Sheet thickness could not be detected. Enter T and try again.',
+    'fixed-face-map':'Unable to establish the fixed-face coordinate system.',
+    'flat-empty':'The flat pattern could not be reconstructed.',
+    'fixed-face-not-planar':'The fixed face must be planar.'
+  };
+  return messages[code]||result?.message||SMT.unsupportedTopology;
+}
+
 async function runSheetMetalUnfold(){
   if(!currentStepResult){setSheetMetalStatus(SMT.needStep,'warn');return;}
   if(!sheetMetalState.fixedFace){
@@ -1158,7 +1178,8 @@ async function runSheetMetalUnfold(){
     });
     if(!result?.ok){
       flatPatternResult=null;clearFlatPattern();syncSheetMetalUnfoldUI();
-      const reason=result?.message||SMT.unsupportedTopology;
+      console.warn('[NavoUnfold diagnostics]',result);
+      const reason=describeUnfoldFailure(result);
       setSheetMetalStatus(`${SMT.unfoldFailed} · ${reason}`,'warn');return;
     }
     flatPatternResult=result;
