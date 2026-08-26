@@ -428,7 +428,7 @@ function profilePlaneBasis(axis){
   const u=V3.unit(V3.cross(n,refs[0]));if(!u)return null;const v=V3.unit(V3.cross(n,u));if(!v)return null;return{n,u,v};
 }
 
-// V8.17.8 — approximate solid volume from the rendered STEP triangulation.
+// V8.17.9 — approximate average solid volume from the rendered STEP triangulation (fallback).
 // For a constant-section profile, volume / axial length gives the average
 // cross-section area. Machining/drilled holes can only reduce that value, which
 // makes it a useful conservative fingerprint when comparing against stock
@@ -447,6 +447,73 @@ function triangulatedSolidVolume(geometry){
   }
   const v=Math.abs(sixV/6);return Number.isFinite(v)&&v>EPS?v:null;
 }
+
+// V8.17.9 — stock-section fingerprint from several real mesh slices.
+//
+// Volume/length is useful for an unmodified extrusion, but holes, copes and end
+// cuts reduce that average and can make two AISC shapes with the same envelope
+// look ambiguous.  A stock profile normally contains at least one axial station
+// where the complete cross-section still exists.  Intersect the actual closed
+// triangulated STEP solid with several planes normal to the extrusion axis and
+// keep the largest valid material section.  This also tells us whether the
+// section is one connected solid, a hollow section, or a built-up multi-piece
+// section — valuable information when separating W/L/HSS/PIPE/2L candidates.
+function profilePointKey2D(p,tol){return `${Math.round(p[0]/tol)},${Math.round(p[1]/tol)}`;}
+function profilePointInPoly2D(p,poly){let inside=false;for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+  const a=poly[i],b=poly[j],hit=((a[1]>p[1])!==(b[1]>p[1]))&&(p[0]<(b[0]-a[0])*(p[1]-a[1])/(b[1]-a[1]||1e-30)+a[0]);if(hit)inside=!inside;
+}return inside;}
+function profilePolyArea2D(poly){let a=0;for(let i=0,j=poly.length-1;i<poly.length;j=i++)a+=poly[j][0]*poly[i][1]-poly[i][0]*poly[j][1];return a/2;}
+function profileSectionSlice(geometry,basis,station,tol){
+  const pos=geometry?.positions||[],idx=geometry?.indices||[];if(pos.length<9||idx.length<3)return null;
+  const n=basis.n,u=basis.u,v=basis.v,segments=[],dedupe=new Set();
+  const project=(x,y,z)=>[x*u[0]+y*u[1]+z*u[2],x*v[0]+y*v[1]+z*v[2]];
+  const key=p=>profilePointKey2D(p,tol);
+  const addHit=(hits,p)=>{if(!hits.some(q=>Math.hypot(q[0]-p[0],q[1]-p[1])<=tol))hits.push(p);};
+  for(let i=0;i+2<idx.length;i+=3){
+    const ids=[Number(idx[i]),Number(idx[i+1]),Number(idx[i+2])],pts=[],ds=[];let valid=true;
+    for(const id of ids){const k=id*3,x=Number(pos[k]),y=Number(pos[k+1]),z=Number(pos[k+2]);if(![x,y,z].every(Number.isFinite)){valid=false;break;}pts.push([x,y,z]);ds.push(x*n[0]+y*n[1]+z*n[2]-station);}
+    if(!valid||ds.every(d=>d>tol)||ds.every(d=>d<-tol)||ds.every(d=>Math.abs(d)<=tol))continue;
+    const hits=[];
+    for(let e=0;e<3;e++){
+      const j=(e+1)%3,p3=pts[e],q3=pts[j],dp=ds[e],dq=ds[j];
+      if(Math.abs(dp)<=tol)addHit(hits,project(...p3));
+      if((dp>tol&&dq<-tol)||(dp<-tol&&dq>tol)){
+        const t=dp/(dp-dq),x=p3[0]+(q3[0]-p3[0])*t,y=p3[1]+(q3[1]-p3[1])*t,z=p3[2]+(q3[2]-p3[2])*t;addHit(hits,project(x,y,z));
+      }
+    }
+    if(hits.length<2)continue;let a=hits[0],b=hits[1],best=Math.hypot(a[0]-b[0],a[1]-b[1]);
+    for(let h=0;h<hits.length;h++)for(let j=h+1;j<hits.length;j++){const d=Math.hypot(hits[h][0]-hits[j][0],hits[h][1]-hits[j][1]);if(d>best){best=d;a=hits[h];b=hits[j];}}
+    if(best<=tol)continue;const ka=key(a),kb=key(b),sk=ka<kb?`${ka}|${kb}`:`${kb}|${ka}`;if(dedupe.has(sk))continue;dedupe.add(sk);segments.push({a,b,ka,kb});
+  }
+  if(segments.length<3)return null;
+  const nodes=new Map(),edges=[];
+  const node=(k,p)=>{if(!nodes.has(k))nodes.set(k,{k,p:[p[0],p[1]],edges:[]});return nodes.get(k);};
+  for(const s of segments){const a=node(s.ka,s.a),b=node(s.kb,s.b),ei=edges.length;edges.push({a,b,used:false});a.edges.push(ei);b.edges.push(ei);}
+  const loops=[];
+  for(let seed=0;seed<edges.length;seed++){
+    if(edges[seed].used)continue;const e0=edges[seed];e0.used=true;let start=e0.a,prev=start,current=e0.b,pts=[start.p,current.p],guard=0;
+    while(current!==start&&guard++<edges.length+12){const choices=current.edges.filter(i=>!edges[i].used);if(!choices.length)break;let chosen=choices[0];
+      if(choices.length>1){const ix=current.p[0]-prev.p[0],iy=current.p[1]-prev.p[1],il=Math.hypot(ix,iy)||1;let best=-Infinity;
+        for(const ci of choices){const e=edges[ci],next=e.a===current?e.b:e.a,dx=next.p[0]-current.p[0],dy=next.p[1]-current.p[1],dl=Math.hypot(dx,dy)||1,score=(ix*dx+iy*dy)/(il*dl);if(score>best){best=score;chosen=ci;}}}
+      const e=edges[chosen];e.used=true;const next=e.a===current?e.b:e.a;prev=current;current=next;if(current!==start)pts.push(current.p);
+    }
+    if(current===start&&pts.length>=3){const cleaned=[];for(const q of pts)if(!cleaned.length||Math.hypot(q[0]-cleaned.at(-1)[0],q[1]-cleaned.at(-1)[1])>tol)cleaned.push(q);if(cleaned.length>=3)loops.push(cleaned);}
+  }
+  if(!loops.length)return null;
+  const infos=loops.map(points=>({points,signedArea:profilePolyArea2D(points)})).filter(l=>Math.abs(l.signedArea)>tol*tol*4);
+  if(!infos.length)return null;infos.sort((a,b)=>Math.abs(b.signedArea)-Math.abs(a.signedArea));
+  for(let i=0;i<infos.length;i++){let depth=0,parent=-1;for(let j=0;j<i;j++)if(profilePointInPoly2D(infos[i].points[0],infos[j].points)){depth++;if(parent<0)parent=j;}infos[i].depth=depth;infos[i].parent=parent;}
+  let area=0,outerCount=0,holeCount=0;for(const l of infos){const a=Math.abs(l.signedArea);if(l.depth%2){area-=a;holeCount++;}else{area+=a;outerCount++;}}
+  return area>tol*tol?{area,outerCount,holeCount,loopCount:infos.length,segmentCount:segments.length}:null;
+}
+function profileStockSectionFingerprint(geometry,basis,lo,hi,crossSpan){
+  const length=hi-lo;if(!(length>EPS&&crossSpan>EPS))return null;
+  const fracs=[0.083,0.137,0.211,0.293,0.379,0.467,0.557,0.647,0.733,0.821,0.893,0.941],tol=Math.max(crossSpan*2e-5,length*2e-8,1e-5),samples=[];
+  for(const fraction of fracs){const slice=profileSectionSlice(geometry,basis,lo+length*fraction,tol);if(slice)samples.push({...slice,fraction});}
+  if(!samples.length)return null;samples.sort((a,b)=>b.area-a.area);const best=samples[0],areas=samples.map(s=>s.area).sort((a,b)=>a-b),med=areas[Math.floor(areas.length/2)]||best.area;
+  return{stockSectionArea:best.area,sectionComponentCount:best.outerCount,sectionHoleCount:best.holeCount,sectionLoopCount:best.loopCount,sectionSampleFraction:best.fraction,sectionAreaMedian:med,sectionAreaSampleCount:samples.length};
+}
+
 function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   const lines=[];
   for(const edge of geometry.edges||[]){
@@ -489,8 +556,10 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   const coverage=median(longEdges.map(e=>Math.min(1,e.length/length)))||0;
   const confidence=clamp(0.45+Math.min((aspect-2.45)/6,0.25)+Math.min((longEdges.length-5)/20,0.15)+Math.min(Math.max(sideAreaRatio-0.52,0)*0.35,0.15),0,1);
   const volume=triangulatedSolidVolume(geometry),averageSectionArea=volume&&length>EPS?volume/length:null;
-  const approxMassKgPerM=Number.isFinite(averageSectionArea)?averageSectionArea*0.00785:null;
-  return{kind:'constant-section-profile',axis:basis.n,length,crossSpan,spanU,spanV,aspect,longEdgeCount:longEdges.length,traceCount:traceKeys.size,sideAreaRatio,coverage,confidence,averageSectionArea,approxMassKgPerM,longitudinalPlaneCount,longitudinalCylinderCount,longitudinalCylinderRadii};
+  const section=profileStockSectionFingerprint(geometry,basis,lo,hi,crossSpan);
+  const stockSectionArea=Number(section?.stockSectionArea);
+  const approxMassKgPerM=Number.isFinite(stockSectionArea)?stockSectionArea*0.00785:(Number.isFinite(averageSectionArea)?averageSectionArea*0.00785:null);
+  return{kind:'constant-section-profile',axis:basis.n,length,crossSpan,spanU,spanV,aspect,longEdgeCount:longEdges.length,traceCount:traceKeys.size,sideAreaRatio,coverage,confidence,averageSectionArea,stockSectionArea:Number.isFinite(stockSectionArea)?stockSectionArea:null,approxMassKgPerM,longitudinalPlaneCount,longitudinalCylinderCount,longitudinalCylinderRadii,...(section||{})};
 }
 
 // V8.17.7 — manufacturing-neutral geometry arbitration.

@@ -1195,3 +1195,7 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
   .cad-floating-actions{top:112px;right:10px;gap:6px;flex-wrap:wrap;max-width:calc(100% - 20px)}
   .cad-float-action{min-width:92px;height:36px;padding:0 11px}
 }
+
+/* V8.17.9 — make the identified structural designation immediately visible. */
+#profile-aisc-label{color:#35d39a;font-weight:850;letter-spacing:.01em}
+#profile-metric-label{color:#d8e2e6;font-weight:750}

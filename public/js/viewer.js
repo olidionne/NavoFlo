@@ -5,8 +5,8 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.8';
-import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.8';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.9';
+import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.9';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -58,7 +58,8 @@ const E = {
   propFile:$('prop-file'), propFormat:$('prop-format'), propType:$('prop-type'), propUnits:$('prop-units'),
   propParts:$('prop-parts'), propGeometries:$('prop-geometries'), propTriangles:$('prop-triangles'),
   profileStandardSection:$('profile-standard-section'), profileAiscLabel:$('profile-aisc-label'), profileMetricLabel:$('profile-metric-label'),
-  profileWeight:$('profile-weight'), profileConfidence:$('profile-confidence'), profileSource:$('profile-source'),
+  profileFamily:$('profile-family'), profileDimensions:$('profile-dimensions'), profileThickness:$('profile-thickness'), profileArea:$('profile-area'),
+  profileWeight:$('profile-weight'), profileLength:$('profile-length'), profileTotalWeight:$('profile-total-weight'), profileConfidence:$('profile-confidence'), profileSource:$('profile-source'),
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
   stepDate:$('step-date'), stepAuthor:$('step-author'), stepOrg:$('step-org'),
   stepOrigin:$('step-origin'), stepTree:$('step-tree'), stepCustomSection:$('step-custom-section'), stepCustomProperties:$('step-custom-properties'), stepCustomNote:$('step-custom-note'),
@@ -3560,22 +3561,61 @@ function profileConfidenceLabel(level){
   if(level==='probable')return FR?'Probable':'Probable';
   return FR?'À confirmer':'To confirm';
 }
-function updateProfileStandardUI(){
-  if(!E.profileStandardSection)return;
-  const active=Boolean(currentStepResult&&sheetMetalCapability.profile);
-  E.profileStandardSection.hidden=!active;if(!active)return;
-  const m=currentProfileMatch;
-  if(!m){
-    if(E.profileAiscLabel)E.profileAiscLabel.textContent=FR?'Analyse locale…':'Local analysis…';
-    if(E.profileMetricLabel)E.profileMetricLabel.textContent='—';
-    if(E.profileWeight)E.profileWeight.textContent='—';
-    if(E.profileConfidence)E.profileConfidence.textContent='—';
-    if(E.profileSource)E.profileSource.textContent='AISC Shapes Database v16.0 · LOCAL';
-    return;
+function ensureProfileStandardSection(){
+  const drawer=E.propsDrawer,anchor=drawer?.querySelector?.('.drawer-stats');if(!drawer||!anchor)return null;
+  let section=E.profileStandardSection||$('profile-standard-section');
+  if(section&&$('profile-family')&&$('profile-total-weight'))return section;
+  if(!section){section=document.createElement('div');section.id='profile-standard-section';section.className='drawer-section';section.hidden=true;anchor.after(section);}
+  section.innerHTML=`<div class="drawer-section-title">${FR?'PROFILÉ STRUCTURAL':'STRUCTURAL PROFILE'}</div><dl class="drawer-stats compact-stats">
+    <div><dt>${FR?'AISC / impérial':'AISC / imperial'}</dt><dd id="profile-aisc-label">—</dd></div>
+    <div><dt>${FR?'Métrique':'Metric'}</dt><dd id="profile-metric-label">—</dd></div>
+    <div><dt>${FR?'Famille':'Family'}</dt><dd id="profile-family">—</dd></div>
+    <div><dt>${FR?'Dimensions':'Dimensions'}</dt><dd id="profile-dimensions">—</dd></div>
+    <div><dt>${FR?'Épaisseur(s)':'Thickness(es)'}</dt><dd id="profile-thickness">—</dd></div>
+    <div><dt>${FR?'Aire section':'Section area'}</dt><dd id="profile-area">—</dd></div>
+    <div><dt>${FR?'Masse linéique':'Linear mass'}</dt><dd id="profile-weight">—</dd></div>
+    <div><dt>${FR?'Longueur modèle':'Model length'}</dt><dd id="profile-length">—</dd></div>
+    <div><dt>${FR?'Masse théorique':'Theoretical mass'}</dt><dd id="profile-total-weight">—</dd></div>
+    <div><dt>${FR?'Concordance':'Match'}</dt><dd id="profile-confidence">—</dd></div>
+  </dl><p id="profile-source" class="metadata-note">AISC Shapes Database v16.0 · LOCAL</p>`;
+  E.profileStandardSection=section;
+  E.profileAiscLabel=$('profile-aisc-label');E.profileMetricLabel=$('profile-metric-label');E.profileFamily=$('profile-family');E.profileDimensions=$('profile-dimensions');E.profileThickness=$('profile-thickness');E.profileArea=$('profile-area');E.profileWeight=$('profile-weight');E.profileLength=$('profile-length');E.profileTotalWeight=$('profile-total-weight');E.profileConfidence=$('profile-confidence');E.profileSource=$('profile-source');return section;
+}
+function profileUnit(){return displayUnit==='u'?'mm':displayUnit;}
+function profileLengthMm(v){const n=Number(v);if(!Number.isFinite(n))return null;const u=profileUnit();return `${formatNumber(convertLength(n,'mm',u))} ${unitLabel(u)}`;}
+function profileAreaMm2(v){const n=Number(v);if(!Number.isFinite(n))return null;const u=profileUnit(),f=unitScale('mm',u);return `${formatNumber(n*f*f)} ${unitLabel(u)}²`;}
+function profileDimensionsText(m){
+  const type=String(m?.type||''),len=profileLengthMm;
+  if(['W','M','S','HP','C','MC','WT','MT','ST'].includes(type)&&Number.isFinite(m.dMm)&&Number.isFinite(m.bfMm))return `d ${len(m.dMm)} × bf ${len(m.bfMm)}`;
+  if(['L','2L'].includes(type)&&Number.isFinite(m.leg1Mm)&&Number.isFinite(m.leg2Mm))return `${len(m.leg1Mm)} × ${len(m.leg2Mm)}`;
+  if(type==='HSS'){
+    if(Number.isFinite(m.heightMm)&&Number.isFinite(m.widthMm))return `${len(m.heightMm)} × ${len(m.widthMm)}`;
+    if(Number.isFinite(m.outerDiameterMm))return `Ø ${len(m.outerDiameterMm)}`;
   }
+  if(type==='PIPE'&&Number.isFinite(m.outerDiameterMm))return `Ø ${len(m.outerDiameterMm)}`;
+  const d=Array.isArray(m?.standardDimensionsMm)?m.standardDimensionsMm:[];return d.length>=2?`${len(d[0])} × ${len(d[1])}`:'—';
+}
+function profileThicknessText(m){
+  const type=String(m?.type||''),len=profileLengthMm;
+  if(['W','M','S','HP','C','MC','WT','MT','ST'].includes(type)){const a=Number.isFinite(m.twMm)?`tw ${len(m.twMm)}`:null,b=Number.isFinite(m.tfMm)?`tf ${len(m.tfMm)}`:null;return [a,b].filter(Boolean).join(' · ')||'—';}
+  if(['L','2L'].includes(type)&&Number.isFinite(m.tMm))return `t ${len(m.tMm)}`;
+  if(type==='HSS'||type==='PIPE'){const nom=Number.isFinite(m.tNomMm)?`tnom ${len(m.tNomMm)}`:null,des=Number.isFinite(m.tDesMm)?`tdes ${len(m.tDesMm)}`:null,t=Number.isFinite(m.tMm)?`t ${len(m.tMm)}`:null;return [nom,des,t].filter(Boolean).slice(0,2).join(' · ')||'—';}
+  return '—';
+}
+function updateProfileStandardUI(){
+  const section=ensureProfileStandardSection();if(!section)return;
+  const active=Boolean(currentStepResult&&sheetMetalCapability.profile);section.hidden=!active;if(!active)return;
+  const m=currentProfileMatch,fields=[E.profileAiscLabel,E.profileMetricLabel,E.profileFamily,E.profileDimensions,E.profileThickness,E.profileArea,E.profileWeight,E.profileLength,E.profileTotalWeight,E.profileConfidence];
+  if(!m){fields.forEach(e=>{if(e)e.textContent='—';});if(E.profileAiscLabel)E.profileAiscLabel.textContent=FR?'Analyse locale…':'Local analysis…';if(E.profileSource)E.profileSource.textContent='AISC Shapes Database v16.0 · LOCAL';return;}
   if(E.profileAiscLabel)E.profileAiscLabel.textContent=m.imperialLabel||m.imperialEdi||'—';
   if(E.profileMetricLabel)E.profileMetricLabel.textContent=m.metricLabel||m.metricEdi||'—';
-  if(E.profileWeight)E.profileWeight.textContent=Number.isFinite(m.weightKgM)?`${m.weightKgM.toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:2})} kg/m`:'—';
+  if(E.profileFamily)E.profileFamily.textContent=m.type||'—';
+  if(E.profileDimensions)E.profileDimensions.textContent=profileDimensionsText(m);
+  if(E.profileThickness)E.profileThickness.textContent=profileThicknessText(m);
+  if(E.profileArea)E.profileArea.textContent=profileAreaMm2(m.areaMm2)||'—';
+  if(E.profileWeight){const kg=Number.isFinite(m.weightKgM)?`${m.weightKgM.toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:2})} kg/m`:null,lb=Number.isFinite(m.weightLbFt)?`${m.weightLbFt.toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:2})} ${FR?'lb/pi':'lb/ft'}`:null;E.profileWeight.textContent=[kg,lb].filter(Boolean).join(' · ')||'—';}
+  if(E.profileLength)E.profileLength.textContent=profileLengthMm(m.profileLengthMm)||'—';
+  if(E.profileTotalWeight){const mass=Number.isFinite(m.weightKgM)&&Number.isFinite(m.profileLengthMm)?m.weightKgM*m.profileLengthMm/1000:null;E.profileTotalWeight.textContent=Number.isFinite(mass)?`${mass.toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:2})} kg · ${(mass*2.2046226218).toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:2})} lb`:'—';}
   if(E.profileConfidence)E.profileConfidence.textContent=`${profileConfidenceLabel(m.level)} · ${Math.round((Number(m.confidence)||0)*100)} %`;
   if(E.profileSource)E.profileSource.textContent=`${m.sourceVersion||'AISC Shapes Database v16.0'} · LOCAL`;
 }
@@ -3892,6 +3932,7 @@ function updateDisplayedUnits() {
   E.statusUnits.textContent=label;
   E.propUnits.textContent=label;
   if(currentStepResult)syncSheetMetalInputs();
+  updateProfileStandardUI();
 }
 
 async function refreshMeasurementUnits() {
