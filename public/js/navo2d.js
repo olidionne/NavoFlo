@@ -2161,7 +2161,13 @@ function syncUI(){const has=Boolean(state.file);for(const b of[E.select,E.measur
 function clearFile(){closeDocument();}
 function toggleDrawer(which,force){const el=which==='layers'?E.layerDrawer:E.propDrawer,other=which==='layers'?E.propDrawer:E.layerDrawer;const show=force??el.hidden;el.hidden=!show;if(show)other.hidden=true;if(which==='properties'&&show)renderProperties();}
 
-function validatedDxfText(){
+function validatedDxfText(options={}){
+  // If the document has not been edited, never rewrite a perfectly good source DXF.
+  // This preserves AutoCAD-specific tables/blocks/entities that Navo2D may not edit yet.
+  if(options.preserveSource&&!state.dirty&&typeof state.rawText==='string'&&state.rawText.trim()){
+    const check=validateExportDxf(state.rawText);
+    return{text:state.rawText,written:check.entities,sourcePreserved:true};
+  }
   const result=writeDxf();
   const check=validateExportDxf(result.text);
   if(result.written!==state.entities.length||check.entities!==result.written)throw new Error(`DXF entity mismatch: model=${state.entities.length}, written=${result.written}, parsed=${check.entities}`);
@@ -2171,7 +2177,7 @@ function validatedDxfText(){
 async function saveDxf(forceSaveAs=false){
   if(!state.file)return;
   try{
-    const result=validatedDxfText();
+    const result=validatedDxfText({preserveSource:true});
     const doc=activeDocumentId?openDocuments.get(activeDocumentId):null;
     let handle=!forceSaveAs?doc?.fileHandle:null;
     if(!handle&&FSA_SAVE_SUPPORTED){
@@ -2184,7 +2190,7 @@ async function saveDxf(forceSaveAs=false){
       const name=state.file?.name||'Drawing.dxf';downloadBlob(result.text,name,'application/dxf');
     }
     state.rawText=result.text;state.dirty=false;saveActiveDocumentState();renderDocumentTabs();syncUI();
-    commandLog(`${forceSaveAs?'SAVEAS':'QSAVE'} OK · ${result.written}/${state.entities.length} ${T.entities}`);toast(FR?'DXF sauvegardé.':'DXF saved.');
+    commandLog(`${forceSaveAs?'SAVEAS':'QSAVE'} OK · ${result.sourcePreserved?'SOURCE PRESERVED · ':''}${result.written} ${T.entities}`);toast(result.sourcePreserved?(FR?'DXF sauvegardé sans réécriture.':'DXF saved without rewriting.'):(FR?'DXF sauvegardé.':'DXF saved.'));
   }catch(error){
     if(error?.name==='AbortError')return;console.error('Navo2D save failed',error);commandLog(`DXF SAVE ERROR · ${error?.message||error}`);toast(FR?'Sauvegarde DXF annulée.':'DXF save canceled.');
   }
@@ -2227,9 +2233,26 @@ function writeDxf(){
   add(9,'$CLAYER');add(8,safeDxfName(state.activeLayer||'0'));
   add(9,'$EXTMIN');add(10,bounds.minX||0);add(20,bounds.minY||0);add(30,0);
   add(9,'$EXTMAX');add(10,bounds.maxX||0);add(20,bounds.maxY||0);add(30,0);
+  const viewCx=((bounds.minX||0)+(bounds.maxX||0))/2,viewCy=((bounds.minY||0)+(bounds.maxY||0))/2;
+  const viewAspect=1.6,viewHeight=Math.max((bounds.height||1)*1.18,((bounds.width||1)/viewAspect)*1.18,1e-6);
+  add(9,'$VIEWCTR');add(10,viewCx);add(20,viewCy);
+  add(9,'$VIEWSIZE');add(40,viewHeight);
+  add(9,'$LIMMIN');add(10,bounds.minX||0);add(20,bounds.minY||0);
+  add(9,'$LIMMAX');add(10,bounds.maxX||0);add(20,bounds.maxY||0);
+  add(9,'$TILEMODE');add(70,1);
   add(0,'ENDSEC');
 
   add(0,'SECTION');add(2,'TABLES');
+  // Active model-space viewport so AutoCAD opens directly on the drawing instead of an arbitrary default view.
+  add(0,'TABLE');add(2,'VPORT');add(70,1);
+  add(0,'VPORT');add(2,'*ACTIVE');add(70,0);
+  add(10,0);add(20,0);add(11,1);add(21,1);
+  add(12,viewCx);add(22,viewCy);add(13,0);add(23,0);
+  add(14,10);add(24,10);add(15,10);add(25,10);
+  add(16,0);add(26,0);add(36,1);add(17,0);add(27,0);add(37,0);
+  add(40,viewHeight);add(41,viewAspect);add(42,50);add(43,0);add(44,0);add(50,0);add(51,0);
+  add(71,0);add(72,1000);add(73,1);add(74,3);add(75,0);add(76,0);add(77,0);add(78,0);
+  add(0,'ENDTAB');
   add(0,'TABLE');add(2,'LTYPE');add(70,1);
   add(0,'LTYPE');add(2,'CONTINUOUS');add(70,0);add(3,'Solid line');add(72,65);add(73,0);add(40,0.0);
   add(0,'ENDTAB');
@@ -2248,14 +2271,27 @@ function writeDxf(){
   add(0,'ENDTAB');
   add(0,'ENDSEC');
 
+  // Keep the canonical R12 section ordering expected by desktop CAD applications.
+  add(0,'SECTION');add(2,'BLOCKS');add(0,'ENDSEC');
+
   add(0,'SECTION');add(2,'ENTITIES');
   let written=0;
   for(const entity of state.entities){
+    validateEntityForDxf(entity);
     if(writeEntity(add,entity))written++;
     else throw new Error(`Unsupported export entity: ${entity?.type||'UNKNOWN'} (${entity?.id||'?'})`);
   }
   add(0,'ENDSEC');add(0,'EOF');
   return{text:lines.join('\r\n')+'\r\n',written};
+}
+function validateEntityForDxf(e){
+  const finite=(v,label)=>{if(!Number.isFinite(Number(v)))throw new Error(`Invalid DXF number ${label}: ${v}`);};
+  const point=(q,label)=>{if(!q)throw new Error(`Missing DXF point ${label}`);finite(q.x,`${label}.x`);finite(q.y,`${label}.y`);};
+  if(!e||!e.type)throw new Error('Invalid empty DXF entity.');
+  if(e.type==='LINE'){point(e.p1,'LINE.p1');point(e.p2,'LINE.p2');return;}
+  if(e.type==='CIRCLE'||e.type==='ARC'){point(e.center,`${e.type}.center`);finite(e.radius,`${e.type}.radius`);if(!(Math.abs(Number(e.radius))>1e-12))throw new Error(`${e.type} radius is zero.`);if(e.type==='ARC'){finite(e.start,'ARC.start');finite(e.end,'ARC.end');}return;}
+  if(e.type==='POINT'||e.type==='TEXT'){point(e.point,`${e.type}.point`);if(e.type==='TEXT'){finite(e.height??2.5,'TEXT.height');finite(e.rotation??0,'TEXT.rotation');}return;}
+  if(e.type==='POLYLINE'){if(!Array.isArray(e.points)||e.points.length<2)throw new Error('POLYLINE has fewer than 2 vertices.');for(let i=0;i<e.points.length;i++){point(e.points[i],`POLYLINE[${i}]`);finite(e.points[i].bulge??0,`POLYLINE[${i}].bulge`);}return;}
 }
 function writeEntity(add,e){
   const layer=safeDxfName(e.layer||'0');
