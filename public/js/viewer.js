@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.6';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.7';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -75,7 +75,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.17.6';
+const WORKER_URL = '/js/step-worker.js?v=8.17.7';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -3398,40 +3398,97 @@ function updatePickingVisibility() {
 }
 
 
-// V8.17.6 — solid-looking STEP section caps.
-// STEP is already retained as an exact OCCT B-Rep solid. Three.js renders the
-// boundary triangles, so a GPU clipping plane normally exposes an apparently
-// hollow shell. The stencil pass below closes the visual section without voxel
-// conversion or modifying the exact model/topology used for measurement.
+// V8.17.7 — exact-size visual section caps from the actual triangulated solid.
+//
+// V8.17.6 used an infinite/oversized stencil plane.  Because Navo3D stores the
+// displayed B-Rep skin as multiple face meshes, a stencil imbalance could make
+// the entire helper plane visible.  Here we intersect the real displayed
+// triangles with the clipping plane, weld the intersection segments into closed
+// loops, detect holes by nesting, and triangulate only the true cross-section.
 function clearSectionCaps(){
   if(!sectionCapRoot)return;scene?.remove(sectionCapRoot);
-  sectionCapRoot.traverse(object=>{
-    if(object.material){const materials=Array.isArray(object.material)?object.material:[object.material];materials.forEach(m=>m?.dispose?.());}
-    if(object.userData?.sectionCapPlane)object.geometry?.dispose?.();
-  });
+  sectionCapRoot.traverse(object=>{object.geometry?.dispose?.();if(object.material){for(const m of (Array.isArray(object.material)?object.material:[object.material]))m?.dispose?.();}});
   sectionCapRoot=null;sectionCapPlaneMesh=null;
 }
-function sectionStencilMaterial(side,operation){
-  const m=new THREE.MeshBasicMaterial({depthWrite:false,depthTest:false,colorWrite:false,side,clippingPlanes:[clipPlane]});
-  m.stencilWrite=true;m.stencilFunc=THREE.AlwaysStencilFunc;m.stencilFail=operation;m.stencilZFail=operation;m.stencilZPass=operation;return m;
+function sectionPlaneBasis(normal){
+  const n=normal.clone().normalize(),ref=Math.abs(n.z)<.9?new THREE.Vector3(0,0,1):new THREE.Vector3(0,1,0);
+  const u=new THREE.Vector3().crossVectors(ref,n).normalize(),v=new THREE.Vector3().crossVectors(n,u).normalize();return{n,u,v};
 }
-function updateSectionCapTransform(){
-  if(!sectionCapPlaneMesh)return;clipPlane.coplanarPoint(sectionCapPlaneMesh.position);
-  const n=clipPlane.normal.clone().normalize();sectionCapPlaneMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),n);sectionCapPlaneMesh.updateMatrix();
+function sectionPointKey(p,tol){return `${Math.round(p.x/tol)},${Math.round(p.y/tol)},${Math.round(p.z/tol)}`;}
+function sectionTriangleSegment(a,b,c,plane,tol){
+  const pts=[a,b,c],d=pts.map(p=>plane.distanceToPoint(p));
+  if(d.every(x=>x>tol)||d.every(x=>x<-tol))return null;
+  if(d.every(x=>Math.abs(x)<=tol))return null; // coplanar face: neighbouring faces define the section boundary
+  const hits=[];
+  const add=p=>{if(!hits.some(q=>q.distanceToSquared(p)<=tol*tol))hits.push(p);};
+  for(let i=0;i<3;i++){
+    const j=(i+1)%3,p=pts[i],q=pts[j],dp=d[i],dq=d[j];
+    if(Math.abs(dp)<=tol)add(p.clone());
+    if((dp>tol&&dq<-tol)||(dp<-tol&&dq>tol))add(p.clone().lerp(q,dp/(dp-dq)));
+  }
+  if(hits.length<2)return null;
+  let best=[hits[0],hits[1]],bestD=best[0].distanceToSquared(best[1]);
+  for(let i=0;i<hits.length;i++)for(let j=i+1;j<hits.length;j++){const dd=hits[i].distanceToSquared(hits[j]);if(dd>bestD){best=[hits[i],hits[j]];bestD=dd;}}
+  return bestD>tol*tol?best:null;
 }
-function buildSectionCaps(){
-  clearSectionCaps();if(!clipEnabled||flatPatternActive||!currentModel||!surfaceMeshes.length)return;
-  const root=new THREE.Group();root.name='NavoFlo Solid Section Cap';let count=0;
+function sectionIntersectionSegments(){
+  const tol=Math.max(modelSize*2e-6,1e-6),segments=[],dedupe=new Set(),a=new THREE.Vector3(),b=new THREE.Vector3(),c=new THREE.Vector3();
   for(const source of surfaceMeshes){
     if(!source?.isMesh||!source.geometry||source.userData?.flatPatternSelection)continue;
-    source.updateWorldMatrix?.(true,false);
-    const back=new THREE.Mesh(source.geometry,sectionStencilMaterial(THREE.BackSide,THREE.IncrementWrapStencilOp));back.matrix.copy(source.matrixWorld);back.matrixAutoUpdate=false;back.renderOrder=90;back.userData.sectionStencil=true;root.add(back);
-    const front=new THREE.Mesh(source.geometry,sectionStencilMaterial(THREE.FrontSide,THREE.DecrementWrapStencilOp));front.matrix.copy(source.matrixWorld);front.matrixAutoUpdate=false;front.renderOrder=90;front.userData.sectionStencil=true;root.add(front);count++;
+    source.updateWorldMatrix?.(true,false);const g=source.geometry,pos=g.getAttribute('position'),idx=g.index;
+    if(!pos)continue;const triCount=idx?idx.count/3:pos.count/3;
+    for(let t=0;t<triCount;t++){
+      const ia=idx?idx.getX(t*3):t*3,ib=idx?idx.getX(t*3+1):t*3+1,ic=idx?idx.getX(t*3+2):t*3+2;
+      a.fromBufferAttribute(pos,ia).applyMatrix4(source.matrixWorld);b.fromBufferAttribute(pos,ib).applyMatrix4(source.matrixWorld);c.fromBufferAttribute(pos,ic).applyMatrix4(source.matrixWorld);
+      const seg=sectionTriangleSegment(a,b,c,clipPlane,tol);if(!seg)continue;
+      const ka=sectionPointKey(seg[0],tol),kb=sectionPointKey(seg[1],tol),key=ka<kb?`${ka}|${kb}`:`${kb}|${ka}`;if(dedupe.has(key))continue;dedupe.add(key);segments.push({a:seg[0].clone(),b:seg[1].clone(),ka,kb});
+    }
   }
-  if(!count)return;
-  const size=Math.max(modelSize*4,1),geometry=new THREE.PlaneGeometry(size,size),material=new THREE.MeshStandardMaterial({color:0xaeb8bc,metalness:0.06,roughness:0.62,side:THREE.DoubleSide,depthWrite:true,depthTest:true,polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1});
-  material.stencilWrite=true;material.stencilRef=0;material.stencilFunc=THREE.NotEqualStencilFunc;material.stencilFail=THREE.ReplaceStencilOp;material.stencilZFail=THREE.ReplaceStencilOp;material.stencilZPass=THREE.ReplaceStencilOp;
-  const cap=new THREE.Mesh(geometry,material);cap.renderOrder=91;cap.userData.sectionCapPlane=true;root.add(cap);sectionCapRoot=root;sectionCapPlaneMesh=cap;scene.add(root);updateSectionCapTransform();
+  return{segments,tol};
+}
+function sectionLoopsFromSegments(segments,tol){
+  const nodes=new Map(),edges=[];
+  const node=(key,p)=>{if(!nodes.has(key))nodes.set(key,{key,p:p.clone(),edges:[]});return nodes.get(key);};
+  for(const s of segments){const na=node(s.ka,s.a),nb=node(s.kb,s.b),ei=edges.length;edges.push({a:na,b:nb,used:false});na.edges.push(ei);nb.edges.push(ei);}
+  const loops=[];
+  for(let seed=0;seed<edges.length;seed++){
+    if(edges[seed].used)continue;const e0=edges[seed];e0.used=true;let start=e0.a,prev=start,current=e0.b;const pts=[start.p.clone(),current.p.clone()];let guard=0;
+    while(current!==start&&guard++<edges.length+8){
+      const candidates=current.edges.filter(i=>!edges[i].used);if(!candidates.length)break;
+      let chosen=candidates[0];
+      if(candidates.length>1){
+        const incoming=current.p.clone().sub(prev.p).normalize();let best=-Infinity;
+        for(const i of candidates){const e=edges[i],next=e.a===current?e.b:e.a,dir=next.p.clone().sub(current.p).normalize(),score=incoming.dot(dir);if(score>best){best=score;chosen=i;}}
+      }
+      const e=edges[chosen];e.used=true;const next=e.a===current?e.b:e.a;prev=current;current=next;if(current!==start)pts.push(current.p.clone());
+    }
+    if(current===start&&pts.length>=3){
+      const cleaned=[];for(const p of pts){if(!cleaned.length||cleaned.at(-1).distanceToSquared(p)>tol*tol)cleaned.push(p);}if(cleaned.length>=3)loops.push(cleaned);
+    }
+  }
+  return loops;
+}
+function polygonArea2D(poly){let a=0;for(let i=0,j=poly.length-1;i<poly.length;j=i++)a+=(poly[j].x*poly[i].y-poly[i].x*poly[j].y);return a/2;}
+function pointInPoly2D(p,poly){let inside=false;for(let i=0,j=poly.length-1;i<poly.length;j=i++){const a=poly[i],b=poly[j],hit=((a.y>p.y)!==(b.y>p.y))&&(p.x<(b.x-a.x)*(p.y-a.y)/(b.y-a.y||1e-30)+a.x);if(hit)inside=!inside;}return inside;}
+function buildSectionCaps(){
+  clearSectionCaps();if(!clipEnabled||flatPatternActive||!currentModel||!surfaceMeshes.length)return;
+  const {segments,tol}=sectionIntersectionSegments();if(!segments.length)return;const loops3=sectionLoopsFromSegments(segments,tol);if(!loops3.length)return;
+  const basis=sectionPlaneBasis(clipPlane.normal),origin=new THREE.Vector3();clipPlane.coplanarPoint(origin);
+  const loops=loops3.map(points3=>({points3,points2:points3.map(p=>{const d=p.clone().sub(origin);return new THREE.Vector2(d.dot(basis.u),d.dot(basis.v));})})).filter(l=>Math.abs(polygonArea2D(l.points2))>tol*tol);
+  loops.sort((a,b)=>Math.abs(polygonArea2D(b.points2))-Math.abs(polygonArea2D(a.points2)));
+  for(let i=0;i<loops.length;i++){let depth=0,parent=-1;for(let j=0;j<i;j++)if(pointInPoly2D(loops[i].points2[0],loops[j].points2)){depth++;if(parent<0)parent=j;}loops[i].depth=depth;loops[i].parent=parent;}
+  const positions=[];
+  for(let i=0;i<loops.length;i++){
+    const outer=loops[i];if(outer.depth%2)continue;let contour=outer.points2.slice();if(polygonArea2D(contour)<0)contour.reverse();
+    const holes=[];for(let j=0;j<loops.length;j++)if(loops[j].depth===outer.depth+1&&loops[j].parent===i){let h=loops[j].points2.slice();if(polygonArea2D(h)>0)h.reverse();holes.push(h);}
+    const faces=THREE.ShapeUtils.triangulateShape(contour,holes),all=[...contour,...holes.flat()];
+    for(const tri of faces)for(const vi of tri){const q=all[vi],p=origin.clone().addScaledVector(basis.u,q.x).addScaledVector(basis.v,q.y);positions.push(p.x,p.y,p.z);}
+  }
+  if(!positions.length)return;
+  const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));geometry.computeVertexNormals();
+  const material=new THREE.MeshStandardMaterial({color:0x93a0a5,metalness:0.04,roughness:0.68,side:THREE.DoubleSide,depthWrite:true,depthTest:true,polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1});
+  const cap=new THREE.Mesh(geometry,material);cap.name='NavoFlo exact section cap';cap.renderOrder=20;cap.userData.sectionCapPlane=true;
+  const root=new THREE.Group();root.name='NavoFlo Solid Section Cap';root.add(cap);sectionCapRoot=root;sectionCapPlaneMesh=cap;scene.add(root);
 }
 
 function updateClipping() {
@@ -3455,7 +3512,7 @@ function updateClipping() {
       material.needsUpdate=true;
     });
   });
-  if(clipEnabled){if(!sectionCapRoot)buildSectionCaps();else updateSectionCapTransform();if(sectionCapRoot)sectionCapRoot.visible=!flatPatternActive;}
+  if(clipEnabled){buildSectionCaps();if(sectionCapRoot)sectionCapRoot.visible=!flatPatternActive;}
   else clearSectionCaps();
 }
 

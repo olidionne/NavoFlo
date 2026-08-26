@@ -1,7 +1,7 @@
-import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.6';
+import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.7';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.17.6
+ * NavoFlo Sheet Metal Engine — V8.17.7
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -393,7 +393,11 @@ function detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag){
     for(const p of points){const pn=V3.dot(p,basis.n),pu=V3.dot(p,basis.u),pv=V3.dot(p,basis.v);minN=Math.min(minN,pn);maxN=Math.max(maxN,pn);minU=Math.min(minU,pu);maxU=Math.max(maxU,pu);minV=Math.min(minV,pv);maxV=Math.max(maxV,pv);}
     // Both cap planes must be the global support planes of the entire solid.
     if(Math.abs(lo-minN)>supportTol||Math.abs(hi-maxN)>supportTol)continue;
-    const inPlaneSpan=Math.max(maxU-minU,maxV-minV);if(!(inPlaneSpan>supportTol)||thickness>inPlaneSpan*0.75)continue;
+    const spanU=maxU-minU,spanV=maxV-minV,inPlaneSpan=Math.max(spanU,spanV),minorInPlaneSpan=Math.min(spanU,spanV);
+    // A plate must be thin relative to both in-plane dimensions.  Looking only
+    // at the major span can misclassify a long HSS / bar as a "flat plate" by
+    // treating two opposite longitudinal walls as the plate skins.
+    if(!(inPlaneSpan>supportTol&&minorInPlaneSpan>supportTol)||thickness>inPlaneSpan*0.75||thickness>minorInPlaneSpan*0.65)continue;
     const areaA=Number(a.stats.area)||0,areaB=Number(b.stats.area)||0,areaRatio=Math.min(areaA,areaB)/Math.max(areaA,areaB,EPS);
     // The cap pair must be a dominant skin pair. This rejects small parallel
     // machining faces that happen to sit at an extremum.
@@ -465,6 +469,24 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   const coverage=median(longEdges.map(e=>Math.min(1,e.length/length)))||0;
   const confidence=clamp(0.45+Math.min((aspect-2.45)/6,0.25)+Math.min((longEdges.length-5)/20,0.15)+Math.min(Math.max(sideAreaRatio-0.52,0)*0.35,0.15),0,1);
   return{kind:'constant-section-profile',axis:basis.n,length,crossSpan,spanU,spanV,aspect,longEdgeCount:longEdges.length,traceCount:traceKeys.size,sideAreaRatio,coverage,confidence};
+}
+
+// V8.17.7 — manufacturing-neutral geometry arbitration.
+// A long press-brake part and a stock roll-formed/extruded profile can share the
+// same constant-section envelope.  When a profile-like body contains a true
+// inner/outer bend pair whose radius delta equals the sheet thickness, that is
+// much stronger evidence of unfoldable sheet-metal topology than aspect ratio.
+function strongPairedBendEvidence(candidateBends,cylinders,thickness,tol){
+  const t=Number(thickness);if(!(t>tol*20))return{ok:false,pairs:0};
+  const candidateIds=new Set((candidateBends||[]).map(c=>c.id)),seen=new Set();let pairs=0;
+  const allowed=Math.max(t*0.06,tol*80);
+  for(const a of candidateBends||[])for(const b of cylinders||[]){
+    if(a===b||!candidateIds.has(b.id)||!sameAxisLine(a,b,tol))continue;
+    const key=[String(a.id),String(b.id)].sort().join('|');if(seen.has(key))continue;seen.add(key);
+    const delta=Math.abs(Number(a.radius)-Number(b.radius));
+    if(Math.abs(delta-t)<=allowed)pairs++;
+  }
+  return{ok:pairs>0,pairs,thickness:t,tolerance:allowed};
 }
 
 function cylinderPartner(cyl,cylinders,thickness,tol){
@@ -825,9 +847,6 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   // selected fixed face remains a true expert override.
   const exactFlatPrism=!hasRequestedFixed?detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag):null;
   const structuralProfile=!hasRequestedFixed&&!exactFlatPrism?detectStructuralProfileExtrusion(geometry,ctx,tol,diag):null;
-  if(structuralProfile){
-    return{ok:false,code:'structural-profile',message:'A long constant-section profile/extrusion was detected; sheet-metal unfolding is intentionally suppressed.',profile:true,profileType:structuralProfile.kind,profile:structuralProfile,diagnostics:{structuralProfile}};
-  }
 
   let rejectedNonBendCylinders=0;
   const candidateBends=exactFlatPrism?[]:cylinders.map(c=>{
@@ -837,6 +856,12 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
     if(!pair){rejectedNonBendCylinders++;return null;}
     candidate.boundaries=[pair.a,pair.b];candidate.pairGeometry=pair.geom;return candidate;
   }).filter(Boolean);
+
+  const planarThicknessPreflight=detectPlanarThickness(planarGroups,tol);
+  const pairedBendEvidence=structuralProfile?strongPairedBendEvidence(candidateBends,cylinders,planarThicknessPreflight?.value,tol):{ok:false,pairs:0};
+  if(structuralProfile&&!pairedBendEvidence.ok){
+    return{ok:false,code:'structural-profile',message:'A long constant-section profile/extrusion was detected; sheet-metal unfolding is intentionally suppressed.',profile:true,profileType:structuralProfile.kind,profile:structuralProfile,diagnostics:{structuralProfile,pairedBendEvidence}};
+  }
 
   let fixed=requestedFixed,fixedGroupId=null,fixedPanel=null,fixedWasAutomatic=false;
   if(hasRequestedFixed){
@@ -862,7 +887,7 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   // planar skins before any cylindrical radius pairing. Counterbores, concentric
   // holes and machined circular details can otherwise look like a thickness pair
   // even though the part is simply a flat plate ready for DXF.
-  const planarThickness=detectPlanarThickness(planarGroups,tol);
+  const planarThickness=planarThicknessPreflight;
   const cylindricalThickness=detectThickness(cylinders,tol);
   const exactFlatThickness=exactFlatPrism?{value:exactFlatPrism.value,count:2,samples:2,confidence:1,source:exactFlatPrism.source,groups:exactFlatPrism.groups}:null;
   const autoThickness=exactFlatThickness||((candidateBends.length===0&&planarThickness)?planarThickness:(cylindricalThickness||planarThickness));
@@ -940,5 +965,5 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const primitivesClosed=boundaryPrimitivesClosed(boundaryPrimitives,Math.max(resolvedThickness*1e-5,1e-6));
   if(!primitivesClosed)warnings.push('Exact CUT primitives contain an open chain; DXF export will use the welded mesh boundary as a safe fallback.');
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 2.0',fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,selectionFaces,boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines,bounds,warnings,cycleLinks,cycleClosures,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 2.0',fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,selectionFaces,boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines,bounds,warnings,cycleLinks,cycleClosures,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol,structuralProfile:structuralProfile||null,pairedBendEvidence}};
 }
