@@ -437,6 +437,38 @@ function isStraight2D(points,tol){
   for(const p of points){const ap=V2.sub(p,a),t=V2.dot(ap,u),q=V2.add(a,V2.scale(u,t));err=Math.max(err,V2.dist(p,q));}return err<=Math.max(tol*5,len*1e-5);
 }
 function ccwSweep(a,b){let d=(b-a)%TAU;if(d<0)d+=TAU;return d;}
+function angleInsideCcwSweep(start,end,angle,eps=1e-5){
+  const sweep=ccwSweep(start,end),pos=ccwSweep(start,angle);
+  return pos<=sweep+eps;
+}
+function chooseCircularArcDirection(start,end,samplePoints,center,desiredSweep){
+  // A DXF ARC is always drawn counter-clockwise from group 50 to group 51.
+  // For a 180° arc, start->end and end->start both have exactly the same length,
+  // so edge length alone cannot tell us which semicircle is the real one. Use the
+  // OCCT tessellated interior points to determine on which side of the chord the
+  // B-Rep arc actually lies; keep exact length as a fallback/tie-breaker.
+  const sampleAngles=(samplePoints||[])
+    .map(p=>Math.atan2(p[1]-center[1],p[0]-center[0]))
+    .filter(Number.isFinite);
+  const score=(a,b)=>{
+    const sweep=ccwSweep(a,b);let inside=0,outside=0;
+    for(const t of sampleAngles){
+      // Ignore samples effectively on either endpoint; they do not discriminate
+      // between the two possible DXF semicircles.
+      const da=Math.min(ccwSweep(a,t),ccwSweep(t,a));
+      const db=Math.min(ccwSweep(b,t),ccwSweep(t,b));
+      if(Math.min(da,db)<1e-4)continue;
+      if(angleInsideCcwSweep(a,b,t))inside++;else outside++;
+    }
+    const lengthError=Number.isFinite(desiredSweep)?Math.abs(sweep-desiredSweep):0;
+    return{a,b,inside,outside,lengthError,sweep};
+  };
+  const ab=score(start,end),ba=score(end,start);
+  if(ab.inside!==ba.inside)return ab.inside>ba.inside?ab:ba;
+  if(ab.outside!==ba.outside)return ab.outside<ba.outside?ab:ba;
+  if(Math.abs(ab.lengthError-ba.lengthError)>1e-8)return ab.lengthError<ba.lengthError?ab:ba;
+  return ab;
+}
 function boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,tol,planarGroups){
   const bendByFace=new Map(),skinFaces=new Set();for(const groupId of panelMaps.keys())for(const fid of planarGroups.byId.get(groupId)?.faceIds||[])skinFaces.add(Number(fid));for(const bend of usedBends)for(const fid of bend.cyl.faceIds){bendByFace.set(Number(fid),bend);skinFaces.add(Number(fid));}
   const primitives=[];
@@ -447,11 +479,16 @@ function boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,tol,planarGr
     if(panelMap&&['circle','circular'].includes(ef)&&Number.isFinite(Number(info.radius))&&Array.isArray(info.localCenter)){
       const center=mapPoint(panelMap,info.localCenter.map(Number).slice(0,3)),radius=Number(info.radius),length=Number(info.length),desired=Number.isFinite(length)&&radius>EPS?length/radius:NaN;
       if(Number.isFinite(desired)&&Math.abs(desired-TAU)<=1e-3){primitives.push({kind:'circle',center,radius,edgeId:eid});continue;}
-      const start=Math.atan2(mapped[0][1]-center[1],mapped[0][0]-center[0]),end=Math.atan2(mapped.at(-1)[1]-center[1],mapped.at(-1)[0]-center[0]);
-      const sweepAB=ccwSweep(start,end),sweepBA=ccwSweep(end,start);let a=start,b=end;if(Number.isFinite(desired)&&Math.abs(sweepBA-desired)<Math.abs(sweepAB-desired)){a=end;b=start;}
-      primitives.push({kind:'arc',center,radius,startRad:a,endRad:b,edgeId:eid});continue;
+      const exactPts=exactEdgePoints(ctx,edge),mappedExact=exactPts.map(p=>mapPoint(panelMap,p));
+      const a0=mappedExact[0]||mapped[0],b0=mappedExact.at(-1)||mapped.at(-1);
+      const start=Math.atan2(a0[1]-center[1],a0[0]-center[0]),end=Math.atan2(b0[1]-center[1],b0[0]-center[0]);
+      const chosen=chooseCircularArcDirection(start,end,mapped.slice(1,-1),center,desired);
+      primitives.push({kind:'arc',center,radius,startRad:chosen.a,endRad:chosen.b,edgeId:eid});continue;
     }
-    if(['line','linear'].includes(ef)||isStraight2D(mapped,tol)){primitives.push({kind:'line',a:mapped[0],b:mapped.at(-1),edgeId:eid});continue;}
+    if(['line','linear'].includes(ef)||isStraight2D(mapped,tol)){
+      const exactPts=exactEdgePoints(ctx,edge),exactMapped=exactPts.map(p=>panelMap?mapPoint(panelMap,p):mapBendPoint(bendMap,p));
+      primitives.push({kind:'line',a:exactMapped[0]||mapped[0],b:exactMapped.at(-1)||mapped.at(-1),edgeId:eid});continue;
+    }
     primitives.push({kind:'polyline',points:mapped,edgeId:eid});
   }
   return primitives;
@@ -535,6 +572,6 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
   if(!triangles.length||!boundaryEdges.length)return{ok:false,code:'flat-empty',message:'The flat pattern could not be reconstructed.',warnings};
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 1.6',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 1.7',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
 }
 
