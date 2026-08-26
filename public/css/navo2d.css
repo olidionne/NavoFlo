@@ -376,3 +376,38 @@ body.n2-focus-mode{overflow:hidden}
 .n2-commandline.history-expanded{min-height:230px;grid-template-rows:minmax(160px,1fr) 36px;overflow:visible}
 .n2-commandline.history-expanded .n2-command-history{white-space:pre-wrap;overflow:auto;text-overflow:clip;line-height:1.55;scrollbar-width:thin}
 @media(max-width:820px){.n2-commandline.history-expanded{min-height:190px;grid-template-rows:minmax(130px,1fr) 36px}.n2-commandline.history-expanded .n2-command-history{display:block}}
+
+
+/* V8.15.5 — AutoCAD-like MTEXT editor */
+.n2-mtext-editor{
+  position:fixed;z-index:245;box-sizing:border-box;display:flex;flex-direction:column;
+  min-width:240px;min-height:120px;overflow:hidden;
+  border:1px solid rgba(110,185,255,.78);border-radius:3px;
+  background:rgba(8,14,19,.93);box-shadow:0 14px 44px rgba(0,0,0,.48);
+  backdrop-filter:blur(10px);
+}
+.n2-mtext-toolbar{
+  flex:0 0 auto;min-height:34px;display:flex;align-items:center;gap:6px;padding:4px 6px;
+  border-bottom:1px solid rgba(255,255,255,.09);background:rgba(18,25,31,.98);
+  color:#cdd8de;font:750 9.5px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+.n2-mtext-toolbar strong{color:#7bc4ff;margin-right:3px;letter-spacing:.06em}
+.n2-mtext-toolbar label{display:flex;align-items:center;gap:4px;color:#81939d;white-space:nowrap}
+.n2-mtext-toolbar input,.n2-mtext-toolbar select{
+  box-sizing:border-box;height:24px;min-width:46px;max-width:72px;padding:0 5px;
+  border:1px solid rgba(255,255,255,.12);border-radius:3px;outline:0;
+  background:#071017;color:#dce7ec;font:750 9.5px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+.n2-mtext-toolbar select{min-width:50px}
+.n2-mtext-toolbar button{
+  width:27px;height:25px;border:1px solid rgba(255,255,255,.11);border-radius:3px;
+  background:rgba(255,255,255,.035);color:#b7c5cc;font-weight:900;cursor:pointer;
+}
+.n2-mtext-toolbar button[data-mt-save]{margin-left:auto;border-color:rgba(53,211,154,.4);background:rgba(53,211,154,.13);color:#62e2b3}
+.n2-mtext-toolbar button:hover{background:rgba(255,255,255,.08);color:#fff}
+.n2-mtext-editor textarea{
+  flex:1;box-sizing:border-box;width:100%;min-height:86px;padding:8px 9px;resize:none;
+  border:0;outline:0;background:rgba(5,10,14,.72);color:#edf4f7;
+  font:500 13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  caret-color:#35d39a;
+}
