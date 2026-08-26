@@ -168,6 +168,34 @@ function buildPlanarGroups(geometry,ctx,tol){
   const byId=new Map(groups.map(g=>[g.id,g]));return{groups,byId,faceToGroup};
 }
 
+function planeCylinderTangency(cyl,panel,tol){
+  const axis=V3.unit(cyl?.axis),n=V3.unit(panel?.stats?.normal),pc=panel?.stats?.centroid,center=cyl?.center,radius=Number(cyl?.radius);
+  if(!axis||!n||!pc||!center||!Number.isFinite(radius)||radius<=0)return null;
+  // Same principle used by mature sheet-metal unfolders: a true plane/cylinder
+  // bend connection is identified from the exact surfaces, not from how the
+  // shared edge happened to be tessellated or classified. The cylinder axis
+  // lies in the flange plane, and the distance from the axis to the plane is R.
+  const axisDot=Math.abs(V3.dot(axis,n));
+  const signedDistance=V3.dot(V3.sub(center,pc),n);
+  const radialError=Math.abs(Math.abs(signedDistance)-radius);
+  const angularTol=0.025; // ~1.43 deg; intentionally tolerant of imported STEP noise.
+  const distanceTol=Math.max(tol*120,Math.abs(radius)*2e-4,1e-6);
+  if(axisDot>angularTol||radialError>distanceTol)return null;
+  // Orthogonal projection of any point on the cylinder axis onto the tangent
+  // plane gives a point on the theoretical line of contact.
+  const contactBase=V3.sub(center,V3.scale(n,signedDistance));
+  return{axis,n,signedDistance,radialError,axisDot,contactBase,distanceTol};
+}
+
+function axisExtentFromPoints(points,axis){
+  const vals=(points||[]).filter(p=>Array.isArray(p)&&p.length>=3&&p.every(Number.isFinite)).map(p=>V3.dot(p,axis));
+  if(!vals.length)return null;return{min:Math.min(...vals),max:Math.max(...vals)};
+}
+
+function contactPointAtAxis(contactBase,axis,axisValue){
+  return V3.add(contactBase,V3.scale(axis,axisValue-V3.dot(contactBase,axis)));
+}
+
 function buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups){
   const grouped=new Set(),groups=[];
   for(const raw of logicalGroups||[]){
@@ -178,28 +206,54 @@ function buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups){
 
   return groups.map((faceIds,index)=>{
     const first=ctx.infoById.get(faceIds[0])||{},axis=V3.unit(first.axisDirection||first.localAxisDirection||[])||null,center=(first.center||first.localCenter||[]).map(Number).slice(0,3),radius=Number(first.radius);
-    if(!axis||center.length<3||!Number.isFinite(radius))return null;
-    const faceSet=new Set(faceIds),edgeIds=new Set();for(const fid of faceIds){for(const eid of ctx.faceById.get(fid)?.edgeIndices||[])edgeIds.add(Number(eid));}
+    if(!axis||center.length<3||!center.every(Number.isFinite)||!Number.isFinite(radius))return null;
+    const faceSet=new Set(faceIds),edgeIds=new Set();
+    for(const fid of faceIds){for(const eid of ctx.faceById.get(fid)?.edgeIndices||[])edgeIds.add(Number(eid));}
+
+    // Build adjacency from *every shared B-Rep edge*. Do not require the edge to
+    // already be tagged LINE or to contain a usable tessellation. FreeCAD's V2
+    // unfolder follows the same robust pattern: shared-face graph first, exact
+    // surface tangency second. This is the critical V8.16.6 change.
     const neighborEdges=new Map();
     for(const eid of edgeIds){
-      const edge=ctx.edgeById.get(eid);if(!edge||!exactStraightEdge(ctx,edge,tol))continue;
-      const edir=exactStraightEdgeDirection(ctx,edge)||axis;if(Math.abs(V3.dot(edir,axis))<0.985)continue;
       for(const owner of ctx.edgeOwnersById.get(eid)||[]){
-        const oid=Number(owner);if(faceSet.has(oid)||!isPlanar(ctx.infoById.get(oid)?.family))continue;const groupId=planarGroups.faceToGroup.get(oid);if(!groupId)continue;
-        if(!neighborEdges.has(groupId))neighborEdges.set(groupId,new Map());neighborEdges.get(groupId).set(eid,edge);
+        const oid=Number(owner);if(faceSet.has(oid)||!isPlanar(ctx.infoById.get(oid)?.family))continue;
+        const groupId=planarGroups.faceToGroup.get(oid);if(!groupId)continue;
+        if(!neighborEdges.has(groupId))neighborEdges.set(groupId,new Set());neighborEdges.get(groupId).add(eid);
       }
     }
+
+    // Global axial extent is a reliable fallback for split or oddly classified
+    // shared edges. It uses all exact edge endpoints available on the cylinder.
+    const allCylinderPoints=[];
+    for(const eid of edgeIds){const e=ctx.edgeById.get(eid);if(e)allCylinderPoints.push(...exactEdgePoints(ctx,e));}
+    const globalExtent=axisExtentFromPoints(allCylinderPoints,axis);
+
     const boundaries=[];
-    for(const [groupId,edgeMap] of neighborEdges){
-      const edges=[...edgeMap.values()],panel=planarGroups.byId.get(groupId);if(!panel)continue;
-      let points=edges.flatMap(e=>exactEdgePoints(ctx,e)),length=edges.reduce((s,e)=>s+exactStraightEdgeLength(ctx,e),0);
-      if(points.length<2){
-        const n=V3.unit(panel.stats.normal),pc=panel.stats.centroid;if(!n||!pc||!(length>tol))continue;
-        const q=V3.add(center,V3.scale(axis,V3.dot(V3.sub(pc,center),axis))),signedPlane=V3.dot(V3.sub(pc,q),n),midExact=V3.add(q,V3.scale(n,signedPlane)),half=length/2;
-        points=[V3.sub(midExact,V3.scale(axis,half)),V3.add(midExact,V3.scale(axis,half))];
+    for(const [groupId,eidSet] of neighborEdges){
+      const panel=planarGroups.byId.get(groupId);if(!panel)continue;
+      const tangent=planeCylinderTangency({axis,center,radius},panel,tol);if(!tangent)continue;
+      const edges=[...eidSet].map(eid=>ctx.edgeById.get(eid)).filter(Boolean);
+      const sharedPoints=edges.flatMap(e=>exactEdgePoints(ctx,e));
+      let extent=axisExtentFromPoints(sharedPoints,axis);
+      if(!extent||extent.max-extent.min<=tol*2)extent=globalExtent;
+      let axisMin=extent?.min,axisMax=extent?.max;
+      if(!Number.isFinite(axisMin)||!Number.isFinite(axisMax)||axisMax-axisMin<=tol*2){
+        // Last-resort estimate from all edges of the planar panel. This keeps the
+        // topological decision independent of the shared edge representation.
+        const panelPoints=[];
+        for(const fid of panel.faceIds||[]){for(const rawEid of ctx.faceById.get(fid)?.edgeIndices||[]){const pe=ctx.edgeById.get(Number(rawEid));if(pe)panelPoints.push(...exactEdgePoints(ctx,pe));}}
+        const panelExtent=axisExtentFromPoints(panelPoints,axis);axisMin=panelExtent?.min;axisMax=panelExtent?.max;
       }
-      const mid=V3.avg(points),offsets=points.map(p=>V3.dot(V3.sub(p,mid),axis)),axisMid=V3.dot(mid,axis),axisValues=points.map(p=>V3.dot(p,axis));
-      boundaries.push({groupId,faceIds:panel.faceIds.slice(),faceId:panel.faceIds[0],edges:edges.map(e=>Number(e.id)),mid,minOffset:Math.min(...offsets),maxOffset:Math.max(...offsets),axisMid,axisMin:Math.min(...axisValues),axisMax:Math.max(...axisValues),length,points});
+      if(!Number.isFinite(axisMin)||!Number.isFinite(axisMax)||axisMax-axisMin<=tol*2)continue;
+      const axisMid=(axisMin+axisMax)/2,mid=contactPointAtAxis(tangent.contactBase,axis,axisMid);
+      const p0=contactPointAtAxis(tangent.contactBase,axis,axisMin),p1=contactPointAtAxis(tangent.contactBase,axis,axisMax);
+      boundaries.push({
+        groupId,faceIds:panel.faceIds.slice(),faceId:panel.faceIds[0],edges:[...eidSet],
+        mid,minOffset:axisMin-axisMid,maxOffset:axisMax-axisMid,axisMid,axisMin,axisMax,
+        length:axisMax-axisMin,points:[p0,p1],source:'exact-surface-tangency',
+        tangency:{axisDot:tangent.axisDot,radialError:tangent.radialError,signedDistance:tangent.signedDistance}
+      });
     }
     boundaries.sort((a,b)=>b.length-a.length);
     let orientWeighted=0,orientArea=0;
@@ -212,7 +266,6 @@ function buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups){
     return{id:`cyl-${index}`,faceIds,faceSet,edgeIds:[...edgeIds],axis,center,radius,boundaries,radialNormalScore};
   }).filter(Boolean);
 }
-
 function detectThickness(cylinders,tol){
   const nearest=[];
   for(let i=0;i<cylinders.length;i++){
@@ -482,6 +535,6 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
   if(!triangles.length||!boundaryEdges.length)return{ok:false,code:'flat-empty',message:'The flat pattern could not be reconstructed.',warnings};
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 1.5',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 1.6',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
 }
 

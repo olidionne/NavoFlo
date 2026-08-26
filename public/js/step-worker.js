@@ -49,6 +49,16 @@ function plainColor(c) {
   return { r: Number(c.r ?? 0.9), g: Number(c.g ?? 0.91), b: Number(c.b ?? 0.93), opacity: Number(c.opacity ?? 1) };
 }
 
+// occt-js' OcctFaceTopoData.edgeIndices are zero-based positions in the
+// geometry.edges array, while OcctEdgeTopoData.id is one-based (1..N).
+// Navo3D uses stable B-Rep IDs everywhere else, so normalize once at the worker
+// boundary. Without this conversion Face #14 can be linked to Edge #37 instead
+// of Edge #38, which makes a real plane/cylinder bend disappear from NavoUnfold.
+function edgeIndexToBrepId(value) {
+  const n=Number(value);
+  return Number.isFinite(n) ? n + 1 : n;
+}
+
 function plainGeometry(g) {
   return {
     id: String(g.id ?? ''),
@@ -63,7 +73,7 @@ function plainGeometry(g) {
       name: String(f.name ?? ''),
       firstIndex: Number(f.firstIndex ?? 0),
       indexCount: Number(f.indexCount ?? 0),
-      edgeIndices: Array.from(f.edgeIndices ?? []).map(Number),
+      edgeIndices: Array.from(f.edgeIndices ?? []).map(edgeIndexToBrepId),
       color: plainColor(f.color)
     })),
     edges: Array.from(g.edges ?? []).map(e => ({
@@ -436,7 +446,7 @@ self.onmessage = async (event) => {
       bindingByGeometry = new Map(
         Array.from(raw.exactGeometryBindings ?? []).map(b => [String(b.geometryId), Number(b.exactShapeHandle)])
       );
-      topologyByGeometry = new Map(Array.from(raw.geometries ?? []).map(g=>[String(g.id),{faces:Array.from(g.faces??[]).map(f=>({id:Number(f.id),edgeIndices:Array.from(f.edgeIndices??[]).map(Number)})),edges:Array.from(g.edges??[]).map(e=>({id:Number(e.id),ownerFaceIds:Array.from(e.ownerFaceIds??[]).map(Number),points:Array.from(e.points??[]).map(Number)}))}]));
+      topologyByGeometry = new Map(Array.from(raw.geometries ?? []).map(g=>[String(g.id),{faces:Array.from(g.faces??[]).map(f=>({id:Number(f.id),edgeIndices:Array.from(f.edgeIndices??[]).map(edgeIndexToBrepId)})),edges:Array.from(g.edges??[]).map(e=>({id:Number(e.id),ownerFaceIds:Array.from(e.ownerFaceIds??[]).map(Number),points:Array.from(e.points??[]).map(Number)}))}]));
       logicalFaceGroupCache = new Map();
   logicalEdgeGroupCache = new Map();
 
