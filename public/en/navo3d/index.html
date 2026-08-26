@@ -116,8 +116,8 @@
 
       <div class="toolbar-spacer"></div>
 
-      <button id="sheetmetal-toggle" class="tool-button" type="button" disabled title="Sheet metal unfold parameters">
-        <span class="tool-icon">⌁</span><span>Sheet</span>
+      <button id="sheetmetal-toggle" class="tool-button" type="button" disabled title="Automatically unfold sheet metal">
+        <span class="tool-icon">⌁</span><span>Unfold</span>
       </button>
 
       <button id="properties-toggle" class="tool-button" type="button" disabled>
@@ -188,97 +188,31 @@
 
 
       <div id="sheetmetal-section" class="drawer-section sheetmetal-section" hidden>
-        <div class="drawer-section-title">SHEET METAL · AIR BENDING</div>
-        <div class="sheetmetal-intro">
-          <strong>Automatic K-factor</strong>
-          <span>CD-401 rule based on inside-radius / thickness ratio.</span>
-        </div>
-
-        <label class="sheetmetal-field">
-          <span>Material family</span>
-          <select id="sm-material-class">
-            <option value="hard">Steel / hard materials</option>
-            <option value="medium">Aluminum · medium</option>
-            <option value="soft">Aluminum · soft</option>
-          </select>
-        </label>
-
-        <div class="sheetmetal-input-grid">
-          <label class="sheetmetal-field">
-            <span>Thickness T</span>
-            <div class="sheetmetal-number"><input id="sm-thickness" type="number" inputmode="decimal" min="0" step="any" placeholder="—"><em id="sm-thickness-unit">mm</em></div>
-          </label>
-          <label class="sheetmetal-field">
-            <span>Inside radius R</span>
-            <div class="sheetmetal-number"><input id="sm-radius" type="number" inputmode="decimal" min="0" step="any" placeholder="—"><em id="sm-radius-unit">mm</em></div>
-          </label>
-        </div>
-
-        <div class="sheetmetal-pick-actions">
-          <button id="sm-use-measure" type="button">↳ T from measure</button>
-          <button id="sm-use-radius" type="button">↳ R from selection</button>
-        </div>
-
-        <label class="sheetmetal-field">
-          <span>Bend angle</span>
-          <div class="sheetmetal-number"><input id="sm-angle" type="number" inputmode="decimal" min="0.01" max="179.99" step="0.1" value="90"><em>°</em></div>
-        </label>
-
-        <label class="sheetmetal-check">
-          <span>Override K-factor</span>
-          <input id="sm-manual-k-toggle" type="checkbox">
-        </label>
-        <label id="sm-manual-k-row" class="sheetmetal-field" hidden>
-          <span>Manual K-factor</span>
-          <div class="sheetmetal-number"><input id="sm-manual-k" type="number" inputmode="decimal" min="0" max="1" step="0.001" value="0.40"><em>K</em></div>
-        </label>
-
-        <dl class="drawer-stats compact-stats sheetmetal-results">
-          <div><dt>R / T</dt><dd id="sm-ratio">—</dd></div>
-          <div><dt>Range</dt><dd id="sm-band">—</dd></div>
-          <div><dt>K-factor</dt><dd id="sm-k">—</dd></div>
-          <div><dt>Neutral radius</dt><dd id="sm-neutral-radius">—</dd></div>
-          <div><dt>Bend allowance</dt><dd id="sm-bend-allowance">—</dd></div>
-          <div><dt>Bend deduction</dt><dd id="sm-bend-deduction">—</dd></div>
-        </dl>
-
-        <div id="sm-status" class="sheetmetal-status">Enter thickness and inside radius, or capture them from a STEP measurement.</div>
-
+        <div class="drawer-section-title">SHEET METAL</div>
         <div class="sheetmetal-unfold-engine">
-          <div class="sheetmetal-engine-title">STEP UNFOLD · NAVOUNFOLD MVP</div>
-          <p class="sheetmetal-engine-note">Local geometric unfolding for constant-thickness sheet parts with planar faces and standard cylindrical bends.</p>
-          <div class="sheetmetal-fixed-row">
-            <button id="sm-set-fixed-face" type="button">↳ Fixed face from selection</button>
-            <span id="sm-fixed-face" class="sheetmetal-fixed-face">—</span>
-          </div>
-          <button id="sm-unfold" class="sheetmetal-unfold-primary" type="button">Unfold sheet</button>
-          <div class="sheetmetal-view-toggle" role="group" aria-label="Part state">
-            <button id="sm-view-folded" type="button" disabled>FOLDED</button>
-            <button id="sm-view-flat" type="button" disabled>FLAT</button>
-          </div>
-          <dl class="drawer-stats compact-stats sheetmetal-unfold-results">
-            <div><dt>T used</dt><dd id="sm-detected-thickness">—</dd></div>
-            <div><dt>Bends</dt><dd id="sm-detected-bends">—</dd></div>
-            <div><dt>Flat size</dt><dd id="sm-flat-size">—</dd></div>
-          </dl>
+          <div class="sheetmetal-engine-title">AUTOMATIC UNFOLD · NAVOUNFOLD</div>
+          <p class="sheetmetal-engine-note">Fixed face, thickness, bend radius and K-factor are detected automatically. Use advanced parameters only to override a value.</p>
+          <div class="sheetmetal-view-toggle" role="group" aria-label="Part state"><button id="sm-view-folded" type="button" disabled>FOLDED</button><button id="sm-view-flat" type="button" disabled>FLAT</button></div>
+          <div id="sm-status" class="sheetmetal-status">Automatic detection ready.</div>
+          <dl class="drawer-stats compact-stats sheetmetal-unfold-results"><div><dt>T used</dt><dd id="sm-detected-thickness">—</dd></div><div><dt>K-factor</dt><dd id="sm-k">—</dd></div><div><dt>Bends</dt><dd id="sm-detected-bends">—</dd></div><div><dt>Overall size</dt><dd id="sm-flat-size">—</dd></div></dl>
           <button id="sm-export-dxf" class="sheetmetal-export" type="button" disabled>Export flat DXF</button>
         </div>
-
         <details class="sheetmetal-k-table">
-          <summary>CD-401 Air Bending table</summary>
-          <table>
-            <thead><tr><th>R / T</th><th>Al soft</th><th>Al med.</th><th>Steel</th></tr></thead>
-            <tbody>
-              <tr><td>0 → 1</td><td>0.33</td><td>0.38</td><td>0.40</td></tr>
-              <tr><td>1 → 3</td><td>0.40</td><td>0.43</td><td>0.45</td></tr>
-              <tr><td>&gt; 3</td><td>0.50</td><td>0.50</td><td>0.50</td></tr>
-            </tbody>
-          </table>
+          <summary>Advanced parameters / manual correction</summary>
+          <div class="sheetmetal-intro"><strong>Automatic K-factor</strong><span>CD-401 rule based on inside-radius / thickness ratio.</span></div>
+          <label class="sheetmetal-field"><span>Material family</span><select id="sm-material-class"><option value="hard">Steel / hard materials</option><option value="medium">Aluminum · medium</option><option value="soft">Aluminum · soft</option></select></label>
+          <div class="sheetmetal-input-grid"><label class="sheetmetal-field"><span>Thickness T</span><div class="sheetmetal-number"><input id="sm-thickness" type="number" inputmode="decimal" min="0" step="any" placeholder="AUTO"><em id="sm-thickness-unit">mm</em></div></label><label class="sheetmetal-field"><span>Inside radius R</span><div class="sheetmetal-number"><input id="sm-radius" type="number" inputmode="decimal" min="0" step="any" placeholder="AUTO"><em id="sm-radius-unit">mm</em></div></label></div>
+          <div class="sheetmetal-pick-actions"><button id="sm-use-measure" type="button">↳ T from measurement</button><button id="sm-use-radius" type="button">↳ R from selection</button></div>
+          <label class="sheetmetal-field"><span>Bend angle</span><div class="sheetmetal-number"><input id="sm-angle" type="number" inputmode="decimal" min="0.01" max="179.99" step="0.1" value="90"><em>°</em></div></label>
+          <label class="sheetmetal-check"><span>Force a K-factor</span><input id="sm-manual-k-toggle" type="checkbox"></label>
+          <label id="sm-manual-k-row" class="sheetmetal-field" hidden><span>Manual K-factor</span><div class="sheetmetal-number"><input id="sm-manual-k" type="number" inputmode="decimal" min="0" max="1" step="0.001" value="0.40"><em>K</em></div></label>
+          <div class="sheetmetal-fixed-row"><button id="sm-set-fixed-face" type="button">↳ Force fixed face from selection</button><span id="sm-fixed-face" class="sheetmetal-fixed-face">AUTO</span></div>
+          <dl class="drawer-stats compact-stats sheetmetal-results"><div><dt>R / T</dt><dd id="sm-ratio">—</dd></div><div><dt>Band</dt><dd id="sm-band">—</dd></div><div><dt>Neutral radius</dt><dd id="sm-neutral-radius">—</dd></div><div><dt>Bend allowance</dt><dd id="sm-bend-allowance">—</dd></div><div><dt>Bend deduction</dt><dd id="sm-bend-deduction">—</dd></div></dl>
+          <button id="sm-unfold" class="sheetmetal-unfold-primary" type="button">Recalculate flat pattern</button>
+          <details class="sheetmetal-k-table"><summary>Air Bending CD-401 table</summary><table><thead><tr><th>R / T</th><th>Soft Al</th><th>Medium Al</th><th>Steel</th></tr></thead><tbody><tr><td>0 → 1</td><td>0.33</td><td>0.38</td><td>0.40</td></tr><tr><td>1 → 3</td><td>0.40</td><td>0.43</td><td>0.45</td></tr><tr><td>&gt; 3</td><td>0.50</td><td>0.50</td><td>0.50</td></tr></tbody></table></details>
         </details>
-
-        <p class="sheetmetal-warning">Unfolding parameters. The final flat pattern must still be validated against the manufacturing procedure.</p>
+        <p class="sheetmetal-warning">Flat pattern calculated locally. Validate the result against your manufacturing procedure before production.</p>
       </div>
-
       <div class="drawer-section">
         <div class="drawer-section-title">PC CAPABILITY</div>
         <div class="pc-tier"><b>Suggested minimum</b><span>4 CPU threads · 8 GB RAM · WebAssembly · WebGL2</span></div>
@@ -312,6 +246,6 @@
 </section>
 </main>
 
-<script type="module" src="/js/viewer.js?v=8.16.10"></script>
+<script type="module" src="/js/viewer.js?v=8.17.0"></script>
 </body>
 </html>

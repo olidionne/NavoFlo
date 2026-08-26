@@ -1,7 +1,7 @@
-import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.16.10';
+import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.0';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.16.10 MVP
+ * NavoFlo Sheet Metal Engine — V8.17.0
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -408,8 +408,23 @@ function createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarG
     if(childV3&&V3.dot(childV3,toChildInteriorRaw)<0)childV3=V3.scale(childV3,-1);
   }
   if(!childV3)return{ok:false,code:'child-plane-direction'};
-  const childMap={origin3:cb.mid,origin2:targetMid2,u3:axis3,v3:childV3,u2:axis2,v2:outward};
-  return{ok:true,parentGroupId,childGroupId,cyl,pb,cb,axis3,axis2,outward,parentMid2,targetMid2,totalAngle:total,angleDeg:Math.abs(total)*180/Math.PI,angleSource,innerRadius,radiusSource:radiusResolution.source,k,neutralRadius,bendAllowance,childMap,partnerRadius:radiusResolution.partner?.other?.radius??null};
+
+  // V8.17.0 — skew/angled bend fix.
+  // pb.mid and cb.mid are the mid-points of two *different* tangent boundaries.
+  // On a rectangular bend their axial coordinates are usually identical, but on
+  // a skewed/angled trim they are not. Mapping cb.mid directly to targetMid2 then
+  // shifts the child flange along the bend axis and leaves an open contour. Keep
+  // one absolute axial datum (pb.axisMid) for the bend and both adjacent panels.
+  const childAxisShift=(Number(cb.axisMid)||0)-(Number(pb.axisMid)||0);
+  const childOrigin2=V2.add(targetMid2,V2.scale(axis2,childAxisShift));
+  const childMap={origin3:cb.mid,origin2:childOrigin2,u3:axis3,v3:childV3,u2:axis2,v2:outward};
+
+  // The tessellated cylindrical skin must always run from 0 -> bendAllowance in
+  // the developed view, regardless of axis orientation. Use the exact radial
+  // sweep for interpolation and only use the chosen bend angle for BA magnitude.
+  const rParent=radialToAxis(pb.mid,cyl.center,axis3),rChild=radialToAxis(cb.mid,cyl.center,axis3);
+  const radialSweep=signedAngle(rParent,rChild,axis3);
+  return{ok:true,parentGroupId,childGroupId,cyl,pb,cb,axis3,axis2,outward,parentMid2,targetMid2,totalAngle:total,radialSweep,angleDeg:Math.abs(total)*180/Math.PI,angleSource,innerRadius,radiusSource:radiusResolution.source,k,neutralRadius,bendAllowance,childMap,partnerRadius:radiusResolution.partner?.other?.radius??null};
 }
 const THREE_DEG=3*Math.PI/180;
 const BEND_MIN_ANGLE=0.5*Math.PI/180;
@@ -418,7 +433,15 @@ const ANGLE_DISAGREE_TOL=2*Math.PI/180;
 
 function projectPanelTriangles(ctx,panel,map){const out=[];for(const fid of panel.faceIds||[])for(const tri of ctx.statsById.get(fid)?.triangles||[])out.push(tri.map(p=>mapPoint(map,p)));return out;}
 function mapBendPoint(mapping,p){
-  const {cyl,pb,axis3,axis2,outward,parentMid2,totalAngle,neutralRadius}=mapping,r0=radialToAxis(pb.mid,cyl.center,axis3),sign=Math.sign(totalAngle)||1,radial=radialToAxis(p,cyl.center,axis3),raw=signedAngle(r0,radial,axis3),phi=angleCandidateInSpan(raw,totalAngle),s=phi*sign*neutralRadius,ax=V3.dot(V3.sub(p,pb.mid),axis3);
+  const {cyl,pb,axis3,axis2,outward,parentMid2,bendAllowance}=mapping;
+  const r0=radialToAxis(pb.mid,cyl.center,axis3),radial=radialToAxis(p,cyl.center,axis3),raw=signedAngle(r0,radial,axis3);
+  const sweep=validStandardBendAngle(mapping.radialSweep)?mapping.radialSweep:mapping.totalAngle;
+  const phi=angleCandidateInSpan(raw,sweep);
+  // Parametric 0..1 mapping prevents an axis-sign mismatch from throwing bend
+  // triangles to the wrong side of the flat pattern. A tiny tolerance is allowed
+  // for STEP/tessellation noise, then clamped to the physical bend strip.
+  const ratio=Math.abs(sweep)>EPS?clamp(phi/sweep,-1e-6,1+1e-6):0;
+  const s=clamp(ratio,0,1)*bendAllowance,ax=V3.dot(V3.sub(p,pb.mid),axis3);
   return V2.add(parentMid2,V2.add(V2.scale(axis2,ax),V2.scale(outward,s)));
 }
 function projectBendTriangles(ctx,mapping){
@@ -496,6 +519,21 @@ function boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,tol,planarGr
   return primitives;
 }
 
+function primitiveEndpointPair(primitive){
+  if(primitive?.kind==='line')return[primitive.a,primitive.b];
+  if(primitive?.kind==='polyline'&&primitive.points?.length>1)return[primitive.points[0],primitive.points.at(-1)];
+  if(primitive?.kind==='arc')return[
+    [primitive.center[0]+Math.cos(primitive.startRad)*primitive.radius,primitive.center[1]+Math.sin(primitive.startRad)*primitive.radius],
+    [primitive.center[0]+Math.cos(primitive.endRad)*primitive.radius,primitive.center[1]+Math.sin(primitive.endRad)*primitive.radius]
+  ];
+  return null;
+}
+function boundaryPrimitivesClosed(primitives,tol){
+  const degree=new Map(),key=p=>quantKey(p,tol),add=p=>degree.set(key(p),(degree.get(key(p))||0)+1);
+  for(const primitive of primitives||[]){const pair=primitiveEndpointPair(primitive);if(pair){add(pair[0]);add(pair[1]);}}
+  return degree.size===0||[...degree.values()].every(v=>v===2);
+}
+
 function makeBendLine(mapping){
   const globalLo=Math.max(mapping.pb.axisMin,mapping.cb.axisMin),globalHi=Math.min(mapping.pb.axisMax,mapping.cb.axisMax);
   let a=Number.isFinite(globalLo)?globalLo-mapping.pb.axisMid:mapping.pb.minOffset,b=Number.isFinite(globalHi)?globalHi-mapping.pb.axisMid:mapping.pb.maxOffset;
@@ -517,7 +555,7 @@ export function flatPatternToDxf(result,{partName='NavoFlo_Flat_Pattern',units='
   const unitKey=String(units||'in').toLowerCase(),unitDef=DXF_UNIT_DEFS[unitKey];
   if(!unitDef)throw new Error(`Unsupported DXF unit: ${units}`);
 
-  // V8.16.10: graphical entities are inserted into a complete R2000 skeleton.
+  // V8.17.0: graphical entities are inserted into a complete R2000 skeleton.
   // The former compact AC1015 file had model/paper BLOCK_RECORD entries without
   // their required LAYOUT object relationships; strict AutoCAD DXFIN rejected it.
   const lines=[];const add=(c,v)=>{lines.push(String(c),String(v));},scale=unitDef.scaleFromMm,sv=v=>Number(v)*scale,sp=p=>[sv(p[0]),sv(p[1])];
@@ -525,7 +563,12 @@ export function flatPatternToDxf(result,{partName='NavoFlo_Flat_Pattern',units='
   const handle=()=>((nextHandle++).toString(16).toUpperCase());
   const entityBase=(type,layer,subclass)=>{add(0,type);add(5,handle());add(330,R2000_MODELSPACE_HANDLE);add(100,'AcDbEntity');add(8,layer);add(100,subclass);};
   const lineEntity=(layer,a,b)=>{a=sp(a);b=sp(b);entityBase('LINE',layer,'AcDbLine');add(10,dxfNum(a[0]));add(20,dxfNum(a[1]));add(30,0);add(11,dxfNum(b[0]));add(21,dxfNum(b[1]));add(31,0);};
-  const primitives=Array.isArray(result.boundaryPrimitives)&&result.boundaryPrimitives.length?result.boundaryPrimitives:null;
+  const rawPrimitives=Array.isArray(result.boundaryPrimitives)&&result.boundaryPrimitives.length?result.boundaryPrimitives:null;
+  // Guard the laser/CAM export against an open topological contour. If an imported
+  // STEP produces a primitive chain that does not close, fall back to the welded
+  // triangulated boundary for that export rather than emitting an open CUT loop.
+  const primitiveTol=Math.max((Number(result.thickness)||1)*1e-5,1e-6);
+  const primitives=rawPrimitives&&boundaryPrimitivesClosed(rawPrimitives,primitiveTol)?rawPrimitives:null;
   if(primitives){
     for(const primitive of primitives){
       if(primitive.kind==='line')lineEntity('CUT',primitive.a,primitive.b);
@@ -543,29 +586,61 @@ export function flatPatternToDxf(result,{partName='NavoFlo_Flat_Pattern',units='
   return wrapR2000Dxf({entitiesText:lines.join('\n'),insunits:unitDef.insunits,measurement:unitDef.measurement});
 }
 
-export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[],fixedFaceId,thickness=null,fallbackInsideRadius=null,kResolver}){
+function chooseAutomaticFixedPanel(planarGroups,candidateBends,ctx){
+  const bendCounts=new Map();
+  for(const bend of candidateBends||[])for(const boundary of bend.boundaries||[]){
+    const id=boundary.groupId;bendCounts.set(id,(bendCounts.get(id)||0)+1);
+  }
+  const connected=planarGroups.groups.filter(g=>(bendCounts.get(g.id)||0)>0);
+  const pool=connected.length?connected:planarGroups.groups;
+  if(!pool.length)return null;
+  const ranked=[...pool].sort((a,b)=>{
+    const ca=bendCounts.get(a.id)||0,cb=bendCounts.get(b.id)||0;
+    // Prefer a physically large flange first; bend count only breaks near ties.
+    const aa=Number(a.stats?.area)||0,ab=Number(b.stats?.area)||0;
+    const scale=Math.max(aa,ab,EPS);
+    if(Math.abs(ab-aa)>scale*0.02)return ab-aa;
+    return cb-ca;
+  });
+  const panel=ranked[0];
+  if(!panel)return null;
+  const faceId=[...(panel.faceIds||[])].sort((a,b)=>(Number(ctx.statsById.get(b)?.area)||0)-(Number(ctx.statsById.get(a)?.area)||0))[0];
+  return Number.isFinite(Number(faceId))?{panel,faceId:Number(faceId),automatic:true}:null;
+}
+
+export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[],fixedFaceId=null,thickness=null,fallbackInsideRadius=null,kResolver}){
   if(!geometry) return{ok:false,code:'geometry-missing',message:'STEP geometry is unavailable.'};
-  const {diag,tol}=geometryScale(geometry),ctx=buildFaceContext(geometry,faceInfo,edgeInfo),fixed=Number(fixedFaceId),fixedInfo=ctx.infoById.get(fixed);
-  if(!ctx.faceById.has(fixed))return{ok:false,code:'fixed-face-missing',message:'The selected fixed face is not part of this geometry.'};
-  if(!isPlanar(fixedInfo?.family))return{ok:false,code:'fixed-face-not-planar',message:'The fixed face must be planar.'};
+  const {diag,tol}=geometryScale(geometry),ctx=buildFaceContext(geometry,faceInfo,edgeInfo);
+  const planarGroups=buildPlanarGroups(geometry,ctx,tol);
+  const cylinders=buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups);
 
-  const planarGroups=buildPlanarGroups(geometry,ctx,tol),fixedGroupId=planarGroups.faceToGroup.get(fixed),fixedPanel=planarGroups.byId.get(fixedGroupId);
-  if(!fixedPanel)return{ok:false,code:'fixed-panel-missing',message:'The selected face could not be assigned to a planar sheet panel.'};
-  const cylinders=buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups),autoThickness=detectThickness(cylinders,tol);let resolvedThickness=Number(thickness);
-  if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)resolvedThickness=Number(autoThickness?.value);
-  if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)return{ok:false,code:'thickness-unresolved',message:'Sheet thickness could not be detected. Enter T and try again.',detectedThickness:autoThickness};
-
-  const warnings=[];if(autoThickness&&Number.isFinite(Number(thickness))&&Number(thickness)>0){const delta=Math.abs(Number(thickness)-autoThickness.value);if(delta>Math.max(resolvedThickness*0.12,tol*20))warnings.push('Entered thickness differs from the cylindrical-face thickness estimate.');}
   let rejectedNonBendCylinders=0;
   const candidateBends=cylinders.map(c=>{
     const unique=[];for(const b of c.boundaries){if(!unique.some(x=>x.groupId===b.groupId))unique.push(b);}
     if(unique.length<2)return null;
     const candidate={...c,boundaries:unique},pair=chooseBendBoundaryPair(candidate,planarGroups);
     if(!pair){rejectedNonBendCylinders++;return null;}
-    // Keep only the tangent flange pair selected geometrically. This is essential for
-    // slots/holes and STEP faces with more than two planar neighbours.
     candidate.boundaries=[pair.a,pair.b];candidate.pairGeometry=pair.geom;return candidate;
   }).filter(Boolean);
+
+  const hasRequestedFixed=fixedFaceId!==null&&fixedFaceId!==undefined&&fixedFaceId!==''&&Number.isFinite(Number(fixedFaceId)),requestedFixed=hasRequestedFixed?Number(fixedFaceId):NaN;
+  let fixed=requestedFixed,fixedGroupId=null,fixedPanel=null,fixedWasAutomatic=false;
+  if(hasRequestedFixed){
+    const fixedInfo=ctx.infoById.get(fixed);
+    if(!ctx.faceById.has(fixed))return{ok:false,code:'fixed-face-missing',message:'The selected fixed face is not part of this geometry.'};
+    if(!isPlanar(fixedInfo?.family))return{ok:false,code:'fixed-face-not-planar',message:'The fixed face must be planar.'};
+    fixedGroupId=planarGroups.faceToGroup.get(fixed);fixedPanel=planarGroups.byId.get(fixedGroupId);
+  }else{
+    const automatic=chooseAutomaticFixedPanel(planarGroups,candidateBends,ctx);
+    if(automatic){fixed=automatic.faceId;fixedPanel=automatic.panel;fixedGroupId=automatic.panel.id;fixedWasAutomatic=true;}
+  }
+  if(!fixedPanel)return{ok:false,code:'fixed-panel-missing',message:'A usable planar sheet panel could not be selected automatically.'};
+
+  const autoThickness=detectThickness(cylinders,tol);let resolvedThickness=Number(thickness);
+  if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)resolvedThickness=Number(autoThickness?.value);
+  if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)return{ok:false,code:'thickness-unresolved',message:'Sheet thickness could not be detected. Enter T and try again.',detectedThickness:autoThickness,fixedFaceId:fixed};
+
+  const warnings=[];if(autoThickness&&Number.isFinite(Number(thickness))&&Number(thickness)>0){const delta=Math.abs(Number(thickness)-autoThickness.value);if(delta>Math.max(resolvedThickness*0.12,tol*20))warnings.push('Entered thickness differs from the cylindrical-face thickness estimate.');}
   const bendsByGroup=new Map();for(const bend of candidateBends){for(const b of bend.boundaries){if(!bendsByGroup.has(b.groupId))bendsByGroup.set(b.groupId,[]);bendsByGroup.get(b.groupId).push(bend);}}
   const rootMap=makeRootMap(ctx,fixedPanel,tol);if(!rootMap)return{ok:false,code:'fixed-face-map',message:'Unable to establish a coordinate system on the fixed face.'};
 
@@ -584,14 +659,24 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   if(!usedBends.length){
     const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,fixedPanelCandidateBends:connected,tolerance:tol,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
     const message=connected?'A cylindrical bend touches the fixed panel, but its geometry could not be resolved safely. Check T / inside radius / K-factor.':'No standard cylindrical bend connected to the fixed panel was detected.';
-    return{ok:false,code:connected?'bend-resolution-failed':'no-bends',message,detectedThickness:autoThickness,warnings,diagnostics};
+    return{ok:false,code:connected?'bend-resolution-failed':'no-bends',message,detectedThickness:autoThickness,warnings,diagnostics,fixedFaceId:fixed};
   }
 
-  const panelTriangles=[];for(const groupId of panelOrder){const panel=planarGroups.byId.get(groupId);if(panel)panelTriangles.push(...projectPanelTriangles(ctx,panel,panelMaps.get(groupId)));}
-  const bendTriangles=[];for(const bend of usedBends)bendTriangles.push(...projectBendTriangles(ctx,bend));
+  const selectionFaces=[],panelTriangles=[];
+  for(const groupId of panelOrder){
+    const panel=planarGroups.byId.get(groupId);if(!panel)continue;
+    const mapped=projectPanelTriangles(ctx,panel,panelMaps.get(groupId));panelTriangles.push(...mapped);
+    if(mapped.length)selectionFaces.push({id:`flat-panel-${selectionFaces.length+1}`,kind:'panel',sourceFaceIds:panel.faceIds.slice(),triangles:mapped});
+  }
+  const bendTriangles=[];
+  for(const bend of usedBends){
+    const mapped=projectBendTriangles(ctx,bend);bendTriangles.push(...mapped);
+    if(mapped.length)selectionFaces.push({id:`flat-bend-${selectionFaces.length+1}`,kind:'bend',sourceFaceIds:bend.cyl.faceIds.slice(),triangles:mapped});
+  }
   const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
   if(!triangles.length||!boundaryEdges.length)return{ok:false,code:'flat-empty',message:'The flat pattern could not be reconstructed.',warnings};
+  const primitivesClosed=boundaryPrimitivesClosed(boundaryPrimitives,Math.max(resolvedThickness*1e-5,1e-6));
+  if(!primitivesClosed)warnings.push('Exact CUT primitives contain an open chain; DXF export will use the welded mesh boundary as a safe fallback.');
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 1.7',fixedFaceId:fixed,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,boundaryEdges,boundaryPrimitives,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 1.8',fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,selectionFaces,boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
 }
-

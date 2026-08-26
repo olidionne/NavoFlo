@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.16.10';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.0';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -75,7 +75,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.16.10';
+const WORKER_URL = '/js/step-worker.js?v=8.17.0';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -149,12 +149,13 @@ const sheetMetalState = {
   fixedFace:null
 };
 
-let flatPatternRoot=null,flatPatternResult=null,flatPatternActive=false,flatPatternCameraState=null;
+let flatPatternRoot=null,flatPatternResult=null,flatPatternActive=false,flatPatternCameraState=null,sheetMetalUnfoldPromise=null;
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, multiMeasureRoot, grid;
 let cameraProjectionMode='orthographic';
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
 let currentStats = null, currentStepHeader = null, currentStepResult = null, currentStepProperties = [];
 let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
+let flatSurfaceMeshes = [], flatEdgeObjects = [], flatVertexObjects = [];
 let selectionMode = 'auto', measureEnabled = false, multiMeasureEnabled=false, selected = [], currentMeasureResult = null, selectionHighlightMap = new Map();
 let edgesVisible = true, clipEnabled = false;
 let modelBounds = null, modelSize = 1;
@@ -347,6 +348,9 @@ function applyNavo3DPreferences(p={}){
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
+function activePickSurfaces(){return flatPatternActive?flatSurfaceMeshes:surfaceMeshes;}
+function activePickEdges(){return flatPatternActive?flatEdgeObjects:edgeObjects;}
+function activePickVertices(){return flatPatternActive?flatVertexObjects:vertexObjects;}
 const clipPlane = new THREE.Plane(new THREE.Vector3(1,0,0), 0);
 const blackEdgeMaterial = new THREE.LineBasicMaterial({
   color:0x090b0d,
@@ -564,7 +568,11 @@ function bindUI() {
     syncPropertiesState();
   });
 
-  E.sheetMetal.addEventListener('click', openSheetMetalPanel);
+  E.sheetMetal.addEventListener('click', async () => {
+    if(flatPatternActive){setFlatPatternView(false);return;}
+    if(flatPatternResult){setFlatPatternView(true);return;}
+    await runSheetMetalUnfold({activate:true});
+  });
   E.smMaterial.addEventListener('change', () => {
     clearFlatPattern();
     sheetMetalState.materialClass=E.smMaterial.value;
@@ -602,9 +610,9 @@ function bindUI() {
   E.smUseMeasure.addEventListener('click', captureSheetMetalThickness);
   E.smUseRadius.addEventListener('click', captureSheetMetalRadius);
   E.smSetFixedFace?.addEventListener('click',captureSheetMetalFixedFace);
-  E.smUnfold?.addEventListener('click',runSheetMetalUnfold);
+  E.smUnfold?.addEventListener('click',()=>runSheetMetalUnfold({activate:true,force:true}));
   E.smFoldedView?.addEventListener('click',()=>setFlatPatternView(false));
-  E.smFlatView?.addEventListener('click',()=>setFlatPatternView(true));
+  E.smFlatView?.addEventListener('click',async()=>{if(flatPatternResult)setFlatPatternView(true);else await runSheetMetalUnfold({activate:true});});
   E.smExportDxf?.addEventListener('click',exportFlatPatternDxf);
 
   initSheetMetalUI();
@@ -1092,22 +1100,34 @@ async function captureSheetMetalRadius() {
 
 
 function syncSheetMetalUnfoldUI(){
-  if(E.smFixedFace)E.smFixedFace.textContent=sheetMetalState.fixedFace?`Face #${sheetMetalState.fixedFace.elementId}`:'—';
+  if(E.smFixedFace)E.smFixedFace.textContent=sheetMetalState.fixedFace?`Face #${sheetMetalState.fixedFace.elementId}`:(FR?'AUTO':'AUTO');
   if(E.smDetectedThickness){
     const value=flatPatternResult?.thickness;
     E.smDetectedThickness.textContent=Number.isFinite(value)?formatLength(value):'—';
   }
   if(E.smDetectedBends)E.smDetectedBends.textContent=flatPatternResult?.ok?String(flatPatternResult.bendCount):'—';
+  if(E.smK&&flatPatternResult?.ok){
+    const ks=[...new Set((flatPatternResult.bendLines||[]).map(b=>Number(b.k)).filter(Number.isFinite).map(k=>Number(k.toFixed(3))))];
+    if(ks.length)E.smK.textContent=`${ks.map(k=>formatSheetMetalScalar(k,3)).join(' / ')} · ${sheetMetalState.manualKEnabled?'MANUAL':'AUTO'}`;
+  }
   if(E.smFlatSize){
     const b=flatPatternResult?.bounds;
     E.smFlatSize.textContent=b?`${formatLength(b.width)} × ${formatLength(b.height)}`:'—';
   }
-  E.smFoldedView?.classList.toggle('active',Boolean(flatPatternResult&&!flatPatternActive));
+  E.smFoldedView?.classList.toggle('active',Boolean(currentStepResult&&!flatPatternActive));
   E.smFlatView?.classList.toggle('active',Boolean(flatPatternResult&&flatPatternActive));
-  if(E.smFoldedView)E.smFoldedView.disabled=!flatPatternResult;
-  if(E.smFlatView)E.smFlatView.disabled=!flatPatternResult;
+  if(E.smFoldedView)E.smFoldedView.disabled=!currentStepResult;
+  // DÉPLIÉE is now the one-click action: it remains available before a flat
+  // pattern exists and launches automatic face/T/R/K detection on demand.
+  if(E.smFlatView)E.smFlatView.disabled=!currentStepResult;
   if(E.smExportDxf)E.smExportDxf.disabled=!flatPatternResult;
-  if(E.smUnfold)E.smUnfold.disabled=!currentStepResult;
+  if(E.smUnfold)E.smUnfold.disabled=!currentStepResult||Boolean(sheetMetalUnfoldPromise);
+  if(E.sheetMetal){
+    E.sheetMetal.classList.toggle('active',Boolean(flatPatternActive));
+    const label=E.sheetMetal.querySelector('span:last-child');
+    if(label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Déplier':'Unfold');
+    E.sheetMetal.title=flatPatternActive?(FR?'Revenir à la pièce pliée':'Return to folded part'):(FR?'Déplier automatiquement la tôle':'Automatically unfold sheet metal');
+  }
 }
 
 async function captureSheetMetalFixedFace({silent=false}={}){
@@ -1153,49 +1173,90 @@ function describeUnfoldFailure(result){
   return messages[code]||result?.message||SMT.unsupportedTopology;
 }
 
-async function runSheetMetalUnfold(){
-  if(!currentStepResult){setSheetMetalStatus(SMT.needStep,'warn');return;}
-  if(!sheetMetalState.fixedFace){
-    const captured=await captureSheetMetalFixedFace({silent:true});
-    if(!captured){setSheetMetalStatus(SMT.fixedFaceNeed,'warn');return;}
+async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
+  if(!currentStepResult){if(!quiet)setSheetMetalStatus(SMT.needStep,'warn');return null;}
+  if(flatPatternResult&&!force){if(activate)setFlatPatternView(true);return flatPatternResult;}
+
+  // If a background/preflight analysis is already running, reuse it instead of
+  // launching the same OCCT requests twice. A click on DÉPLIÉE simply activates
+  // the result as soon as it is ready.
+  if(sheetMetalUnfoldPromise&&!force){
+    const pending=await sheetMetalUnfoldPromise.catch(()=>null);
+    if(activate&&pending?.ok)setFlatPatternView(true);
+    return pending;
   }
-  const fixed={...sheetMetalState.fixedFace};
-  const geometry=currentStepResult.geometries?.find(g=>String(g.id)===String(fixed.geometryId));
-  if(!geometry){setSheetMetalStatus(SMT.unfoldFailed+' · géométrie introuvable','warn');return;}
-  setSheetMetalStatus(SMT.unfoldBusy);
-  if(E.smUnfold)E.smUnfold.disabled=true;
-  try{
-    const exact=await workerRequest('sheetmetal-face-info',{geometryId:fixed.geometryId});
-    const result=analyzeAndUnfold({
-      geometry,
-      faceInfo:exact?.faces||[],
-      edgeInfo:exact?.edges||[],
-      logicalGroups:exact?.logicalGroups||[],
-      fixedFaceId:fixed.elementId,
-      thickness:sheetMetalState.thickness,
-      fallbackInsideRadius:sheetMetalState.radius,
-      kResolver:resolveUnfoldK
-    });
-    if(!result?.ok){
-      flatPatternResult=null;clearFlatPattern();syncSheetMetalUnfoldUI();
-      console.warn('[NavoUnfold diagnostics]',result);
-      const reason=describeUnfoldFailure(result);
-      const failCode=result?.diagnostics?.failures?.find(f=>f?.failure?.code)?.failure?.code;
-      const detail=failCode?` · [${failCode}]`:'';
-      setSheetMetalStatus(`${SMT.unfoldFailed} · ${reason}${detail}`,'warn');return;
+
+  const stepRef=currentStepResult;
+  const work=(async()=>{
+    if(!quiet)setSheetMetalStatus(SMT.unfoldBusy);
+    syncSheetMetalUnfoldUI();
+    try{
+      const allGeometries=Array.isArray(stepRef.geometries)?stepRef.geometries:[];
+      const fixed=sheetMetalState.fixedFace?{...sheetMetalState.fixedFace}:null;
+      const geometries=fixed?allGeometries.filter(g=>String(g.id)===String(fixed.geometryId)):allGeometries;
+      if(!geometries.length){if(!quiet)setSheetMetalStatus(SMT.unfoldFailed+' · géométrie introuvable','warn');return null;}
+
+      let best=null,bestScore=-Infinity,bestFailure=null;
+      for(const geometry of geometries){
+        if(currentStepResult!==stepRef)return null;
+        let exact;
+        try{exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});}catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
+        const result=analyzeAndUnfold({
+          geometry,
+          faceInfo:exact?.faces||[],
+          edgeInfo:exact?.edges||[],
+          logicalGroups:exact?.logicalGroups||[],
+          fixedFaceId:fixed&&String(fixed.geometryId)===String(geometry.id)?fixed.elementId:null,
+          thickness:sheetMetalState.thickness,
+          fallbackInsideRadius:sheetMetalState.radius,
+          kResolver:resolveUnfoldK
+        });
+        if(!result?.ok){
+          // Prefer a meaningful bend/thickness failure over a generic no-bends
+          // result when an assembly contains several unrelated solids.
+          if(!bestFailure||bestFailure.code==='no-bends')bestFailure=result;
+          continue;
+        }
+        const area=Math.max(Number(result.bounds?.width)||0,0)*Math.max(Number(result.bounds?.height)||0,0);
+        const score=(Number(result.bendCount)||0)*1e12+(Number(result.panelCount)||0)*1e9+area;
+        if(score>bestScore){best={result,geometry};bestScore=score;}
+      }
+
+      if(currentStepResult!==stepRef)return null;
+      if(!best){
+        flatPatternResult=null;clearFlatPattern();syncSheetMetalUnfoldUI();
+        if(!quiet){
+          console.warn('[NavoUnfold diagnostics]',bestFailure);
+          const reason=describeUnfoldFailure(bestFailure||{});
+          const failCode=bestFailure?.diagnostics?.failures?.find(f=>f?.failure?.code)?.failure?.code;
+          const detail=failCode?` · [${failCode}]`:'';
+          setSheetMetalStatus(`${SMT.unfoldFailed} · ${reason}${detail}`,'warn');
+        }
+        return null;
+      }
+
+      const result=best.result;
+      flatPatternResult=result;
+      sheetMetalState.fixedFace={geometryId:String(best.geometry.id),elementId:Number(result.fixedFaceId)};
+      if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
+      const firstR=result.bendLines?.find(b=>Number.isFinite(b.insideRadius))?.insideRadius;
+      if((!Number.isFinite(sheetMetalState.radius)||sheetMetalState.radius<0)&&Number.isFinite(firstR))sheetMetalState.radius=firstR;
+      buildFlatPatternScene(result);
+      syncSheetMetalInputs();syncSheetMetalUnfoldUI();captureActiveModelDocumentState();
+      if(!quiet){
+        const warnings=(result.warnings||[]).filter(Boolean);
+        const auto=result.fixedFaceAutomatic?(FR?' · détection auto':' · auto-detected'):'';
+        setSheetMetalStatus(`${SMT.unfoldReady}${auto} · ${result.panelCount} ${FR?'face(s)':'face(s)'} · ${result.bendCount} ${FR?'pli(s)':'bend(s)'}${warnings.length?` · ⚠ ${warnings[0]}`:''}`,'ok');
+      }
+      if(activate)setFlatPatternView(true);
+      return result;
+    }catch(error){
+      console.error('[NavoFlo unfold]',error);clearFlatPattern();if(!quiet)setSheetMetalStatus(`${SMT.unfoldFailed} · ${error?.message||error}`,'warn');return null;
     }
-    flatPatternResult=result;
-    if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
-    const firstR=result.bendLines?.find(b=>Number.isFinite(b.insideRadius))?.insideRadius;
-    if((!Number.isFinite(sheetMetalState.radius)||sheetMetalState.radius<0)&&Number.isFinite(firstR))sheetMetalState.radius=firstR;
-    buildFlatPatternScene(result);
-    syncSheetMetalInputs();syncSheetMetalUnfoldUI();captureActiveModelDocumentState();
-    const warnings=(result.warnings||[]).filter(Boolean);
-    setSheetMetalStatus(`${SMT.unfoldReady} · ${result.panelCount} ${FR?'face(s)':'face(s)'} · ${result.bendCount} ${FR?'pli(s)':'bend(s)'}${warnings.length?` · ⚠ ${warnings[0]}`:''}`,'ok');
-    setFlatPatternView(true);
-  }catch(error){
-    console.error('[NavoFlo unfold]',error);clearFlatPattern();setSheetMetalStatus(`${SMT.unfoldFailed} · ${error?.message||error}`,'warn');
-  }finally{if(E.smUnfold)E.smUnfold.disabled=!currentStepResult;}
+  })();
+
+  sheetMetalUnfoldPromise=work;syncSheetMetalUnfoldUI();
+  try{return await work;}finally{if(sheetMetalUnfoldPromise===work)sheetMetalUnfoldPromise=null;syncSheetMetalUnfoldUI();}
 }
 
 function flatPatternTrianglePositions(result){
@@ -1211,20 +1272,64 @@ function flatPatternTrianglePositions(result){
   return new Float32Array([...top,...bottom,...sides]);
 }
 
+function flatPrimitivePoints(primitive,z=0.055){
+  const point=p=>new THREE.Vector3(Number(p?.[0])||0,Number(p?.[1])||0,z);
+  if(primitive?.kind==='line')return[point(primitive.a),point(primitive.b)];
+  if(primitive?.kind==='polyline')return(primitive.points||[]).map(point);
+  if(primitive?.kind==='circle'){
+    const pts=[],steps=72;for(let i=0;i<=steps;i++){const a=i/steps*Math.PI*2;pts.push(new THREE.Vector3(primitive.center[0]+Math.cos(a)*primitive.radius,primitive.center[1]+Math.sin(a)*primitive.radius,z));}return pts;
+  }
+  if(primitive?.kind==='arc'){
+    let sweep=(primitive.endRad-primitive.startRad)%(Math.PI*2);if(sweep<0)sweep+=Math.PI*2;
+    const steps=Math.max(12,Math.ceil(sweep/(Math.PI/36))),pts=[];
+    for(let i=0;i<=steps;i++){const a=primitive.startRad+sweep*i/steps;pts.push(new THREE.Vector3(primitive.center[0]+Math.cos(a)*primitive.radius,primitive.center[1]+Math.sin(a)*primitive.radius,z));}return pts;
+  }
+  return[];
+}
+function flatPolylineLength(points){let length=0;for(let i=0;i+1<points.length;i++)length+=points[i].distanceTo(points[i+1]);return length;}
+
 function buildFlatPatternScene(result){
   if(flatPatternRoot){scene.remove(flatPatternRoot);disposeObject(flatPatternRoot);}
+  flatSurfaceMeshes=[];flatEdgeObjects=[];flatVertexObjects=[];
   flatPatternRoot=new THREE.Group();flatPatternRoot.name='NavoFlo Flat Pattern';
   const positions=flatPatternTrianglePositions(result),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));geometry.computeVertexNormals();
   const material=new THREE.MeshStandardMaterial({color:0xc7ced1,metalness:0.05,roughness:0.58,side:THREE.DoubleSide});
   const mesh=new THREE.Mesh(geometry,material);mesh.userData.flatPattern=true;flatPatternRoot.add(mesh);
 
+  // Selectable flat faces. Each planar flange and each developed bend strip gets
+  // its own invisible hit mesh, so Face/Auto selection works in the flat view just
+  // like it does on the folded STEP model.
+  for(const [index,region] of (result.selectionFaces||[]).entries()){
+    const facePos=[];for(const tri of region.triangles||[])for(const p of tri)facePos.push(p[0],p[1],0.035);
+    if(!facePos.length)continue;
+    const fg=new THREE.BufferGeometry();fg.setAttribute('position',new THREE.Float32BufferAttribute(facePos,3));fg.computeVertexNormals();
+    const fm=new THREE.MeshBasicMaterial({transparent:true,opacity:0.001,depthWrite:false,colorWrite:false,side:THREE.DoubleSide});
+    const hit=new THREE.Mesh(fg,fm);hit.userData.flatPatternSelection=true;hit.userData.flatKind=region.kind;hit.userData.geometryId=`flat:${result.geometryId}`;hit.userData.elementId=region.id||`face-${index+1}`;hit.userData.sourceFaceIds=region.sourceFaceIds||[];hit.renderOrder=80;flatPatternRoot.add(hit);flatSurfaceMeshes.push(hit);
+  }
+
   if(result.boundaryEdges?.length){
     const linePos=[];for(const [a,b] of result.boundaryEdges)linePos.push(a[0],a[1],0.02,b[0],b[1],0.02);
     const lg=new THREE.BufferGeometry();lg.setAttribute('position',new THREE.Float32BufferAttribute(linePos,3));const lm=new THREE.LineBasicMaterial({color:0x172027,depthTest:false,depthWrite:false});const lines=new THREE.LineSegments(lg,lm);lines.renderOrder=70;flatPatternRoot.add(lines);
   }
+
+  // Selectable CUT primitives preserve arcs/circles instead of reducing everything
+  // to triangle edges. The displayed outline remains lightweight while the picker
+  // gets one logical object per edge/curve.
+  const vertexMap=new Map(),addVertex=p=>{const key=`${Math.round(p.x*1e6)},${Math.round(p.y*1e6)}`;if(!vertexMap.has(key))vertexMap.set(key,p.clone());};
+  for(const [index,primitive] of (result.boundaryPrimitives||[]).entries()){
+    const pts=flatPrimitivePoints(primitive);if(pts.length<2)continue;
+    const eg=new THREE.BufferGeometry().setFromPoints(pts),em=new THREE.LineBasicMaterial({transparent:true,opacity:0.001,depthWrite:false});
+    const line=new THREE.Line(eg,em);line.userData.flatPatternSelection=true;line.userData.cadEdge=true;line.userData.geometryId=`flat:${result.geometryId}`;line.userData.elementId=`cut-${primitive.edgeId??index+1}`;line.userData.flatLength=primitive.kind==='circle'?Math.PI*2*primitive.radius:primitive.kind==='arc'?primitive.radius*((primitive.endRad-primitive.startRad+Math.PI*2)%(Math.PI*2)):flatPolylineLength(pts);line.userData.flatPrimitive=primitive;flatPatternRoot.add(line);flatEdgeObjects.push(line);addVertex(pts[0]);addVertex(pts.at(-1));
+  }
+
   if(result.bendLines?.length){
     const bendPos=[];for(const bend of result.bendLines)bendPos.push(bend.a[0],bend.a[1],0.04,bend.b[0],bend.b[1],0.04);
     const bg=new THREE.BufferGeometry();bg.setAttribute('position',new THREE.Float32BufferAttribute(bendPos,3));const bm=new THREE.LineDashedMaterial({color:0x21c58b,dashSize:Math.max(result.thickness*2,1),gapSize:Math.max(result.thickness,0.5),depthTest:false,depthWrite:false});const bl=new THREE.LineSegments(bg,bm);bl.computeLineDistances();bl.renderOrder=72;flatPatternRoot.add(bl);
+    result.bendLines.forEach((bend,index)=>{const pts=[new THREE.Vector3(bend.a[0],bend.a[1],0.06),new THREE.Vector3(bend.b[0],bend.b[1],0.06)],eg=new THREE.BufferGeometry().setFromPoints(pts),em=new THREE.LineBasicMaterial({transparent:true,opacity:0.001,depthWrite:false}),line=new THREE.Line(eg,em);line.userData.flatPatternSelection=true;line.userData.cadEdge=true;line.userData.geometryId=`flat:${result.geometryId}`;line.userData.elementId=`bend-${index+1}`;line.userData.flatLength=pts[0].distanceTo(pts[1]);line.userData.flatBend=true;flatPatternRoot.add(line);flatEdgeObjects.push(line);addVertex(pts[0]);addVertex(pts[1]);});
+  }
+
+  if(vertexMap.size){
+    const pts=[...vertexMap.values()],vg=new THREE.BufferGeometry().setFromPoints(pts),vm=new THREE.PointsMaterial({size:Math.max(modelSize*0.002,0.001),transparent:true,opacity:0.001,depthWrite:false}),vp=new THREE.Points(vg,vm);vp.userData.flatPatternSelection=true;vp.userData.geometryId=`flat:${result.geometryId}`;vp.userData.vertexIds=pts.map((_,i)=>`flat-v-${i+1}`);flatPatternRoot.add(vp);flatVertexObjects.push(vp);
   }
   flatPatternRoot.visible=false;scene.add(flatPatternRoot);
 }
@@ -1241,19 +1346,22 @@ function fitFlatPatternView(){
 
 function setFlatPatternView(active){
   active=Boolean(active&&flatPatternResult&&flatPatternRoot);if(active===flatPatternActive){if(active)fitFlatPatternView();return;}
+  clearSelections();clearPreselection();clearGroup(measureOverlayRoot);clearDimensionLabel();
   if(active&&!flatPatternCameraState)flatPatternCameraState=captureCameraState();flatPatternActive=active;
   if(modelRoot)modelRoot.visible=!active;if(flatPatternRoot)flatPatternRoot.visible=active;
-  for(const group of [selectionRoot,preselectionRoot,measureOverlayRoot,multiMeasureRoot])if(group)group.visible=!active;
-  if(E.measure)E.measure.disabled=active;if(E.multiMeasure)E.multiMeasure.disabled=active;if(E.section)E.section.disabled=active;
-  if(active){closeSelectOther();clearPreselection();fitFlatPatternView();}
-  else{if(flatPatternCameraState)restoreCameraState(flatPatternCameraState);flatPatternCameraState=null;enableTools(Boolean(currentModel));}
+  // V8.17.0: selection + measurement remain fully available in flat view.
+  for(const group of [selectionRoot,preselectionRoot,measureOverlayRoot,multiMeasureRoot])if(group)group.visible=true;
+  if(E.measure)E.measure.disabled=!currentModel;if(E.multiMeasure)E.multiMeasure.disabled=!currentModel;if(E.section)E.section.disabled=active||!currentModel;
+  if(active){closeSelectOther();fitFlatPatternView();if(measureEnabled){E.measureBadge.textContent=FR?'DÉPLIÉ 2D':'FLAT 2D';setMeasurePrompt(T.selectFirst);}}
+  else{if(flatPatternCameraState)restoreCameraState(flatPatternCameraState);flatPatternCameraState=null;enableTools(Boolean(currentModel));if(measureEnabled)E.measureBadge.textContent=currentStepResult?T.exact:T.mesh;}
   syncSheetMetalUnfoldUI();
 }
 
 function clearFlatPattern(){
   const wasActive=flatPatternActive;
-  if(flatPatternActive){flatPatternActive=false;if(modelRoot)modelRoot.visible=true;for(const group of [selectionRoot,preselectionRoot,measureOverlayRoot,multiMeasureRoot])if(group)group.visible=true;}
+  if(flatPatternActive){flatPatternActive=false;if(modelRoot)modelRoot.visible=true;}
   if(flatPatternRoot){scene?.remove(flatPatternRoot);disposeObject(flatPatternRoot);flatPatternRoot=null;}
+  flatSurfaceMeshes=[];flatEdgeObjects=[];flatVertexObjects=[];
   flatPatternResult=null;flatPatternCameraState=null;if(wasActive&&currentModel)enableTools(true);syncSheetMetalUnfoldUI();
 }
 
@@ -1308,7 +1416,7 @@ function getCadPivotUnderPointer(clientX,clientY) {
   if (!currentModel) return getModelRotationCenter();
 
   setRayFromClient(clientX,clientY);
-  const hit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
+  const hit=raycaster.intersectObjects(activePickSurfaces(),false)[0]||null;
 
   if (hit) {
     cadNav.wheelFocus.copy(hit.point);
@@ -1500,6 +1608,12 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
         : null;
       syncSheetMetalInputs();
       syncSheetMetalUnfoldUI();
+    }
+    // V8.17.0: prepare the flat pattern quietly after opening a STEP. The user
+    // stays in folded view, but DÉPLIÉE can become an instant one-click action.
+    if(currentStepResult){
+      const autoDetectRef=currentStepResult;
+      setTimeout(()=>{if(currentStepResult===autoDetectRef&&!flatPatternResult&&!sheetMetalUnfoldPromise)runSheetMetalUnfold({activate:false,quiet:true}).catch(()=>{});},120);
     }
   } catch (error) {
     console.error('[NavoFlo CAD Viewer]',error);
@@ -1765,7 +1879,7 @@ function getCadZoomMinimumStep() {
 
 function getCadZoomReferenceDistance(clientX,clientY) {
   setRayFromClient(clientX,clientY);
-  const hit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
+  const hit=raycaster.intersectObjects(activePickSurfaces(),false)[0]||null;
 
   if(hit){
     cadNav.wheelFocus.copy(hit.point);
@@ -1882,7 +1996,7 @@ function screenDistance(point,clientX,clientY,rect) {
 }
 
 function getFrontSurfaceDistance() {
-  const hit=raycaster.intersectObjects(surfaceMeshes,false)[0];
+  const hit=raycaster.intersectObjects(activePickSurfaces(),false)[0];
   return hit ? hit.distance : Infinity;
 }
 
@@ -1902,7 +2016,7 @@ function pickSelectionCandidate(clientX,clientY) {
   const rect=setRayFromClient(clientX,clientY);
 
   if (!currentStepResult) {
-    const hit=raycaster.intersectObjects(surfaceMeshes,true)[0];
+    const hit=raycaster.intersectObjects(activePickSurfaces(),true)[0];
     return hit ? {kind:'point',point:hit.point.clone(),object:hit.object,meshOnly:true} : null;
   }
 
@@ -1914,11 +2028,11 @@ function pickSelectionCandidate(clientX,clientY) {
 
   // This is the opaque surface physically closest to the camera on the
   // current mouse ray. Edges/vertices farther behind it are not clickable.
-  const frontSurfaceHit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
+  const frontSurfaceHit=raycaster.intersectObjects(activePickSurfaces(),false)[0]||null;
   const frontSurfaceDistance=frontSurfaceHit?.distance ?? Infinity;
 
   if (wantVertex) {
-    const hits=raycaster.intersectObjects(vertexObjects,false).slice(0,8);
+    const hits=raycaster.intersectObjects(activePickVertices(),false).slice(0,8);
     for (const hit of hits) {
       if (!isPickVisible(hit.distance,frontSurfaceDistance,'vertex')) continue;
       const selection=selectionFromVertex(hit);
@@ -1930,7 +2044,7 @@ function pickSelectionCandidate(clientX,clientY) {
   }
 
   if (wantEdge) {
-    const hits=raycaster.intersectObjects(edgeObjects,false).slice(0,12);
+    const hits=raycaster.intersectObjects(activePickEdges(),false).slice(0,12);
     for (const hit of hits) {
       if (!isPickVisible(hit.distance,frontSurfaceDistance,'edge')) continue;
       const selection=selectionFromEdge(hit);
@@ -2037,7 +2151,7 @@ function collectSelectionCandidates(clientX,clientY) {
   const candidates=[];
   const seen=new Set();
 
-  const frontSurfaceHit=raycaster.intersectObjects(surfaceMeshes,false)[0]||null;
+  const frontSurfaceHit=raycaster.intersectObjects(activePickSurfaces(),false)[0]||null;
   const frontSurfaceDistance=frontSurfaceHit?.distance ?? Infinity;
 
   const push=(selection,score,depth)=>{
@@ -2049,19 +2163,19 @@ function collectSelectionCandidates(clientX,clientY) {
   };
 
   if (!currentStepResult) {
-    for(const hit of raycaster.intersectObjects(surfaceMeshes,true).slice(0,5)) {
+    for(const hit of raycaster.intersectObjects(activePickSurfaces(),true).slice(0,5)) {
       push({kind:'point',point:hit.point.clone(),object:hit.object,meshOnly:true},0,hit.distance);
     }
     return candidates.sort((a,b)=>a.depth-b.depth).map(x=>x.selection);
   }
 
-  for(const hit of raycaster.intersectObjects(vertexObjects,false).slice(0,8)) {
+  for(const hit of raycaster.intersectObjects(activePickVertices(),false).slice(0,8)) {
     if(!isPickVisible(hit.distance,frontSurfaceDistance,'vertex'))continue;
     const selection=selectionFromVertex(hit);
     push(selection,screenDistance(selection.point,clientX,clientY,rect)-4,hit.distance);
   }
 
-  for(const hit of raycaster.intersectObjects(edgeObjects,false).slice(0,16)) {
+  for(const hit of raycaster.intersectObjects(activePickEdges(),false).slice(0,16)) {
     if(!isPickVisible(hit.distance,frontSurfaceDistance,'edge'))continue;
     const selection=selectionFromEdge(hit);
     push(selection,screenDistance(selection.point,clientX,clientY,rect)-2,hit.distance);
@@ -2156,7 +2270,7 @@ function selectionFromEdge(hit) {
   const o=hit.object;
   return {
     kind:'edge',geometryId:o.userData.geometryId,elementId:o.userData.elementId,
-    point:hit.point.clone(),object:o,def:o.userData.def,
+    point:hit.point.clone(),object:o,def:o.userData.def,flatPattern:Boolean(o.userData.flatPatternSelection),
     transform:o.matrixWorld.toArray()
   };
 }
@@ -2165,15 +2279,19 @@ function selectionFromVertex(hit) {
   const point=new THREE.Vector3().fromBufferAttribute(o.geometry.getAttribute('position'),hit.index).applyMatrix4(o.matrixWorld);
   return {
     kind:'vertex',geometryId:o.userData.geometryId,elementId:id,
-    point,object:o,def:o.userData.def,transform:o.matrixWorld.toArray()
+    point,object:o,def:o.userData.def,flatPattern:Boolean(o.userData.flatPatternSelection),transform:o.matrixWorld.toArray()
   };
 }
 function selectionFromFace(hit) {
-  const o=hit.object,def=o.userData.def;
-  let id = def.triangleToFaceMap?.[hit.faceIndex];
+  const o=hit.object;
+  if(o.userData.flatPatternSelection){
+    return {kind:'face',geometryId:o.userData.geometryId,elementId:o.userData.elementId,point:hit.point.clone(),object:o,flatPattern:true,transform:o.matrixWorld.toArray()};
+  }
+  const def=o.userData.def;
+  let id = def?.triangleToFaceMap?.[hit.faceIndex];
   if (id == null || id < 0) {
     const offset=hit.faceIndex*3;
-    const face=[...def.facesById.values()].find(f=>offset>=f.firstIndex&&offset<f.firstIndex+f.indexCount);
+    const face=def?[...def.facesById.values()].find(f=>offset>=f.firstIndex&&offset<f.firstIndex+f.indexCount):null;
     id=face?.id;
   }
   if (id == null) return null;
@@ -2235,6 +2353,7 @@ function getSelectedEdgeDirection(selection) {
 }
 
 function getSelectedFaceNormal(selection) {
+  if(selection?.flatPattern&&selection?.kind==='face')return new THREE.Vector3(0,0,1).transformDirection(selection.object.matrixWorld).normalize();
   if(selection?.kind!=='face'||!selection.def?.facesById)return null;
 
   const face=selection.def.facesById.get(Number(selection.elementId));
@@ -2290,6 +2409,11 @@ function getAngleSelectionVector(selection) {
 }
 
 function getFaceTriangleNormals(selection) {
+  if(selection?.flatPattern&&selection?.kind==='face'&&selection.object?.geometry){
+    const geometry=selection.object.geometry,positions=geometry.getAttribute('position'),index=geometry.index?.array||null,matrix=selection.object.matrixWorld,normals=[];
+    const count=index?index.length:positions?.count||0;
+    for(let offset=0;offset+2<count;offset+=3){const ia=index?index[offset]:offset,ib=index?index[offset+1]:offset+1,ic=index?index[offset+2]:offset+2,a=new THREE.Vector3().fromBufferAttribute(positions,ia).applyMatrix4(matrix),b=new THREE.Vector3().fromBufferAttribute(positions,ib).applyMatrix4(matrix),c=new THREE.Vector3().fromBufferAttribute(positions,ic).applyMatrix4(matrix),normal=b.clone().sub(a).cross(c.clone().sub(a));if(normal.lengthSq()>1e-20)normals.push(normal.normalize());}return normals;
+  }
   if(selection?.kind!=='face'||!selection.def?.facesById)return [];
 
   const face=selection.def.facesById.get(Number(selection.elementId));
@@ -2414,7 +2538,7 @@ function measureAngleFallback(a,b) {
 }
 
 async function expandLogicalFaceSelection(selection){
-  if(selection?.kind!=='face'||!currentStepResult)return selection;
+  if(selection?.flatPattern||selection?.kind!=='face'||!currentStepResult)return selection;
   const cacheKey=`${selection.geometryId}:${selection.elementId}`;
   let ids=logicalFaceGroupCache.get(cacheKey);
   if(!ids){
@@ -2425,7 +2549,7 @@ async function expandLogicalFaceSelection(selection){
   return selection;
 }
 async function expandLogicalEdgeSelection(selection){
-  if(selection?.kind!=='edge'||!currentStepResult)return selection;
+  if(selection?.flatPattern||selection?.kind!=='edge'||!currentStepResult)return selection;
   const cacheKey=`${selection.geometryId}:${selection.elementId}`;let ids=logicalEdgeGroupCache.get(cacheKey);
   if(!ids){try{const result=await workerRequest('logical-edge-group',{selection:serialSelection(selection)});ids=Array.isArray(result?.edgeIds)&&result.edgeIds.length?result.edgeIds.map(Number):[Number(selection.elementId)];}catch{ids=[Number(selection.elementId)];}
     ids=[...new Set(ids)].sort((a,b)=>a-b);for(const id of ids)logicalEdgeGroupCache.set(`${selection.geometryId}:${id}`,ids);}
@@ -2440,6 +2564,7 @@ function applyLogicalFaceCleanup(groups){
   for(const line of edgeObjects){const key=`${line.userData?.geometryId}:${Number(line.userData?.elementId)}`;line.userData.logicalHidden=logicalHiddenEdgeKeys.has(key);line.visible=edgesVisible&&!line.userData.logicalHidden;}
 }
 function edgeObjectsForSelection(selection){
+  if(selection?.flatPattern){const parent=selection?.object?.parent;return flatEdgeObjects.filter(line=>line.parent===parent&&String(line.userData?.geometryId)===String(selection.geometryId)&&String(line.userData?.elementId)===String(selection.elementId));}
   const ids=new Set(Array.isArray(selection?.memberEdgeIds)&&selection.memberEdgeIds.length?selection.memberEdgeIds:[Number(selection?.elementId)]);
   const parent=selection?.object?.parent;return edgeObjects.filter(line=>line.parent===parent&&String(line.userData?.geometryId)===String(selection.geometryId)&&ids.has(Number(line.userData?.elementId)));
 }
@@ -2448,7 +2573,8 @@ function faceIdsForHighlight(selection){
   return Array.isArray(selection?.memberFaceIds)&&selection.memberFaceIds.length?selection.memberFaceIds:[Number(selection.elementId)];
 }
 function buildFaceOverlayGeometry(selection){
-  const source=selection.def.geometry,srcIndex=source.index.array,indices=[];
+  if(selection?.flatPattern&&selection.object?.geometry)return selection.object.geometry.clone();
+  const source=selection.def?.geometry,srcIndex=source?.index?.array,indices=[];if(!source||!srcIndex)return null;
   for(const id of faceIdsForHighlight(selection)){
     const face=selection.def.facesById.get(Number(id));if(!face)continue;
     for(let i=face.firstIndex;i<face.firstIndex+face.indexCount;i++)indices.push(srcIndex[i]);
@@ -2495,7 +2621,13 @@ async function acceptSelection(selection, event={}) {
   if (!measureEnabled) return;
 
   E.measureCard.hidden=false;
-  E.measureBadge.textContent=currentStepResult?T.exact:T.mesh;
+  E.measureBadge.textContent=flatPatternActive?(FR?'DÉPLIÉ 2D':'FLAT 2D'):(currentStepResult?T.exact:T.mesh);
+
+  if(flatPatternActive&&selection?.flatPattern){
+    if(selected.length===1)showFlatSingleMeasurement(selected[0]);
+    else if(selected.length===2)showFlatPairMeasurement(selected[0],selected[1]);
+    return;
+  }
 
   if (!currentStepResult) {
     if (selected.length===1) {
@@ -2628,7 +2760,7 @@ function highlightSelection(s,index,parent=selectionRoot) {
     mesh.material.color.setHex(faceColor);
     mesh.material.side=THREE.DoubleSide;
     mesh.material.depthWrite=false;
-    mesh.material.depthFunc=THREE.EqualDepth;
+    mesh.material.depthFunc=s.flatPattern?THREE.LessEqualDepth:THREE.EqualDepth;
     mesh.material.needsUpdate=true;
     mesh.matrix.copy(s.object.matrixWorld);
     mesh.matrixAutoUpdate=false;
@@ -2647,7 +2779,7 @@ function toggleMeasure() {
   clearSelections();
   if (measureEnabled) {
     E.measureCard.hidden=false;
-    E.measureBadge.textContent=currentStepResult?T.exact:T.mesh;
+    E.measureBadge.textContent=flatPatternActive?(FR?'DÉPLIÉ 2D':'FLAT 2D'):(currentStepResult?T.exact:T.mesh);
     setMeasurePrompt(T.selectFirst);
   } else {
     E.measureCard.hidden=true;
@@ -2747,6 +2879,7 @@ function getMeasureAnnotationPoints(result) {
 }
 
 function faceFacePerpendicularAnnotation(result){
+  if(selected.some(s=>s?.flatPattern))return null;
   if(selected.length!==2||selected[0]?.kind!=='face'||selected[1]?.kind!=='face')return null;
   const n1=getSelectedFaceNormal(selected[0]),n2=getSelectedFaceNormal(selected[1]);if(!n1||!n2||Math.abs(n1.dot(n2))<0.9995)return null;
   const a=selected[0].point?.clone?.(),b=selected[1].point?.clone?.();if(!a||!b)return null;
@@ -2850,6 +2983,38 @@ function showPairExact(r) {
 
   E.selectionSummary.textContent=`${labelSelection(selected[0])}  →  ${labelSelection(selected[1])}`;
   if(multiMeasureEnabled){pinCurrentMeasurement();E.selectionSummary.textContent=T.multiAdded;}
+}
+
+function flatFaceArea(selection){
+  const geometry=selection?.object?.geometry,positions=geometry?.getAttribute?.('position'),index=geometry?.index?.array||null;if(!positions)return 0;
+  const count=index?index.length:positions.count;let area=0;
+  for(let i=0;i+2<count;i+=3){const ia=index?index[i]:i,ib=index?index[i+1]:i+1,ic=index?index[i+2]:i+2,a=new THREE.Vector3().fromBufferAttribute(positions,ia),b=new THREE.Vector3().fromBufferAttribute(positions,ib),c=new THREE.Vector3().fromBufferAttribute(positions,ic);area+=b.sub(a).cross(c.sub(a)).length()/2;}
+  return area;
+}
+function showFlatSingleMeasurement(selection){
+  clearGroup(measureOverlayRoot);clearDimensionLabel();currentMeasureResult=null;
+  if(selection?.kind==='edge'){
+    const source=edgeObjectsForSelection(selection)[0]||selection.object,attr=source?.geometry?.getAttribute?.('position');let length=Number(source?.userData?.flatLength);
+    if(!Number.isFinite(length)&&attr?.count>1){length=0;for(let i=0;i+1<attr.count;i++){const a=new THREE.Vector3().fromBufferAttribute(attr,i),b=new THREE.Vector3().fromBufferAttribute(attr,i+1);length+=a.distanceTo(b);}}
+    if(Number.isFinite(length)){
+      const label=formatLength(length);E.measureMain.textContent=label;renderDetails([[FR?'Longueur':'Length',label]]);currentMeasureResult={ok:true,kind:'distance',value:length};
+      if(attr?.count>1){const a=new THREE.Vector3().fromBufferAttribute(attr,0).applyMatrix4(source.matrixWorld),b=new THREE.Vector3().fromBufferAttribute(attr,attr.count-1).applyMatrix4(source.matrixWorld);drawMeasureLine(a.toArray(),b.toArray(),label);}
+    }
+  }else if(selection?.kind==='face'){
+    const area=flatFaceArea(selection),label=formatArea(area);E.measureMain.textContent=label;renderDetails([[T.area,label]]);currentMeasureResult={ok:true,kind:'area',value:area};
+  }else{
+    E.measureMain.textContent=formatPoint(selection.point);renderDetails([]);
+  }
+  E.selectionSummary.textContent=T.selectSecond;
+}
+function showFlatPairMeasurement(a,b){
+  const mode=E.measureType.value;
+  if(mode==='angle'||mode==='smart'){
+    const angle=measureAngleFallback(a,b);
+    if(angle?.ok&&Number.isFinite(angle.value)&&(mode==='angle'||angle.value>THREE.MathUtils.degToRad(0.25))){showPairExact(angle);return;}
+  }
+  const delta=new THREE.Vector3().subVectors(b.point,a.point),distance=a.point.distanceTo(b.point),result={ok:true,kind:'distance',value:distance,pointA:a.point.toArray(),pointB:b.point.toArray(),dx:Math.abs(delta.x),dy:Math.abs(delta.y),dz:Math.abs(delta.z),flat:true};
+  showPairExact(result);
 }
 
 function showMeshPointDistance(a,b) {
@@ -3460,6 +3625,11 @@ function updateDisplayedUnits() {
 
 async function refreshMeasurementUnits() {
   if(!measureEnabled)return;
+
+  if(flatPatternActive){
+    if(selected.length===1)showFlatSingleMeasurement(selected[0]);else if(selected.length===2)showFlatPairMeasurement(selected[0],selected[1]);
+    return;
+  }
 
   if(!currentStepResult){
     if(selected.length===2)showMeshPointDistance(selected[0],selected[1]);
