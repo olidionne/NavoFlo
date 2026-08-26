@@ -1,7 +1,7 @@
-import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.5';
+import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.6';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.17.5
+ * NavoFlo Sheet Metal Engine — V8.17.6
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -405,6 +405,68 @@ function detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag){
   return best;
 }
 
+
+// V8.17.6 — conservative structural/profile extrusion recognition.
+//
+// Geometry alone cannot prove *manufacturing intent*: a very long press-brake
+// channel and a cold-formed stock channel can be mathematically identical.
+// What we can prove safely is the geometric class "long constant-direction
+// profile/extrusion".  We only promote that class when the evidence is strong:
+// a dominant family of exact linear B-Rep edges, many long parallel traces,
+// a large length/cross-section aspect ratio, and side-surface area aligned with
+// the same axis.  Flat plates are handled first by detectExactFlatPrism(), so a
+// laser-cut plate never gets stolen by this detector.
+function canonicalAxis(v){
+  let n=V3.unit(v);if(!n)return null;let k=0;for(let i=1;i<3;i++)if(Math.abs(n[i])>Math.abs(n[k]))k=i;if(n[k]<0)n=V3.scale(n,-1);return n;
+}
+function profilePlaneBasis(axis){
+  const n=canonicalAxis(axis);if(!n)return null;const refs=[[1,0,0],[0,1,0],[0,0,1]].sort((a,b)=>Math.abs(V3.dot(a,n))-Math.abs(V3.dot(b,n)));
+  const u=V3.unit(V3.cross(n,refs[0]));if(!u)return null;const v=V3.unit(V3.cross(n,u));if(!v)return null;return{n,u,v};
+}
+function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
+  const lines=[];
+  for(const edge of geometry.edges||[]){
+    const info=ctx.edgeInfoById.get(Number(edge.id))||{};if(!['line','linear'].includes(family(info.family)))continue;
+    const length=exactStraightEdgeLength(ctx,edge),dir=canonicalAxis(exactStraightEdgeDirection(ctx,edge));if(!(length>tol*20)||!dir)continue;
+    const pts=exactEdgePoints(ctx,edge);if(pts.length<2)continue;lines.push({edge,length,dir,a:pts[0],b:pts.at(-1)});
+  }
+  if(lines.length<5)return null;
+  const clusters=[];
+  for(const line of lines){
+    let cluster=clusters.find(c=>Math.abs(V3.dot(c.axis,line.dir))>=0.9995);
+    if(!cluster){cluster={axis:line.dir.slice(),members:[],score:0};clusters.push(cluster);}
+    const aligned=V3.dot(cluster.axis,line.dir)<0?V3.scale(line.dir,-1):line.dir;cluster.members.push(line);cluster.score+=line.length;
+    const weighted=V3.add(V3.scale(cluster.axis,Math.max(cluster.score-line.length,EPS)),V3.scale(aligned,line.length));cluster.axis=canonicalAxis(weighted)||cluster.axis;
+  }
+  clusters.sort((a,b)=>b.score-a.score);const best=clusters[0];if(!best||best.members.length<5)return null;
+  const basis=profilePlaneBasis(best.axis),points=allGeometryPoints(geometry,ctx);if(!basis||points.length<4)return null;
+  let lo=Infinity,hi=-Infinity,minU=Infinity,maxU=-Infinity,minV=Infinity,maxV=-Infinity;
+  for(const p of points){const d=V3.dot(p,basis.n),u=V3.dot(p,basis.u),v=V3.dot(p,basis.v);lo=Math.min(lo,d);hi=Math.max(hi,d);minU=Math.min(minU,u);maxU=Math.max(maxU,u);minV=Math.min(minV,v);maxV=Math.max(maxV,v);}
+  const length=hi-lo,spanU=maxU-minU,spanV=maxV-minV,crossSpan=Math.max(spanU,spanV);if(!(length>tol*50&&crossSpan>tol*20))return null;
+  const aspect=length/crossSpan;
+  // 2.45 keeps this intentionally conservative. The real regression profiles
+  // supplied for V8.17.6 range from ~2.82 to >32, while the formed-sheet
+  // regression parts stay below 1.85.
+  if(aspect<2.45)return null;
+  const longEdges=best.members.filter(e=>e.length>=length*0.55);if(longEdges.length<5)return null;
+  const traceStep=Math.max(tol*20,crossSpan*1e-5,1e-6),traceKeys=new Set();
+  for(const e of longEdges){const p=V3.scale(V3.add(e.a,e.b),0.5),u=V3.dot(p,basis.u),v=V3.dot(p,basis.v);traceKeys.add(`${Math.round(u/traceStep)},${Math.round(v/traceStep)}`);}
+  if(traceKeys.size<4)return null;
+  let totalArea=0,longitudinalArea=0;
+  for(const info of ctx.infoById.values()){
+    const area=Number(info?.area);if(!(area>EPS))continue;totalArea+=area;const fam=family(info.family);
+    if(isPlanar(fam)){
+      const n=V3.unit(Array.isArray(info.localNormal)?info.localNormal.map(Number).slice(0,3):[]);if(n&&Math.abs(V3.dot(n,basis.n))<=0.08)longitudinalArea+=area;
+    }else if(isCyl(fam)){
+      const a=V3.unit(Array.isArray(info.axisDirection)?info.axisDirection.map(Number).slice(0,3):[]);if(a&&Math.abs(V3.dot(a,basis.n))>=0.995)longitudinalArea+=area;
+    }
+  }
+  const sideAreaRatio=totalArea>EPS?longitudinalArea/totalArea:1;if(sideAreaRatio<0.52)return null;
+  const coverage=median(longEdges.map(e=>Math.min(1,e.length/length)))||0;
+  const confidence=clamp(0.45+Math.min((aspect-2.45)/6,0.25)+Math.min((longEdges.length-5)/20,0.15)+Math.min(Math.max(sideAreaRatio-0.52,0)*0.35,0.15),0,1);
+  return{kind:'constant-section-profile',axis:basis.n,length,crossSpan,spanU,spanV,aspect,longEdgeCount:longEdges.length,traceCount:traceKeys.size,sideAreaRatio,coverage,confidence};
+}
+
 function cylinderPartner(cyl,cylinders,thickness,tol){
   if(!Number.isFinite(thickness)||thickness<=0)return null;let best=null;
   for(const other of cylinders){
@@ -632,27 +694,33 @@ function chooseCircularArcDirection(start,end,samplePoints,center,desiredSweep){
   if(Math.abs(ab.lengthError-ba.lengthError)>1e-8)return ab.lengthError<ba.lengthError?ab:ba;
   return ab;
 }
-function boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,tol,planarGroups){
+function boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,tol,planarGroups,logicalGroups=[]){
   const bendByFace=new Map(),skinFaces=new Set();for(const groupId of panelMaps.keys())for(const fid of planarGroups.byId.get(groupId)?.faceIds||[])skinFaces.add(Number(fid));for(const bend of usedBends)for(const fid of bend.cyl.faceIds){bendByFace.set(Number(fid),bend);skinFaces.add(Number(fid));}
+  // Map every source face to the same logical-face group used by the folded
+  // viewer. This lets a hole wall remain one selectable cylindrical face after
+  // unfolding even when OCCT split it into several B-Rep face fragments.
+  const logicalByFace=new Map();for(const group of logicalGroups||[]){const ids=[...new Set((group?.faceIds||[]).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);if(!ids.length)continue;for(const id of ids)logicalByFace.set(id,ids);}
   const primitives=[];
   for(const edge of geometry.edges||[]){
-    const eid=Number(edge.id),owners=[...(ctx.edgeOwnersById.get(eid)||[])].map(Number).filter(id=>skinFaces.has(id));if(owners.length!==1)continue;const owner=owners[0],pts=edgePoints(edge);if(pts.length<2)continue;
+    const eid=Number(edge.id),allOwners=[...(ctx.edgeOwnersById.get(eid)||[])].map(Number),owners=allOwners.filter(id=>skinFaces.has(id));if(owners.length!==1)continue;const owner=owners[0],pts=edgePoints(edge);if(pts.length<2)continue;
+    const wallFaceIds=[...new Set(allOwners.filter(id=>!skinFaces.has(id)).flatMap(id=>logicalByFace.get(id)||[id]))].sort((a,b)=>a-b);
+    const wallMeta=wallFaceIds.length?{wallFaceIds}:{};
     const groupId=planarGroups.faceToGroup.get(owner),panelMap=groupId?panelMaps.get(groupId):null,bendMap=bendByFace.get(owner);if(!panelMap&&!bendMap)continue;const mapped=pts.map(p=>panelMap?mapPoint(panelMap,p):mapBendPoint(bendMap,p));
     const info=ctx.edgeInfoById.get(eid)||{},ef=family(info.family);
     if(panelMap&&['circle','circular'].includes(ef)&&Number.isFinite(Number(info.radius))&&Array.isArray(info.localCenter)){
       const center=mapPoint(panelMap,info.localCenter.map(Number).slice(0,3)),radius=Number(info.radius),length=Number(info.length),desired=Number.isFinite(length)&&radius>EPS?length/radius:NaN;
-      if(Number.isFinite(desired)&&Math.abs(desired-TAU)<=1e-3){primitives.push({kind:'circle',center,radius,edgeId:eid});continue;}
+      if(Number.isFinite(desired)&&Math.abs(desired-TAU)<=1e-3){primitives.push({kind:'circle',center,radius,edgeId:eid,...wallMeta});continue;}
       const exactPts=exactEdgePoints(ctx,edge),mappedExact=exactPts.map(p=>mapPoint(panelMap,p));
       const a0=mappedExact[0]||mapped[0],b0=mappedExact.at(-1)||mapped.at(-1);
       const start=Math.atan2(a0[1]-center[1],a0[0]-center[0]),end=Math.atan2(b0[1]-center[1],b0[0]-center[0]);
       const chosen=chooseCircularArcDirection(start,end,mapped.slice(1,-1),center,desired);
-      primitives.push({kind:'arc',center,radius,startRad:chosen.a,endRad:chosen.b,edgeId:eid});continue;
+      primitives.push({kind:'arc',center,radius,startRad:chosen.a,endRad:chosen.b,edgeId:eid,...wallMeta});continue;
     }
     if(['line','linear'].includes(ef)||isStraight2D(mapped,tol)){
       const exactPts=exactEdgePoints(ctx,edge),exactMapped=exactPts.map(p=>panelMap?mapPoint(panelMap,p):mapBendPoint(bendMap,p));
-      primitives.push({kind:'line',a:exactMapped[0]||mapped[0],b:exactMapped.at(-1)||mapped.at(-1),edgeId:eid});continue;
+      primitives.push({kind:'line',a:exactMapped[0]||mapped[0],b:exactMapped.at(-1)||mapped.at(-1),edgeId:eid,...wallMeta});continue;
     }
-    primitives.push({kind:'polyline',points:mapped,edgeId:eid});
+    primitives.push({kind:'polyline',points:mapped,edgeId:eid,...wallMeta});
   }
   return primitives;
 }
@@ -756,6 +824,10 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   // Only automatic preflight may promote the exact prism proof. A manually
   // selected fixed face remains a true expert override.
   const exactFlatPrism=!hasRequestedFixed?detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag):null;
+  const structuralProfile=!hasRequestedFixed&&!exactFlatPrism?detectStructuralProfileExtrusion(geometry,ctx,tol,diag):null;
+  if(structuralProfile){
+    return{ok:false,code:'structural-profile',message:'A long constant-section profile/extrusion was detected; sheet-metal unfolding is intentionally suppressed.',profile:true,profileType:structuralProfile.kind,profile:structuralProfile,diagnostics:{structuralProfile}};
+  }
 
   let rejectedNonBendCylinders=0;
   const candidateBends=exactFlatPrism?[]:cylinders.map(c=>{
@@ -840,7 +912,7 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
     // laser-cut plates and to formed sheet-metal parts.
     if(!connected&&candidateBends.length===0&&(exactFlatPrism||autoThickness?.source==='parallel-planar-skins')){
       const mapped=projectPanelTriangles(ctx,fixedPanel,rootMap),triangles=mapped,flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6);
-      const boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,[],flatTol,planarGroups),bounds=bounds2D(triangles);
+      const boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,[],flatTol,planarGroups,logicalGroups),bounds=bounds2D(triangles);
       if(triangles.length&&boundaryEdges.length){
         const primitivesClosed=boundaryPrimitivesClosed(boundaryPrimitives,Math.max(resolvedThickness*1e-5,1e-6));
         if(!primitivesClosed)warnings.push('Exact CUT primitives contain an open chain; DXF export will use the welded mesh boundary as a safe fallback.');
@@ -863,7 +935,7 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
     const mapped=projectBendTriangles(ctx,bend);bendTriangles.push(...mapped);
     if(mapped.length)selectionFaces.push({id:`flat-bend-${selectionFaces.length+1}`,kind:'bend',sourceFaceIds:bend.cyl.faceIds.slice(),triangles:mapped});
   }
-  const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
+  const triangles=[...panelTriangles,...bendTriangles],flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6),boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,usedBends,flatTol,planarGroups,logicalGroups),bendLines=usedBends.map(makeBendLine),bounds=bounds2D(triangles);
   if(!triangles.length||!boundaryEdges.length)return{ok:false,code:'flat-empty',message:'The flat pattern could not be reconstructed.',warnings};
   const primitivesClosed=boundaryPrimitivesClosed(boundaryPrimitives,Math.max(resolvedThickness*1e-5,1e-6));
   if(!primitivesClosed)warnings.push('Exact CUT primitives contain an open chain; DXF export will use the welded mesh boundary as a safe fallback.');

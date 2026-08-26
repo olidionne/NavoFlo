@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.5';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.6';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -54,7 +54,7 @@ const E = {
   clipSlider:$('clip-slider'), clipInvert:$('clip-invert'),
   viewButton:$('view-menu-button'), viewMenu:$('view-menu'), perspectiveToggle:$('perspective-toggle'),
   props:$('properties-toggle'), propsDrawer:$('properties-drawer'), propsClose:$('properties-close'), fullscreen:$('fullscreen-toggle'),
-  propFile:$('prop-file'), propFormat:$('prop-format'), propUnits:$('prop-units'),
+  propFile:$('prop-file'), propFormat:$('prop-format'), propType:$('prop-type'), propUnits:$('prop-units'),
   propParts:$('prop-parts'), propGeometries:$('prop-geometries'), propTriangles:$('prop-triangles'),
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
   stepDate:$('step-date'), stepAuthor:$('step-author'), stepOrg:$('step-org'),
@@ -75,7 +75,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.17.5';
+const WORKER_URL = '/js/step-worker.js?v=8.17.6';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -152,8 +152,9 @@ const sheetMetalState = {
 };
 
 let flatPatternRoot=null,flatPatternResult=null,flatPatternActive=false,flatPatternCameraState=null,sheetMetalUnfoldPromise=null;
-let sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false};
+let sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:false,profileType:null,profileData:null};
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, multiMeasureRoot, grid;
+let sectionCapRoot=null,sectionCapPlaneMesh=null;
 let cameraProjectionMode='orthographic';
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
 let currentStats = null, currentStepHeader = null, currentStepResult = null, currentStepProperties = [];
@@ -842,7 +843,7 @@ function resetSheetMetalForModel() {
   sheetMetalState.manualKEnabled=false;
   sheetMetalState.manualK=AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness ?? 0.40;
   sheetMetalState.fixedFace=null;
-  sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false};
+  sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:false,profileType:null,profileData:null};
 
   if(E.smAngle)E.smAngle.value='90';
   if(E.smManualToggle)E.smManualToggle.checked=false;
@@ -850,6 +851,7 @@ function resetSheetMetalForModel() {
   if(E.smManualK)E.smManualK.value=String(sheetMetalState.manualK);
   syncSheetMetalInputs();
   syncSheetMetalUnfoldUI();
+  updateGeometryTypeIndicator();
 }
 
 function openSheetMetalPanel() {
@@ -1191,14 +1193,16 @@ function describeUnfoldFailure(result){
     'thickness-unresolved':'L’épaisseur de tôle n’a pas pu être détectée. Entrez T puis réessayez.',
     'fixed-face-map':'Impossible d’établir le repère de la face fixe.',
     'flat-empty':'Le développé n’a pas pu être reconstruit.',
-    'fixed-face-not-planar':'La face fixe doit être plane.'
+    'fixed-face-not-planar':'La face fixe doit être plane.',
+    'structural-profile':'Profilé / extrusion à section constante détecté. Le dépliage de tôle est désactivé automatiquement.'
   }:{
     'no-bends':'No standard cylindrical bend connected to the fixed panel was detected.',
     'bend-resolution-failed':'A bend touches the fixed panel, but its parameters could not be resolved safely. Check T, inside radius and K-factor.',
     'thickness-unresolved':'Sheet thickness could not be detected. Enter T and try again.',
     'fixed-face-map':'Unable to establish the fixed-face coordinate system.',
     'flat-empty':'The flat pattern could not be reconstructed.',
-    'fixed-face-not-planar':'The fixed face must be planar.'
+    'fixed-face-not-planar':'The fixed face must be planar.',
+    'structural-profile':'A constant-section profile / extrusion was detected. Sheet-metal unfolding is automatically disabled.'
   };
   return messages[code]||result?.message||SMT.unsupportedTopology;
 }
@@ -1226,7 +1230,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       const geometries=fixed?allGeometries.filter(g=>String(g.id)===String(fixed.geometryId)):allGeometries;
       if(!geometries.length){if(!quiet)setSheetMetalStatus(SMT.unfoldFailed+' · géométrie introuvable','warn');return null;}
 
-      let best=null,bestScore=-Infinity,bestFailure=null;
+      let best=null,bestScore=-Infinity,bestFailure=null,bestProfile=null;
       for(const geometry of geometries){
         if(currentStepResult!==stepRef)return null;
         let exact;
@@ -1242,6 +1246,11 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           kResolver:resolveUnfoldK
         });
         if(!result?.ok){
+          if(result?.code==='structural-profile'){
+            const confidence=Number(result?.profile?.confidence)||0;
+            if(!bestProfile||confidence>(Number(bestProfile?.profile?.confidence)||0))bestProfile={...result,geometryId:String(geometry.id)};
+            continue;
+          }
           // Prefer a meaningful bend/thickness failure over a generic no-bends
           // result when an assembly contains several unrelated solids.
           if(!bestFailure||bestFailure.code==='no-bends')bestFailure=result;
@@ -1254,7 +1263,14 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
 
       if(currentStepResult!==stepRef)return null;
       if(!best){
-        flatPatternResult=null;clearFlatPattern();syncSheetMetalUnfoldUI();
+        flatPatternResult=null;clearFlatPattern();
+        if(bestProfile){
+          sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
+          syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();
+          if(!quiet)console.info('[NavoFlo profile detection]',bestProfile);
+          return null;
+        }
+        syncSheetMetalUnfoldUI();
         if(!quiet){
           console.warn('[NavoUnfold diagnostics]',bestFailure);
           const reason=describeUnfoldFailure(bestFailure||{});
@@ -1267,13 +1283,13 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
 
       const result=best.result;
       flatPatternResult=result;
-      sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate)};
+      sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),profile:false,profileType:null,profileData:null};
       sheetMetalState.fixedFace={geometryId:String(best.geometry.id),elementId:Number(result.fixedFaceId)};
       if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
       const firstR=result.bendLines?.find(b=>Number.isFinite(b.insideRadius))?.insideRadius;
       if((!Number.isFinite(sheetMetalState.radius)||sheetMetalState.radius<0)&&Number.isFinite(firstR))sheetMetalState.radius=firstR;
       buildFlatPatternScene(result);
-      syncSheetMetalInputs();syncSheetMetalUnfoldUI();captureActiveModelDocumentState();
+      syncSheetMetalInputs();syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();captureActiveModelDocumentState();
       if(!quiet){
         const warnings=(result.warnings||[]).filter(Boolean);
         const auto=result.fixedFaceAutomatic?(FR?' · détection auto':' · auto-detected'):'';
@@ -1340,6 +1356,14 @@ function flatWallGeometry(points,thickness){
   const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.computeVertexNormals();return g;
 }
 
+function flatWallGeometryChains(chains,thickness){
+  const t=Math.max(Number(thickness)||0,1e-6),pos=[];
+  for(const points of chains||[])for(let i=0;i+1<points.length;i++){
+    const a=points[i],b=points[i+1];pos.push(a.x,a.y,0,b.x,b.y,0,b.x,b.y,-t,a.x,a.y,0,b.x,b.y,-t,a.x,a.y,-t);
+  }
+  if(!pos.length)return null;const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.computeVertexNormals();return g;
+}
+
 function buildFlatPatternScene(result){
   if(flatPatternRoot){scene.remove(flatPatternRoot);disposeObject(flatPatternRoot);}
   flatSurfaceMeshes=[];flatEdgeObjects=[];flatVertexObjects=[];
@@ -1362,9 +1386,22 @@ function buildFlatPatternScene(result){
   }
 
   const physicalChains=flatPhysicalBoundaryChains(result,0.02);
-  for(const [index,chain] of physicalChains.entries()){
-    const wg=flatWallGeometry(chain,t);if(!wg)continue;
-    const wall=new THREE.Mesh(wg,hitMaterial());wall.userData.flatPatternSelection=true;wall.userData.flatKind='wall';wall.userData.geometryId=`flat:${result.geometryId}`;wall.userData.elementId=`wall-${index+1}`;wall.renderOrder=80;flatPatternRoot.add(wall);flatSurfaceMeshes.push(wall);
+  // V8.17.6: make flat wall selection obey the same logical-face conditions as
+  // the folded STEP. Exact CUT primitives carry the source side-face IDs; all
+  // pieces belonging to one OCCT logical cylinder are merged into one invisible
+  // hit mesh. Clicking any part of a hole therefore selects the complete hole wall.
+  const wallGroups=[];
+  if(result?.boundaryPrimitivesClosed&&(result.boundaryPrimitives||[]).length){
+    const grouped=new Map();
+    for(const [index,primitive] of result.boundaryPrimitives.entries()){
+      const ids=(primitive.wallFaceIds||[]).map(Number).filter(Number.isFinite).sort((a,b)=>a-b),key=ids.length?`src:${ids.join(',')}`:`edge:${index}`;
+      if(!grouped.has(key))grouped.set(key,{key,ids,chains:[]});const pts=flatPrimitivePoints(primitive,0.02);if(pts.length>1)grouped.get(key).chains.push(pts);
+    }
+    wallGroups.push(...grouped.values());
+  }else physicalChains.forEach((chain,index)=>wallGroups.push({key:`mesh:${index}`,ids:[],chains:[chain]}));
+  for(const [index,group] of wallGroups.entries()){
+    const wg=flatWallGeometryChains(group.chains,t);if(!wg)continue;
+    const wall=new THREE.Mesh(wg,hitMaterial());wall.userData.flatPatternSelection=true;wall.userData.flatKind='wall';wall.userData.geometryId=`flat:${result.geometryId}`;wall.userData.elementId=group.ids.length?`wall-face-${group.ids.join('-')}`:`wall-${index+1}`;wall.userData.sourceFaceIds=group.ids;wall.renderOrder=80;flatPatternRoot.add(wall);flatSurfaceMeshes.push(wall);
   }
 
   if(physicalChains.length){
@@ -1408,7 +1445,7 @@ function setFlatPatternView(active){
   active=Boolean(active&&flatPatternResult&&flatPatternRoot);if(active===flatPatternActive){if(active)fitFlatPatternView();return;}
   clearSelections();clearPreselection();clearGroup(measureOverlayRoot);clearDimensionLabel();
   if(active&&!flatPatternCameraState)flatPatternCameraState=captureCameraState();flatPatternActive=active;
-  if(modelRoot)modelRoot.visible=!active;if(flatPatternRoot)flatPatternRoot.visible=active;
+  if(modelRoot)modelRoot.visible=!active;if(flatPatternRoot)flatPatternRoot.visible=active;if(sectionCapRoot)sectionCapRoot.visible=!active&&clipEnabled;
   // V8.17.2: selection + measurement remain fully available on the complete flat solid.
   for(const group of [selectionRoot,preselectionRoot,measureOverlayRoot,multiMeasureRoot])if(group)group.visible=true;
   if(E.measure)E.measure.disabled=!currentModel;if(E.multiMeasure)E.multiMeasure.disabled=!currentModel;if(E.section)E.section.disabled=active||!currentModel;
@@ -3360,6 +3397,43 @@ function updatePickingVisibility() {
   vertexObjects.forEach(o=>o.material.opacity=selectionMode==='vertex'?0.5:0);
 }
 
+
+// V8.17.6 — solid-looking STEP section caps.
+// STEP is already retained as an exact OCCT B-Rep solid. Three.js renders the
+// boundary triangles, so a GPU clipping plane normally exposes an apparently
+// hollow shell. The stencil pass below closes the visual section without voxel
+// conversion or modifying the exact model/topology used for measurement.
+function clearSectionCaps(){
+  if(!sectionCapRoot)return;scene?.remove(sectionCapRoot);
+  sectionCapRoot.traverse(object=>{
+    if(object.material){const materials=Array.isArray(object.material)?object.material:[object.material];materials.forEach(m=>m?.dispose?.());}
+    if(object.userData?.sectionCapPlane)object.geometry?.dispose?.();
+  });
+  sectionCapRoot=null;sectionCapPlaneMesh=null;
+}
+function sectionStencilMaterial(side,operation){
+  const m=new THREE.MeshBasicMaterial({depthWrite:false,depthTest:false,colorWrite:false,side,clippingPlanes:[clipPlane]});
+  m.stencilWrite=true;m.stencilFunc=THREE.AlwaysStencilFunc;m.stencilFail=operation;m.stencilZFail=operation;m.stencilZPass=operation;return m;
+}
+function updateSectionCapTransform(){
+  if(!sectionCapPlaneMesh)return;clipPlane.coplanarPoint(sectionCapPlaneMesh.position);
+  const n=clipPlane.normal.clone().normalize();sectionCapPlaneMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),n);sectionCapPlaneMesh.updateMatrix();
+}
+function buildSectionCaps(){
+  clearSectionCaps();if(!clipEnabled||flatPatternActive||!currentModel||!surfaceMeshes.length)return;
+  const root=new THREE.Group();root.name='NavoFlo Solid Section Cap';let count=0;
+  for(const source of surfaceMeshes){
+    if(!source?.isMesh||!source.geometry||source.userData?.flatPatternSelection)continue;
+    source.updateWorldMatrix?.(true,false);
+    const back=new THREE.Mesh(source.geometry,sectionStencilMaterial(THREE.BackSide,THREE.IncrementWrapStencilOp));back.matrix.copy(source.matrixWorld);back.matrixAutoUpdate=false;back.renderOrder=90;back.userData.sectionStencil=true;root.add(back);
+    const front=new THREE.Mesh(source.geometry,sectionStencilMaterial(THREE.FrontSide,THREE.DecrementWrapStencilOp));front.matrix.copy(source.matrixWorld);front.matrixAutoUpdate=false;front.renderOrder=90;front.userData.sectionStencil=true;root.add(front);count++;
+  }
+  if(!count)return;
+  const size=Math.max(modelSize*4,1),geometry=new THREE.PlaneGeometry(size,size),material=new THREE.MeshStandardMaterial({color:0xaeb8bc,metalness:0.06,roughness:0.62,side:THREE.DoubleSide,depthWrite:true,depthTest:true,polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1});
+  material.stencilWrite=true;material.stencilRef=0;material.stencilFunc=THREE.NotEqualStencilFunc;material.stencilFail=THREE.ReplaceStencilOp;material.stencilZFail=THREE.ReplaceStencilOp;material.stencilZPass=THREE.ReplaceStencilOp;
+  const cap=new THREE.Mesh(geometry,material);cap.renderOrder=91;cap.userData.sectionCapPlane=true;root.add(cap);sectionCapRoot=root;sectionCapPlaneMesh=cap;scene.add(root);updateSectionCapTransform();
+}
+
 function updateClipping() {
   const axis=E.clipAxis.value;
   clipPlane.normal.set(axis==='x'?1:0,axis==='y'?1:0,axis==='z'?1:0);
@@ -3381,6 +3455,8 @@ function updateClipping() {
       material.needsUpdate=true;
     });
   });
+  if(clipEnabled){if(!sectionCapRoot)buildSectionCaps();else updateSectionCapTransform();if(sectionCapRoot)sectionCapRoot.visible=!flatPatternActive;}
+  else clearSectionCaps();
 }
 
 function modelBoundsViewExtents(center){
@@ -3414,9 +3490,23 @@ function fitCamera(view='iso') {
   fitCurrentView();
 }
 
+
+function updateGeometryTypeIndicator(){
+  if(!E.propType)return;
+  if(!currentStepResult){E.propType.textContent=currentModel?(FR?'Maillage':'Mesh'):'—';return;}
+  if(sheetMetalCapability.profile){
+    const aspect=Number(sheetMetalCapability.profileData?.aspect),suffix=Number.isFinite(aspect)?` · L/C ${aspect.toFixed(1)}`:'';
+    E.propType.textContent=(FR?'Profilé / extrusion':'Profile / extrusion')+suffix;return;
+  }
+  if(sheetMetalCapability.recognized&&sheetMetalCapability.flatPlate){E.propType.textContent=FR?'Plaque plane':'Flat plate';return;}
+  if(sheetMetalCapability.recognized&&sheetMetalCapability.bendCount>0){E.propType.textContent=FR?'Tôle pliée':'Sheet metal';return;}
+  E.propType.textContent=FR?'Solide STEP':'STEP solid';
+}
+
 function fillProperties() {
   E.propFile.textContent=currentFile?.name||'—';
   E.propFormat.textContent=currentFormat||'—';
+  updateGeometryTypeIndicator();
   E.propUnits.textContent=unitLabel(displayUnit);
   E.propParts.textContent=String(currentStats?.partCount??1);
   E.propGeometries.textContent=String(currentStats?.geometryCount??surfaceMeshes.length);
@@ -3618,6 +3708,7 @@ async function clearModel(showMessage=true) {
   clearMultiMeasurements();
   clearPreselection();
   clearFlatPattern();
+  clearSectionCaps();
   if (currentStepResult && worker) {
     try {await workerRequest('release');} catch {}
   }
