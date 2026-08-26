@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.0';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.1';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -75,7 +75,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.17.0';
+const WORKER_URL = '/js/step-worker.js?v=8.17.1';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -1265,9 +1265,12 @@ function flatPatternTrianglePositions(result){
     const a=[tri[0][0],tri[0][1],0],b=[tri[1][0],tri[1][1],0],c=[tri[2][0],tri[2][1],0];top.push(...a,...b,...c);
     const ab=[a[0],a[1],-t],bb=[b[0],b[1],-t],cb=[c[0],c[1],-t];bottom.push(...cb,...bb,...ab);
   }
-  for(const edge of result.boundaryEdges||[]){
-    const a=[edge[0][0],edge[0][1],0],b=[edge[1][0],edge[1][1],0],a2=[a[0],a[1],-t],b2=[b[0],b[1],-t];
-    sides.push(...a,...b,...b2,...a,...b2,...a2);
+  // Use the exact B-Rep CUT boundary for the thickness walls whenever it closes.
+  // Raw tessellation boundary edges can contain tangent seams between a flange and
+  // a developed bend and were the source of false "slits" in the rendered flat.
+  for(const chain of flatPhysicalBoundaryChains(result,0))for(let i=0;i+1<chain.length;i++){
+    const a=chain[i],b=chain[i+1],a2=[a.x,a.y,-t],b2=[b.x,b.y,-t];
+    sides.push(a.x,a.y,0,b.x,b.y,0,...b2,a.x,a.y,0,...b2,...a2);
   }
   return new Float32Array([...top,...bottom,...sides]);
 }
@@ -1288,6 +1291,24 @@ function flatPrimitivePoints(primitive,z=0.055){
 }
 function flatPolylineLength(points){let length=0;for(let i=0;i+1<points.length;i++)length+=points[i].distanceTo(points[i+1]);return length;}
 
+function flatPhysicalBoundaryChains(result,z=0.02){
+  const exact=Boolean(result?.boundaryPrimitivesClosed&&(result.boundaryPrimitives||[]).length);
+  if(exact)return(result.boundaryPrimitives||[]).map(p=>flatPrimitivePoints(p,z)).filter(pts=>pts.length>1);
+  return(result?.boundaryEdges||[]).map(([a,b])=>[
+    new THREE.Vector3(Number(a?.[0])||0,Number(a?.[1])||0,z),
+    new THREE.Vector3(Number(b?.[0])||0,Number(b?.[1])||0,z)
+  ]);
+}
+function flatWallGeometry(points,thickness){
+  const t=Math.max(Number(thickness)||0,1e-6),pos=[];
+  for(let i=0;i+1<points.length;i++){
+    const a=points[i],b=points[i+1];
+    pos.push(a.x,a.y,0,b.x,b.y,0,b.x,b.y,-t,a.x,a.y,0,b.x,b.y,-t,a.x,a.y,-t);
+  }
+  if(!pos.length)return null;
+  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.computeVertexNormals();return g;
+}
+
 function buildFlatPatternScene(result){
   if(flatPatternRoot){scene.remove(flatPatternRoot);disposeObject(flatPatternRoot);}
   flatSurfaceMeshes=[];flatEdgeObjects=[];flatVertexObjects=[];
@@ -1296,19 +1317,27 @@ function buildFlatPatternScene(result){
   const material=new THREE.MeshStandardMaterial({color:0xc7ced1,metalness:0.05,roughness:0.58,side:THREE.DoubleSide});
   const mesh=new THREE.Mesh(geometry,material);mesh.userData.flatPattern=true;flatPatternRoot.add(mesh);
 
-  // Selectable flat faces. Each planar flange and each developed bend strip gets
-  // its own invisible hit mesh, so Face/Auto selection works in the flat view just
-  // like it does on the folded STEP model.
+  // Selectable flat faces. V8.17.1 exposes the complete flattened solid, not
+  // only its upper skin: top regions, underside, hole walls and plate-thickness
+  // walls can all be selected/measured just like faces on the folded STEP model.
+  const hitMaterial=()=>new THREE.MeshBasicMaterial({transparent:true,opacity:0.001,depthWrite:false,colorWrite:false,side:THREE.DoubleSide});
+  const t=Math.max(Number(result.thickness)||0,1e-6);
   for(const [index,region] of (result.selectionFaces||[]).entries()){
-    const facePos=[];for(const tri of region.triangles||[])for(const p of tri)facePos.push(p[0],p[1],0.035);
-    if(!facePos.length)continue;
-    const fg=new THREE.BufferGeometry();fg.setAttribute('position',new THREE.Float32BufferAttribute(facePos,3));fg.computeVertexNormals();
-    const fm=new THREE.MeshBasicMaterial({transparent:true,opacity:0.001,depthWrite:false,colorWrite:false,side:THREE.DoubleSide});
-    const hit=new THREE.Mesh(fg,fm);hit.userData.flatPatternSelection=true;hit.userData.flatKind=region.kind;hit.userData.geometryId=`flat:${result.geometryId}`;hit.userData.elementId=region.id||`face-${index+1}`;hit.userData.sourceFaceIds=region.sourceFaceIds||[];hit.renderOrder=80;flatPatternRoot.add(hit);flatSurfaceMeshes.push(hit);
+    const topPos=[],bottomPos=[];
+    for(const tri of region.triangles||[])for(const p of tri){topPos.push(p[0],p[1],0.035);bottomPos.push(p[0],p[1],-t-0.035);}
+    if(!topPos.length)continue;
+    const makeSkinHit=(pos,side)=>{const fg=new THREE.BufferGeometry();fg.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));fg.computeVertexNormals();const hit=new THREE.Mesh(fg,hitMaterial());hit.userData.flatPatternSelection=true;hit.userData.flatKind=side==='top'?region.kind:'bottom';hit.userData.geometryId=`flat:${result.geometryId}`;hit.userData.elementId=side==='top'?(region.id||`face-${index+1}`):`bottom-${region.id||index+1}`;hit.userData.sourceFaceIds=region.sourceFaceIds||[];hit.renderOrder=80;flatPatternRoot.add(hit);flatSurfaceMeshes.push(hit);};
+    makeSkinHit(topPos,'top');makeSkinHit(bottomPos,'bottom');
   }
 
-  if(result.boundaryEdges?.length){
-    const linePos=[];for(const [a,b] of result.boundaryEdges)linePos.push(a[0],a[1],0.02,b[0],b[1],0.02);
+  const physicalChains=flatPhysicalBoundaryChains(result,0.02);
+  for(const [index,chain] of physicalChains.entries()){
+    const wg=flatWallGeometry(chain,t);if(!wg)continue;
+    const wall=new THREE.Mesh(wg,hitMaterial());wall.userData.flatPatternSelection=true;wall.userData.flatKind='wall';wall.userData.geometryId=`flat:${result.geometryId}`;wall.userData.elementId=`wall-${index+1}`;wall.renderOrder=80;flatPatternRoot.add(wall);flatSurfaceMeshes.push(wall);
+  }
+
+  if(physicalChains.length){
+    const linePos=[];for(const chain of physicalChains)for(let i=0;i+1<chain.length;i++)linePos.push(chain[i].x,chain[i].y,0.02,chain[i+1].x,chain[i+1].y,0.02);
     const lg=new THREE.BufferGeometry();lg.setAttribute('position',new THREE.Float32BufferAttribute(linePos,3));const lm=new THREE.LineBasicMaterial({color:0x172027,depthTest:false,depthWrite:false});const lines=new THREE.LineSegments(lg,lm);lines.renderOrder=70;flatPatternRoot.add(lines);
   }
 
@@ -1349,7 +1378,7 @@ function setFlatPatternView(active){
   clearSelections();clearPreselection();clearGroup(measureOverlayRoot);clearDimensionLabel();
   if(active&&!flatPatternCameraState)flatPatternCameraState=captureCameraState();flatPatternActive=active;
   if(modelRoot)modelRoot.visible=!active;if(flatPatternRoot)flatPatternRoot.visible=active;
-  // V8.17.0: selection + measurement remain fully available in flat view.
+  // V8.17.1: selection + measurement remain fully available on the complete flat solid.
   for(const group of [selectionRoot,preselectionRoot,measureOverlayRoot,multiMeasureRoot])if(group)group.visible=true;
   if(E.measure)E.measure.disabled=!currentModel;if(E.multiMeasure)E.multiMeasure.disabled=!currentModel;if(E.section)E.section.disabled=active||!currentModel;
   if(active){closeSelectOther();fitFlatPatternView();if(measureEnabled){E.measureBadge.textContent=FR?'DÉPLIÉ 2D':'FLAT 2D';setMeasurePrompt(T.selectFirst);}}

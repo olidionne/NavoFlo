@@ -1,7 +1,7 @@
-import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.0';
+import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.1';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.17.0
+ * NavoFlo Sheet Metal Engine — V8.17.1
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -325,6 +325,20 @@ function makeRootMap(ctx,panel,tol){
 }
 function mapPoint(map,p){const d=V3.sub(p,map.origin3),u=V3.dot(d,map.u3),v=V3.dot(d,map.v3);return V2.add(map.origin2,V2.add(V2.scale(map.u2,u),V2.scale(map.v2,v)));}
 
+function panelMapAgreementError(ctx,panel,a,b){
+  if(!panel||!a||!b)return Infinity;
+  const samples=[];
+  if(Array.isArray(panel.stats?.centroid))samples.push(panel.stats.centroid);
+  for(const fid of panel.faceIds||[]){
+    const tris=ctx.statsById.get(fid)?.triangles||[];
+    for(let i=0;i<Math.min(tris.length,4);i++)for(const p of tris[i])samples.push(p);
+    if(samples.length>=25)break;
+  }
+  let err=0;
+  for(const p of samples)err=Math.max(err,V2.dist(mapPoint(a,p),mapPoint(b,p)));
+  return err;
+}
+
 function projectedInteriorDirection(panel,boundary,axis){
   if(!panel?.stats||!boundary?.mid)return null;
   const raw=V3.sub(panel.stats.centroid,boundary.mid),flat=V3.sub(raw,V3.scale(axis,V3.dot(raw,axis)));
@@ -644,18 +658,35 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const bendsByGroup=new Map();for(const bend of candidateBends){for(const b of bend.boundaries){if(!bendsByGroup.has(b.groupId))bendsByGroup.set(b.groupId,[]);bendsByGroup.get(b.groupId).push(bend);}}
   const rootMap=makeRootMap(ctx,fixedPanel,tol);if(!rootMap)return{ok:false,code:'fixed-face-map',message:'Unable to establish a coordinate system on the fixed face.'};
 
-  const panelMaps=new Map([[fixedGroupId,rootMap]]),panelOrder=[fixedGroupId],usedBends=[],usedCylinderIds=new Set(),queue=[fixedGroupId],cycleLinks=[];
+  const panelMaps=new Map([[fixedGroupId,rootMap]]),panelOrder=[fixedGroupId],usedBends=[],usedCylinderIds=new Set(),queue=[fixedGroupId],cycleLinks=[],cycleClosures=[];
   while(queue.length){
     const parentGroupId=queue.shift(),parentMap=panelMaps.get(parentGroupId);
     for(const cyl of bendsByGroup.get(parentGroupId)||[]){
       if(usedCylinderIds.has(cyl.id))continue;const other=cyl.boundaries.find(b=>b.groupId!==parentGroupId);if(!other)continue;const childGroupId=other.groupId;
-      if(panelMaps.has(childGroupId)){cycleLinks.push({parentGroupId,childGroupId,cylinder:cyl.id});usedCylinderIds.add(cyl.id);continue;}
+      if(panelMaps.has(childGroupId)){
+        // V8.17.1 — closure-bend reconstruction.
+        // A hole crossing a bend can split that one physical bend into two or more
+        // disconnected cylindrical patches. The surface graph then contains a
+        // harmless cycle. V8.17.0 dropped the last patch as a spanning-tree seam,
+        // which showed up as an artificial slit in the flat pattern. Rebuild the
+        // patch and keep it whenever both unfold paths predict the same child map.
+        const mapping=createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarGroups,thickness:resolvedThickness,kResolver,fallbackRadius:fallbackInsideRadius,tol,cylinders});
+        const childPanel=planarGroups.byId.get(childGroupId),existingMap=panelMaps.get(childGroupId);
+        const closureError=mapping.ok?panelMapAgreementError(ctx,childPanel,existingMap,mapping.childMap):Infinity;
+        const closureTol=Math.max(tol*50,resolvedThickness*0.002,1e-5);
+        if(mapping.ok&&Number.isFinite(closureError)&&closureError<=closureTol){
+          mapping.cycleClosure=true;mapping.closureError=closureError;usedBends.push(mapping);
+          cycleClosures.push({parentGroupId,childGroupId,cylinder:cyl.id,error:closureError,tolerance:closureTol});
+          usedCylinderIds.add(cyl.id);continue;
+        }
+        cycleLinks.push({parentGroupId,childGroupId,cylinder:cyl.id,closureError:Number.isFinite(closureError)?closureError:null,closureTolerance:closureTol});usedCylinderIds.add(cyl.id);continue;
+      }
       const mapping=createBendMapping({cyl,parentGroupId,childGroupId,parentMap,ctx,planarGroups,thickness:resolvedThickness,kResolver,fallbackRadius:fallbackInsideRadius,tol,cylinders});
       if(!mapping.ok){warnings.push(`Bend ${cyl.faceIds.join('/')} skipped: ${mapping.code}.`);cyl.lastFailure={code:mapping.code,diagnostics:mapping.diagnostics||null};usedCylinderIds.add(cyl.id);continue;}
       panelMaps.set(childGroupId,mapping.childMap);panelOrder.push(childGroupId);usedBends.push(mapping);usedCylinderIds.add(cyl.id);queue.push(childGroupId);
     }
   }
-  if(cycleLinks.length)warnings.push('Closed/cyclic sheet topology detected; a spanning tree was unfolded. Add a seam for a production flat pattern.');
+  if(cycleLinks.length)warnings.push('Closed/cyclic sheet topology contains an inconsistent closure; a spanning-tree seam was kept for safety.');
   if(!usedBends.length){
     const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,fixedPanelCandidateBends:connected,tolerance:tol,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
     const message=connected?'A cylindrical bend touches the fixed panel, but its geometry could not be resolved safely. Check T / inside radius / K-factor.':'No standard cylindrical bend connected to the fixed panel was detected.';
@@ -678,5 +709,5 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const primitivesClosed=boundaryPrimitivesClosed(boundaryPrimitives,Math.max(resolvedThickness*1e-5,1e-6));
   if(!primitivesClosed)warnings.push('Exact CUT primitives contain an open chain; DXF export will use the welded mesh boundary as a safe fallback.');
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 1.8',fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,selectionFaces,boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines,bounds,warnings,cycleLinks,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 1.9',fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,selectionFaces,boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines,bounds,warnings,cycleLinks,cycleClosures,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
 }
