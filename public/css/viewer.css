@@ -1051,3 +1051,7 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
 }
 .cad-dimension-tether[hidden]{display:none}
 .cad-dimension-tether line{stroke:#35d39a;stroke-width:1.2;stroke-dasharray:4 3;opacity:.82;vector-effect:non-scaling-stroke}
+
+/* V8.15.4 — eDrawings-like view settings */
+.view-popover .view-setting{margin-top:4px;padding-top:1px;border-top:1px solid rgba(255,255,255,.08);border-radius:0}
+.view-popover .view-setting.active{color:#35d39a;background:rgba(53,211,154,.08)}

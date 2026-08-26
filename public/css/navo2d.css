@@ -370,3 +370,9 @@ body.n2-focus-mode{overflow:hidden}
 /* V8.15.2 — native Save / Save As controls */
 .n2-file-save-stack{min-width:92px}
 @media(max-width:1500px){.n2-file-save-stack{min-width:36px}}
+
+
+/* V8.15.4 — AutoCAD-like F2 command history */
+.n2-commandline.history-expanded{min-height:230px;grid-template-rows:minmax(160px,1fr) 36px;overflow:visible}
+.n2-commandline.history-expanded .n2-command-history{white-space:pre-wrap;overflow:auto;text-overflow:clip;line-height:1.55;scrollbar-width:thin}
+@media(max-width:820px){.n2-commandline.history-expanded{min-height:190px;grid-template-rows:minmax(130px,1fr) 36px}.n2-commandline.history-expanded .n2-command-history{display:block}}

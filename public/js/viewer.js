@@ -4,7 +4,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
-import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.3';
+import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -51,7 +51,7 @@ const E = {
   measureBadge:$('measure-badge'), selectionSummary:$('selection-summary'),
   section:$('section-toggle'), sectionPanel:$('section-panel'), clipAxis:$('clip-axis'),
   clipSlider:$('clip-slider'), clipInvert:$('clip-invert'),
-  viewButton:$('view-menu-button'), viewMenu:$('view-menu'),
+  viewButton:$('view-menu-button'), viewMenu:$('view-menu'), perspectiveToggle:$('perspective-toggle'),
   props:$('properties-toggle'), propsDrawer:$('properties-drawer'), propsClose:$('properties-close'), fullscreen:$('fullscreen-toggle'),
   propFile:$('prop-file'), propFormat:$('prop-format'), propUnits:$('prop-units'),
   propParts:$('prop-parts'), propGeometries:$('prop-geometries'), propTriangles:$('prop-triangles'),
@@ -71,7 +71,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.15.3';
+const WORKER_URL = '/js/step-worker.js?v=8.15.4';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -123,6 +123,7 @@ const sheetMetalState = {
 };
 
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, grid;
+let cameraProjectionMode='orthographic';
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
 let currentStats = null, currentStepHeader = null, currentStepResult = null, currentStepProperties = [];
 let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
@@ -166,7 +167,7 @@ function captureActiveModelDocumentState(){
   if(!activeModelDocumentId)return;
   const doc=modelDocuments.get(activeModelDocumentId);if(!doc)return;
   if(camera&&controls&&currentModel){
-    doc.view={position:camera.position.toArray(),quaternion:camera.quaternion.toArray(),up:camera.up.toArray(),target:controls.target.toArray(),displayUnit};
+    doc.view={position:camera.position.toArray(),quaternion:camera.quaternion.toArray(),up:camera.up.toArray(),target:controls.target.toArray(),displayUnit,projectionMode:cameraProjectionMode,zoom:camera.isOrthographicCamera?camera.zoom:1};
   }
   doc.lastFormat=currentFormat||doc.lastFormat||'';
   doc.sheetMetal={thickness:sheetMetalState.thickness,radius:sheetMetalState.radius,bendAngleDeg:sheetMetalState.bendAngleDeg,manualKEnabled:sheetMetalState.manualKEnabled,manualK:sheetMetalState.manualK};
@@ -259,10 +260,19 @@ async function restoreModelSession(){
 
 function restoreModelDocumentView(doc){
   const view=doc?.view;if(!view||!camera||!controls)return false;
+  // V8.15.3 session snapshots pre-date projectionMode/orthographic zoom.
+  // Treat those legacy views as incomplete instead of restoring them at zoom=1,
+  // which could make a recovered model appear tiny or unexpectedly cropped.
+  if(!view.projectionMode)return false;
+  if(view.projectionMode==='orthographic'&&!Number.isFinite(view.zoom))return false;
+  if(!Array.isArray(view.position)||!Array.isArray(view.quaternion)||!Array.isArray(view.target))return false;
   try{
+    setProjectionMode(view.projectionMode,{preserveScale:false,persist:false});
     camera.position.fromArray(view.position);camera.quaternion.fromArray(view.quaternion);if(Array.isArray(view.up))camera.up.fromArray(view.up);controls.target.fromArray(view.target);
+    if(camera.isOrthographicCamera)camera.zoom=Math.max(1e-12,view.zoom);
+    camera.updateProjectionMatrix();
     if(['u','mm','cm','m','in'].includes(view.displayUnit)){displayUnit=view.displayUnit;E.unitSelect.value=displayUnit;updateDisplayedUnits();}
-    cadNav.pivot.copy(controls.target);cadNav.wheelFocus.copy(controls.target);updateZoomClipping();updateDimensionLabelPosition();return true;
+    cadNav.pivot.copy(controls.target);cadNav.wheelFocus.copy(controls.target);updateZoomClipping();updateDimensionLabelPosition();syncProjectionUI();return true;
   }catch{return false;}
 }
 async function activateModelDocument(id){
@@ -291,8 +301,8 @@ async function closeModelDocument(id=activeModelDocumentId){
 }
 
 
-const navo3dPreferences={gridVisible:true,edgesVisible:true,selectionMode:'auto',propertiesOpen:false,materialClass:'hard'};
-function navo3dPreferenceSnapshot(){return {...navo3dPreferences,edgesVisible:Boolean(edgesVisible),selectionMode,propertiesOpen:Boolean(navo3dPreferences.propertiesOpen),materialClass:sheetMetalState.materialClass};}
+const navo3dPreferences={gridVisible:true,edgesVisible:true,selectionMode:'auto',propertiesOpen:false,materialClass:'hard',perspective:false};
+function navo3dPreferenceSnapshot(){return {...navo3dPreferences,edgesVisible:Boolean(edgesVisible),selectionMode,propertiesOpen:Boolean(navo3dPreferences.propertiesOpen),materialClass:sheetMetalState.materialClass,perspective:cameraProjectionMode==='perspective'};}
 const saveNavo3DPrefs=createPreferenceSaver('navo3d',navo3dPreferenceSnapshot,500);
 function applyNavo3DPreferences(p={}){
   if(typeof p.gridVisible==='boolean')navo3dPreferences.gridVisible=p.gridVisible;
@@ -300,7 +310,8 @@ function applyNavo3DPreferences(p={}){
   if(['auto','face','edge','vertex'].includes(p.selectionMode))navo3dPreferences.selectionMode=p.selectionMode;
   if(typeof p.propertiesOpen==='boolean')navo3dPreferences.propertiesOpen=p.propertiesOpen;
   if(AIR_BENDING_K_TABLE[p.materialClass])navo3dPreferences.materialClass=p.materialClass;
-  edgesVisible=navo3dPreferences.edgesVisible;selectionMode=navo3dPreferences.selectionMode;sheetMetalState.materialClass=navo3dPreferences.materialClass;
+  if(typeof p.perspective==='boolean')navo3dPreferences.perspective=p.perspective;
+  cameraProjectionMode=navo3dPreferences.perspective?'perspective':'orthographic';edgesVisible=navo3dPreferences.edgesVisible;selectionMode=navo3dPreferences.selectionMode;sheetMetalState.materialClass=navo3dPreferences.materialClass;
 }
 
 const raycaster = new THREE.Raycaster();
@@ -350,6 +361,44 @@ const selectionFaceMaterial = new THREE.MeshBasicMaterial({
   polygonOffset:false
 });
 
+function workspaceAspect(){
+  const rect=E.workspace?.getBoundingClientRect?.();
+  return Math.max(.1,(rect?.width||1)/Math.max(rect?.height||1,1));
+}
+function configureOrthographicFrustum(cam=camera){
+  if(!cam?.isOrthographicCamera)return;
+  const aspect=workspaceAspect();cam.left=-aspect;cam.right=aspect;cam.top=1;cam.bottom=-1;cam.updateProjectionMatrix();
+}
+function createCadCamera(mode='orthographic'){
+  if(mode==='perspective')return new THREE.PerspectiveCamera(38,workspaceAspect(),0.01,100000);
+  const aspect=workspaceAspect(),cam=new THREE.OrthographicCamera(-aspect,aspect,1,-1,0.01,100000);cam.zoom=1;cam.updateProjectionMatrix();return cam;
+}
+function syncProjectionUI(){
+  const perspective=cameraProjectionMode==='perspective';
+  E.perspectiveToggle?.classList.toggle('active',perspective);E.perspectiveToggle?.setAttribute('aria-pressed',perspective?'true':'false');
+}
+function currentViewWorldHeight(target=controls?.target||getModelRotationCenter()){
+  if(!camera)return 1;
+  if(camera.isOrthographicCamera)return Math.max(1e-12,(camera.top-camera.bottom)/Math.max(camera.zoom,1e-12));
+  const distance=Math.max(camera.position.distanceTo(target),1e-9);return 2*distance*Math.tan(THREE.MathUtils.degToRad(camera.fov)*.5);
+}
+function setProjectionMode(mode,{preserveScale=true,persist=true}={}){
+  const next=mode==='perspective'?'perspective':'orthographic';
+  if(camera&&((next==='perspective'&&camera.isPerspectiveCamera)||(next==='orthographic'&&camera.isOrthographicCamera))){cameraProjectionMode=next;syncProjectionUI();return;}
+  const old=camera,target=controls?.target?.clone?.()||getModelRotationCenter(),worldHeight=old&&preserveScale?currentViewWorldHeight(target):null;
+  const fresh=createCadCamera(next);
+  if(old){fresh.position.copy(old.position);fresh.quaternion.copy(old.quaternion);fresh.up.copy(old.up);}
+  if(next==='orthographic'){
+    configureOrthographicFrustum(fresh);
+    if(worldHeight&&Number.isFinite(worldHeight))fresh.zoom=Math.max(1e-12,(fresh.top-fresh.bottom)/worldHeight);
+  }else if(worldHeight&&Number.isFinite(worldHeight)){
+    const distance=worldHeight/(2*Math.tan(THREE.MathUtils.degToRad(fresh.fov)*.5));
+    const forward=new THREE.Vector3(0,0,-1).applyQuaternion(fresh.quaternion).normalize();fresh.position.copy(target).addScaledVector(forward,-distance);
+  }
+  camera=fresh;cameraProjectionMode=next;if(controls)controls.object=camera;syncProjectionUI();updateZoomClipping();updateDimensionLabelPosition();
+  navo3dPreferences.perspective=next==='perspective';if(persist)saveNavo3DPrefs();
+}
+
 init();
 
 async function init() {
@@ -367,7 +416,7 @@ async function init() {
   renderer.setClearColor(0x0a1016, 1);
 
   scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100000);
+  camera = createCadCamera(cameraProjectionMode);
   camera.position.set(5,4,6);
 
   controls = new OrbitControls(camera, renderer.domElement);
@@ -431,7 +480,7 @@ function bindUI() {
   E.save?.addEventListener('click',()=>saveCurrentModel(false));
   E.saveAs?.addEventListener('click',()=>saveCurrentModel(true));
   E.docTabAdd?.addEventListener('click',pickModelFiles);
-  E.fit.addEventListener('click', () => fitCamera('iso'));
+  E.fit.addEventListener('click', () => fitCurrentView());
   E.edges.addEventListener('click', toggleEdges);
   E.gridToggle.addEventListener('click', toggleGrid);
   E.unitSelect.addEventListener('change', async () => {
@@ -447,14 +496,7 @@ function bindUI() {
   });
 
   document.querySelectorAll('[data-select-mode]').forEach(button => {
-    button.addEventListener('click', () => {
-      selectionMode = button.dataset.selectMode;
-      document.querySelectorAll('[data-select-mode]').forEach(b => b.classList.toggle('active', b===button));
-      clearSelections();
-      clearPreselection();
-      updatePickingVisibility();
-      saveNavo3DPrefs();
-    });
+    button.addEventListener('click', () => setSelectionMode(button.dataset.selectMode));
   });
 
   E.section.addEventListener('click', () => {
@@ -470,6 +512,11 @@ function bindUI() {
     fitCamera(button.dataset.view);
     E.viewMenu.hidden = true;
   }));
+  E.perspectiveToggle?.addEventListener('click',()=>{
+    setProjectionMode(cameraProjectionMode==='perspective'?'orthographic':'perspective');
+    E.viewMenu.hidden=true;
+  });
+  syncProjectionUI();
 
   E.props.addEventListener('click', () => {
     E.propsDrawer.hidden = !E.propsDrawer.hidden;
@@ -670,6 +717,11 @@ function bindUI() {
       clearPreselection();
       return;
     }
+    if(event.shiftKey&&/^F[1-4]$/.test(event.key)){
+      event.preventDefault();
+      setSelectionMode({F1:'auto',F2:'vertex',F3:'edge',F4:'face'}[event.key]);
+      return;
+    }
 
     if (!currentModel) return;
 
@@ -677,7 +729,11 @@ function bindUI() {
 
     if (key==='f') {
       event.preventDefault();
-      fitCamera('iso');
+      fitCurrentView();
+    } else if (key==='z') {
+      event.preventDefault();cadKeyboardZoom(event.shiftKey);
+    } else if (['arrowleft','arrowright','arrowup','arrowdown'].includes(key)) {
+      event.preventDefault();cadKeyboardRotate(key,event.shiftKey?90:10);
     } else if (key==='m') {
       event.preventDefault();
       toggleMeasure();
@@ -702,6 +758,15 @@ function bindUI() {
 
 
 
+
+
+function setSelectionMode(mode,{persist=true}={}){
+  if(!['auto','face','edge','vertex'].includes(mode))return;
+  selectionMode=mode;
+  document.querySelectorAll('[data-select-mode]').forEach(b=>b.classList.toggle('active',b.dataset.selectMode===selectionMode));
+  clearSelections();clearGroup(measureOverlayRoot);clearDimensionLabel();clearPreselection();updatePickingVisibility();
+  navo3dPreferences.selectionMode=selectionMode;if(persist)saveNavo3DPrefs();
+}
 
 function initSheetMetalUI() {
   if(!E.sheetMetalSection)return;
@@ -1066,6 +1131,7 @@ function cadRotate(dx,dy,pivot) {
 
 function getCadPanWorldPerPixel() {
   const rect=E.canvas.getBoundingClientRect();
+  if(camera?.isOrthographicCamera)return ((camera.top-camera.bottom)/Math.max(camera.zoom,1e-12))/Math.max(rect.height,1);
   const pivot=cadNav.pivot.lengthSq()>1e-20 ? cadNav.pivot : getModelRotationCenter();
   const distance=Math.max(camera.position.distanceTo(pivot),modelSize*0.02,1e-6);
   const worldHeight=2*distance*Math.tan(THREE.MathUtils.degToRad(camera.fov)*0.5);
@@ -1089,8 +1155,28 @@ function cadPan(dx,dy) {
   updateDimensionLabelPosition();
 }
 
+function viewPlanePointAt(clientX,clientY,planePoint){
+  setRayFromClient(clientX,clientY);const normal=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion).normalize(),den=normal.dot(raycaster.ray.direction);if(Math.abs(den)<1e-10)return planePoint.clone();const t=normal.dot(planePoint.clone().sub(raycaster.ray.origin))/den;return raycaster.ray.origin.clone().addScaledVector(raycaster.ray.direction,t);
+}
+function orthographicZoomAt(clientX,clientY,factor){
+  if(!camera?.isOrthographicCamera||!Number.isFinite(factor)||factor<=0)return;
+  const focus=getCadPivotUnderPointer(clientX,clientY),before=viewPlanePointAt(clientX,clientY,focus);
+  camera.zoom=THREE.MathUtils.clamp(camera.zoom*factor,1e-10,1e10);camera.updateProjectionMatrix();
+  const after=viewPlanePointAt(clientX,clientY,focus),shift=before.sub(after);camera.position.add(shift);controls.target.add(shift);cadNav.pivot.add(shift);cadNav.wheelFocus.copy(focus);updateZoomClipping();updateDimensionLabelPosition();
+}
+function cadKeyboardZoom(inward=false){
+  if(!camera||!currentModel)return;const rect=E.canvas.getBoundingClientRect(),x=rect.left+rect.width/2,y=rect.top+rect.height/2;
+  if(camera.isOrthographicCamera){orthographicZoomAt(x,y,inward?1.22:1/1.22);return;}
+  const forward=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion).normalize(),target=controls.target,d=Math.max(camera.position.distanceTo(target),modelSize*.02);camera.position.addScaledVector(forward,(inward?1:-1)*d*.16);updateZoomClipping();updateDimensionLabelPosition();
+}
+function cadKeyboardRotate(key,degrees=10){
+  const pivot=getModelRotationCenter(),angle=THREE.MathUtils.degToRad(degrees),screenUp=new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion).normalize(),screenRight=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion).normalize();
+  if(key==='arrowleft')rotateCameraRigidlyAroundPivot(screenUp,angle,pivot);else if(key==='arrowright')rotateCameraRigidlyAroundPivot(screenUp,-angle,pivot);else if(key==='arrowup')rotateCameraRigidlyAroundPivot(screenRight,angle,pivot);else if(key==='arrowdown')rotateCameraRigidlyAroundPivot(screenRight,-angle,pivot);controls.target.copy(pivot);cadNav.pivot.copy(pivot);updateZoomClipping();updateDimensionLabelPosition();
+}
+
 function cadDragZoom(dy,clientX,clientY) {
   if (!dy) return;
+  if(camera?.isOrthographicCamera){orthographicZoomAt(clientX,clientY,Math.exp(-dy*0.012));return;}
 
   setRayFromClient(clientX,clientY);
   const direction=raycaster.ray.direction.clone().normalize();
@@ -1108,7 +1194,9 @@ function resize() {
   if (!renderer) return;
   const rect=E.workspace.getBoundingClientRect();
   const w=Math.max(1,Math.floor(rect.width)), h=Math.max(1,Math.floor(rect.height));
-  renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix();
+  renderer.setSize(w,h,false);
+  if(camera?.isPerspectiveCamera)camera.aspect=w/h;else if(camera?.isOrthographicCamera){const aspect=w/h;camera.left=-aspect;camera.right=aspect;camera.top=1;camera.bottom=-1;}
+  camera?.updateProjectionMatrix();updateDimensionLabelPosition();
 }
 
 function render() {
@@ -1168,7 +1256,7 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
     E.statusFormat.textContent=currentFormat;
     E.statusUnits.textContent=unitLabel(displayUnit);
     fitCamera('iso');
-    if(restoreView)restoreModelDocumentView({view:restoreView});
+    if(restoreView&&!restoreModelDocumentView({view:restoreView}))fitCamera('iso');
     if(currentStepResult&&restoreSheetMetal){
       sheetMetalState.thickness=Number.isFinite(restoreSheetMetal.thickness)?restoreSheetMetal.thickness:null;
       sheetMetalState.radius=Number.isFinite(restoreSheetMetal.radius)?restoreSheetMetal.radius:null;
@@ -1465,6 +1553,9 @@ function handleCadWheelZoom(event) {
 
   const delta=normalizeWheelDelta(event);
   if(!Number.isFinite(delta)||Math.abs(delta)<0.001)return;
+  if(camera.isOrthographicCamera){
+    const wheelUnits=THREE.MathUtils.clamp(Math.abs(delta)/100,0.01,5),factor=Math.exp((delta<0?1:-1)*0.18*wheelUnits);orthographicZoomAt(event.clientX,event.clientY,factor);return;
+  }
 
   setRayFromClient(event.clientX,event.clientY);
   const direction=raycaster.ray.direction.clone().normalize();
@@ -1497,6 +1588,9 @@ function updateZoomClipping() {
   const sphere=box.getBoundingSphere(new THREE.Sphere());
   const radius=Math.max(sphere.radius,modelSize*0.001,1e-5);
   const centerDistance=Math.max(camera.position.distanceTo(sphere.center),1e-7);
+  if(camera.isOrthographicCamera){
+    camera.near=Math.max(centerDistance-radius*3.5,radius*1e-5,1e-7);camera.far=Math.max(centerDistance+radius*3.5,camera.near+radius*7);camera.updateProjectionMatrix();return;
+  }
 
   // Distance from camera to the model's bounding box is a better close-up
   // signal than OrbitControls.target now that CAD zoom translates both.
@@ -1527,6 +1621,7 @@ function selectAt(event) {
     // In Measure mode this immediately prepares the next measurement.
     if (!event.ctrlKey && !event.metaKey) {
       clearSelections();
+      clearGroup(measureOverlayRoot);clearDimensionLabel();
       clearPreselection();
     }
     return;
@@ -2602,12 +2697,12 @@ function ensureDimensionLabel() {
 }
 function clearDimensionLabel() {
   dimensionLabelPoint=null;dimensionLabelOffset={x:0,y:0};dimensionLabelDrag=null;
-  if(dimensionLabel){dimensionLabel.hidden=true;dimensionLabel.textContent='';dimensionLabel.classList.remove('dragging');}
-  if(dimensionTether?.svg)dimensionTether.svg.hidden=true;
+  if(dimensionLabel){dimensionLabel.hidden=true;dimensionLabel.style.display='none';dimensionLabel.style.visibility='hidden';dimensionLabel.textContent='';dimensionLabel.classList.remove('dragging');}
+  if(dimensionTether?.svg){dimensionTether.svg.hidden=true;dimensionTether.svg.style.display='none';dimensionTether.line.setAttribute('x1','0');dimensionTether.line.setAttribute('y1','0');dimensionTether.line.setAttribute('x2','0');dimensionTether.line.setAttribute('y2','0');}
 }
 function setDimensionLabel(text,point) {
   if(!text||!point)return clearDimensionLabel();
-  const label=ensureDimensionLabel();dimensionLabelPoint=point.clone();dimensionLabelOffset={x:0,y:0};label.textContent=text;label.hidden=false;updateDimensionLabelPosition();
+  const label=ensureDimensionLabel();dimensionLabelPoint=point.clone();dimensionLabelOffset={x:0,y:0};label.textContent=text;label.hidden=false;label.style.display='';if(dimensionTether?.svg)dimensionTether.svg.style.display='';updateDimensionLabelPosition();
 }
 function updateDimensionLabelPosition() {
   if(!dimensionLabel||dimensionLabel.hidden||!dimensionLabelPoint||!camera)return;
@@ -2615,7 +2710,7 @@ function updateDimensionLabelPosition() {
   if(projected.z < -1 || projected.z > 1){dimensionLabel.style.visibility='hidden';if(dimensionTether?.svg)dimensionTether.svg.hidden=true;return;}
   const rect=E.workspace.getBoundingClientRect(),anchorX=(projected.x*0.5+0.5)*rect.width,anchorY=(-projected.y*0.5+0.5)*rect.height,x=anchorX+dimensionLabelOffset.x,y=anchorY+dimensionLabelOffset.y;
   dimensionLabel.style.visibility='visible';dimensionLabel.style.left=`${x}px`;dimensionLabel.style.top=`${y}px`;
-  const tether=ensureDimensionTether(),moved=Math.hypot(dimensionLabelOffset.x,dimensionLabelOffset.y)>5;tether.svg.hidden=!moved;
+  const tether=ensureDimensionTether(),moved=Math.hypot(dimensionLabelOffset.x,dimensionLabelOffset.y)>5;tether.svg.hidden=!moved;tether.svg.style.display=moved?'':'none';
   if(moved){tether.line.setAttribute('x1',String(anchorX));tether.line.setAttribute('y1',String(anchorY));tether.line.setAttribute('x2',String(x));tether.line.setAttribute('y2',String(y));}
 }
 
@@ -2732,27 +2827,35 @@ function updateClipping() {
   });
 }
 
+function modelBoundsViewExtents(center){
+  const right=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion).normalize(),up=new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion).normalize();
+  const min=modelBounds.min,max=modelBounds.max,corners=[];
+  for(const x of [min.x,max.x])for(const y of [min.y,max.y])for(const z of [min.z,max.z])corners.push(new THREE.Vector3(x,y,z));
+  let halfW=0,halfH=0;for(const c of corners){const d=c.sub(center);halfW=Math.max(halfW,Math.abs(d.dot(right)));halfH=Math.max(halfH,Math.abs(d.dot(up)));}
+  return{halfW:Math.max(halfW,1e-6),halfH:Math.max(halfH,1e-6)};
+}
+function fitCurrentView(){
+  if(!modelBounds||!camera||!controls)return;
+  const sphere=modelBounds.getBoundingSphere(new THREE.Sphere()),center=sphere.center.clone(),radius=Math.max(sphere.radius,0.001),forward=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion).normalize();
+  controls.target.copy(center);cadNav.pivot.copy(center);cadNav.wheelFocus.copy(center);
+  if(camera.isOrthographicCamera){
+    configureOrthographicFrustum(camera);const {halfW,halfH}=modelBoundsViewExtents(center),margin=1.12;
+    camera.zoom=Math.max(1e-12,Math.min((camera.right-camera.left)/(2*halfW*margin),(camera.top-camera.bottom)/(2*halfH*margin)));
+    camera.position.copy(center).addScaledVector(forward,-radius*4);camera.updateProjectionMatrix();
+  }else{
+    const distance=radius/Math.sin(THREE.MathUtils.degToRad(camera.fov)/2)*1.12;camera.position.copy(center).addScaledVector(forward,-distance);
+  }
+  updateZoomClipping();updateDimensionLabelPosition();syncProjectionUI();
+}
 function fitCamera(view='iso') {
   if (!modelBounds) return;
-
-  const sphere=modelBounds.getBoundingSphere(new THREE.Sphere());
-  const center=sphere.center.clone();
-  const radius=Math.max(sphere.radius,0.001);
-  const fov=THREE.MathUtils.degToRad(camera.fov);
-  const distance=radius/Math.sin(fov/2)*1.12;
-  const dirs={iso:[1,.75,1],front:[0,0,1],right:[1,0,0],top:[0,1,0]};
-  const dir=new THREE.Vector3(...(dirs[view]||dirs.iso)).normalize();
-
-  camera.position.copy(center).addScaledVector(dir,distance);
-  camera.up.set(0,view==='top'?0:1,view==='top'?-1:0);
-  camera.lookAt(center);
-
-  controls.target.copy(center);
-  cadNav.pivot.copy(center);
-  cadNav.wheelFocus.copy(center);
-
-  updateZoomClipping();
-  updateDimensionLabelPosition();
+  const standard=['front','back','left','right','top','bottom'].includes(view);
+  if(standard&&cameraProjectionMode!=='orthographic')setProjectionMode('orthographic',{preserveScale:false});
+  const center=modelBounds.getCenter(new THREE.Vector3()),radius=Math.max(modelBounds.getBoundingSphere(new THREE.Sphere()).radius,0.001);
+  const dirs={iso:[1,.75,1],front:[0,0,1],back:[0,0,-1],right:[1,0,0],left:[-1,0,0],top:[0,1,0],bottom:[0,-1,0]},dir=new THREE.Vector3(...(dirs[view]||dirs.iso)).normalize();
+  const up=(view==='top')?new THREE.Vector3(0,0,-1):(view==='bottom'?new THREE.Vector3(0,0,1):new THREE.Vector3(0,1,0));
+  camera.position.copy(center).addScaledVector(dir,radius*4);camera.up.copy(up);camera.lookAt(center);camera.updateProjectionMatrix();
+  fitCurrentView();
 }
 
 function fillProperties() {

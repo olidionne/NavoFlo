@@ -1,7 +1,7 @@
 import DxfParser from 'https://cdn.jsdelivr.net/npm/dxf-parser@1.1.2/+esm';
 import AUTO_CAD_COLOR_INDEX from 'https://cdn.jsdelivr.net/npm/dxf-parser@1.1.2/dist/AutoCadColorIndex.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
-import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.3';
+import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
 
 const FR=document.documentElement.lang.toLowerCase().startsWith('fr');
 const T=FR?{
@@ -350,7 +350,7 @@ function bindUI(){
   E.canvas.addEventListener('wheel',wheel,{passive:false});
 
   addEventListener('keydown',handleGlobalKeyDown);
-  addEventListener('beforeunload',event=>{saveActiveDocumentState();if([...openDocuments.values()].some(doc=>doc.state?.dirty)){event.preventDefault();event.returnValue='';}});
+  addEventListener('pagehide',()=>{saveActiveDocumentState();persistDxfSession().catch(()=>{});});
   syncDraftingUI();
   updateCommandPrompt();
   renderDocumentTabs();
@@ -2363,6 +2363,7 @@ function handleGlobalKeyDown(event){
     else state.snapCycle=(state.snapCycle||0)+1;
     return;
   }
+  if(event.key==='F2'){event.preventDefault();toggleCommandHistory();return;}
   if(/^F(?:3|7|8|9|10|11|12)$/.test(event.key)){
     event.preventDefault();
     ({F3:'osnap',F7:'grid',F8:'ortho',F9:'gridSnap',F10:'polar',F11:'otrack',F12:'dyn'})[event.key]&&toggleDraftSetting(({F3:'osnap',F7:'grid',F8:'ortho',F9:'gridSnap',F10:'polar',F11:'otrack',F12:'dyn'})[event.key]);
@@ -2424,6 +2425,7 @@ function handleCommandInputKeyDown(event){
     else state.snapCycle=(state.snapCycle||0)+1;
     return;
   }
+  if(event.key==='F2'){event.preventDefault();toggleCommandHistory();return;}
   if(/^F(?:3|7|8|9|10|11|12)$/.test(event.key)){
     event.preventDefault();
     const map={F3:'osnap',F7:'grid',F8:'ortho',F9:'gridSnap',F10:'polar',F11:'otrack',F12:'dyn'};
@@ -2896,6 +2898,21 @@ function commandText(raw){
   commandError(CMDT.valueInvalid);
 }
 
+function smartDimensionPointReference(point){
+  const snap=state.lastSnap;
+  if(!snap||!point)return null;
+  const pointTypes=new Set(['end','mid','center','quad','intersection','apparent','node','gcenter','insert']);
+  if(!pointTypes.has(snap.type))return null;
+  if(dist(snap.point,point)>Math.max(1e-9,5/state.view.scale))return null;
+  return {point:copyPoint(snap.point),type:snap.type,entityId:snap.entity?.id||null};
+}
+function pointLineDimensionPoints(point,line){
+  if(!point||line?.type!=='LINE')return null;
+  const foot=projectPointToLine(point,line.p1,line.p2,false);
+  if(!foot||dist(point,foot)<1e-10)return null;
+  return [copyPoint(point),copyPoint(foot)];
+}
+
 function commandPoint(point,event,fromKeyboard=false){
   const c=state.command;if(!c||!point)return;
   state.snapOverride=null;
@@ -2926,21 +2943,38 @@ function commandPoint(point,event,fromKeyboard=false){
   if(c.name==='DIM'){
     if(c.step==='smartFirst'){
       const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+      const pointRef=smartDimensionPointReference(point);
+      // AutoCAD-like DIM: clicking a real snap point (END/MID/INT/...) means
+      // "point", even if that point belongs to a line. Clicking the body of
+      // the line means "object" and dimensions the line itself.
+      if(pointRef){
+        c.data.p1=pointRef.point;c.data.firstPointRef=pointRef;c.step='smartSecond';
+        setCommandPrompt(FR?'DIM Sélectionnez une ligne de référence ou spécifiez le deuxième point:':'DIM Select a reference line or specify the second point:');return;
+      }
       if(hit?.type==='LINE'){
         c.data.firstId=hit.id;c.data.firstPick=copyPoint(point);c.data.p1=copyPoint(hit.p1);c.data.p2=copyPoint(hit.p2);
         const dx=Math.abs(hit.p2.x-hit.p1.x),dy=Math.abs(hit.p2.y-hit.p1.y),L=Math.hypot(dx,dy);
         c.data.dimType=(Math.min(dx,dy)<=L*Math.sin(5*Math.PI/180))?'linear':'aligned';c.step='smartLineSecondOrPlace';
-        setCommandPrompt(FR?'DIM Sélectionnez une deuxième ligne pour une cote angulaire, ou placez la cote de longueur:':'DIM Select a second line for an angular dimension, or place the length dimension:');return;
+        setCommandPrompt(FR?'DIM Sélectionnez une deuxième ligne, un point opposé, ou placez la cote de longueur:':'DIM Select a second line, an opposite point, or place the length dimension:');return;
       }
       if(hit?.type==='CIRCLE'||hit?.type==='ARC'){
         c.data.entityId=hit.id;c.data.dimType=hit.type==='CIRCLE'?'diameter':'radius';c.step='curvePlace';
         setCommandPrompt(FR?'DIM Spécifiez la position de la cote:':'DIM Specify dimension location:');return;
       }
-      c.data.p1=copyPoint(point);c.step='smartSecond';
-      setCommandPrompt(FR?'DIM Spécifiez le deuxième point:':'DIM Specify second point:');return;
+      c.data.p1=copyPoint(point);c.data.firstPointRef={point:copyPoint(point),type:'free'};c.step='smartSecond';
+      setCommandPrompt(FR?'DIM Sélectionnez une ligne de référence ou spécifiez le deuxième point:':'DIM Select a reference line or specify the second point:');return;
     }
     if(c.step==='smartSecond'){
       if(!c.data.p1||dist(c.data.p1,point)<1e-12)return commandError(CMDT.pointInvalid);
+      const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+      const pointRef=smartDimensionPointReference(point);
+      if(hit?.type==='LINE'&&!pointRef){
+        const pair=pointLineDimensionPoints(c.data.p1,hit);
+        if(pair){
+          c.data.p1=pair[0];c.data.p2=pair[1];c.data.dimType='aligned';c.data.referenceLineId=hit.id;c.data.pointLine=true;c.step='place';
+          setCommandPrompt(FR?'DIM Placez la cote perpendiculaire à la ligne de référence:':'DIM Place the dimension perpendicular to the reference line:');return;
+        }
+      }
       c.data.p2=copyPoint(point);
       const dx=Math.abs(point.x-c.data.p1.x),dy=Math.abs(point.y-c.data.p1.y),L=Math.hypot(dx,dy);
       c.data.dimType=(Math.min(dx,dy)<=L*Math.sin(5*Math.PI/180))?'linear':'aligned';
@@ -2948,7 +2982,16 @@ function commandPoint(point,event,fromKeyboard=false){
     }
     if(c.step==='smartLineSecondOrPlace'){
       const hit=event?hitTest(event.clientX,event.clientY):hitTest(state.pointer.x,state.pointer.y);
+      const pointRef=smartDimensionPointReference(point);
       const first=state.entities.find(x=>x.id===c.data.firstId);
+      // Reverse order of point↔line smart dimension: line first, snapped point second.
+      if(first&&pointRef&&pointRef.entityId!==first.id){
+        const pair=pointLineDimensionPoints(pointRef.point,first);
+        if(pair){
+          c.data.p1=pair[0];c.data.p2=pair[1];c.data.dimType='aligned';c.data.referenceLineId=first.id;c.data.pointLine=true;c.step='place';
+          setCommandPrompt(FR?'DIM Placez la cote perpendiculaire à la ligne de référence:':'DIM Place the dimension perpendicular to the reference line:');return;
+        }
+      }
       if(hit?.type==='LINE'&&first&&hit.id!==first.id){
         const intersection=infiniteLineIntersection(first.p1,first.p2,hit.p1,hit.p2);
         if(intersection){
@@ -3427,9 +3470,18 @@ function setCommandPrompt(text){
 function updateCommandPrompt(){
   if(!state.command)setCommandPrompt(CMDT.command);
 }
+function renderCommandHistory(){
+  if(!E.commandHistory)return;
+  const expanded=E.commandHistory.closest('.n2-commandline')?.classList.contains('history-expanded');
+  E.commandHistory.textContent=expanded?state.commandLog.join('\n'):(state.commandLog.at(-1)||'');
+  if(expanded)E.commandHistory.scrollTop=E.commandHistory.scrollHeight;
+}
+function toggleCommandHistory(){
+  const shell=E.commandHistory?.closest('.n2-commandline');if(!shell)return;
+  shell.classList.toggle('history-expanded');renderCommandHistory();
+}
 function commandLog(text){
-  if(!text)return;state.commandLog.push(String(text));if(state.commandLog.length>30)state.commandLog.shift();
-  if(E.commandHistory)E.commandHistory.textContent=String(text);
+  if(!text)return;state.commandLog.push(String(text));if(state.commandLog.length>30)state.commandLog.shift();renderCommandHistory();
 }
 function commandError(text){commandLog(text);toast(text);}
 
@@ -3569,13 +3621,27 @@ function buildDiameterDimension(e,location,groupId='preview',meta=null){
 }
 function positiveAngleSpan(start,end){let span=(end-start)%(Math.PI*2);if(span<0)span+=Math.PI*2;return span;}
 function angleFallsInSpan(angle,start,span){return positiveAngleSpan(start,angle)<=span+1e-9;}
+function angularSourceCoverage(line,I,dir){
+  if(line?.type!=='LINE')return 0;
+  const endpointProjection=p=>(p.x-I.x)*dir.x+(p.y-I.y)*dir.y;
+  return Math.max(0,endpointProjection(line.p1),endpointProjection(line.p2));
+}
+function addSmartAngularExtension(items,line,I,dir,r,style,groupId){
+  // If the source line itself already reaches the angular dimension arc,
+  // don't paint a yellow extension line on top of the CAD geometry.
+  const coverage=angularSourceCoverage(line,I,dir),end=r+style.extBeyond;
+  if(coverage>=end-style.extGap*.25)return;
+  const start=Math.max(style.extGap,coverage+(coverage>0?style.extGap:0));
+  if(end<=start+1e-10)return;
+  const ext=dimLine({x:I.x+dir.x*start,y:I.y+dir.y*start},{x:I.x+dir.x*end,y:I.y+dir.y*end},groupId);if(ext)items.push(ext);
+}
 function buildAngularDimension(a,b,pickA,pickB,location,groupId='preview',meta=null){
   if(a?.type!=='LINE'||b?.type!=='LINE'||!location)return[];
   const I=infiniteLineIntersection(a.p1,a.p2,b.p1,b.p2);if(!I)return[];
   const d1=branchDirection(a,I,pickA),d2=branchDirection(b,I,pickB);if(!d1||!d2)return[];
-  let startDir=d1,endDir=d2,start=Math.atan2(d1.y,d1.x),end=Math.atan2(d2.y,d2.x);
+  let startDir=d1,endDir=d2,startLine=a,endLine=b,start=Math.atan2(d1.y,d1.x),end=Math.atan2(d2.y,d2.x);
   const ccw=positiveAngleSpan(start,end),locAngle=Math.atan2(location.y-I.y,location.x-I.x);
-  if(!angleFallsInSpan(locAngle,start,ccw)){startDir=d2;endDir=d1;start=Math.atan2(d2.y,d2.x);end=Math.atan2(d1.y,d1.x);}
+  if(!angleFallsInSpan(locAngle,start,ccw)){startDir=d2;endDir=d1;startLine=b;endLine=a;start=Math.atan2(d2.y,d2.x);end=Math.atan2(d1.y,d1.x);}
   const theta=positiveAngleSpan(start,end);if(theta<1e-7||Math.PI*2-theta<1e-7)return[];
   const style=dimensionStyle(meta),minR=style.textHeight*2.4,r=Math.max(dist(I,location),minR),items=[],value=`${dimensionNumber(theta*180/Math.PI,meta)}°`;
   const arc=dimArc(I,r,start,end,groupId);if(arc)items.push(arc);
@@ -3584,9 +3650,8 @@ function buildAngularDimension(a,b,pickA,pickB,location,groupId='preview',meta=n
   const mode=resolvedArrowMode(meta,r*theta,dimensionTextWidth(value,style),style),baseOutside=mode==='outside',outside1=baseOutside!==Boolean(meta?.arrow1Flipped),outside2=baseOutside!==Boolean(meta?.arrow2Flipped);
   dimArrow(items,ps,outside1?{x:-ts.x,y:-ts.y}:ts,style.arrow,groupId);
   dimArrow(items,pe,outside2?te:{x:-te.x,y:-te.y},style.arrow,groupId);
-  for(const dir of [startDir,endDir]){
-    const line=dimLine({x:I.x+dir.x*style.extGap,y:I.y+dir.y*style.extGap},{x:I.x+dir.x*(r+style.extBeyond),y:I.y+dir.y*(r+style.extBeyond)},groupId);if(line)items.push(line);
-  }
+  addSmartAngularExtension(items,startLine,I,startDir,r,style,groupId);
+  addSmartAngularExtension(items,endLine,I,endDir,r,style,groupId);
   const midA=start+theta/2,tc={x:I.x+Math.cos(midA)*(r+style.textHeight*.68),y:I.y+Math.sin(midA)*(r+style.textHeight*.68)};
   items.push(dimText(value,tc,0,style,groupId));return items;
 }
