@@ -510,35 +510,72 @@ const DXF_UNIT_DEFS={
   cm:{insunits:5,measurement:1,scaleFromMm:0.1},
   m:{insunits:6,measurement:1,scaleFromMm:0.001}
 };
-export function flatPatternToDxf(result,{partName='NavoFlo_Flat_Pattern',units='mm'}={}){
+export function flatPatternToDxf(result,{partName='NavoFlo_Flat_Pattern',units='in'}={}){
   if(!result?.ok)throw new Error('No valid flat pattern.');
-  const unitKey=String(units||'mm').toLowerCase(),unitDef=DXF_UNIT_DEFS[unitKey];
+  const unitKey=String(units||'in').toLowerCase(),unitDef=DXF_UNIT_DEFS[unitKey];
   if(!unitDef)throw new Error(`Unsupported DXF unit: ${units}`);
   const lines=[];const add=(c,v)=>{lines.push(String(c),String(v));},scale=unitDef.scaleFromMm,sv=v=>Number(v)*scale,sp=p=>[sv(p[0]),sv(p[1])];
-  // AC1015 (AutoCAD 2000) is the first DXF generation where $INSUNITS is a
-  // standard header variable. Without it AutoCAD opens the drawing as Unitless
-  // even if $MEASUREMENT=1. NavoUnfold geometry is natively millimetric.
+
+  // Valid AutoCAD 2000 / R2000 ASCII DXF. V8.16.8 changed only $ACADVER to
+  // AC1015 while keeping R12 entity/table records; AutoCAD can reject that
+  // mixed dialect and stop on "Press ENTER to continue". This writer emits
+  // the R2000 subclass/owner records required by AC1015 and keeps $INSUNITS.
+  // Native NavoUnfold geometry is millimetric and is physically scaled to the
+  // selected output unit. Default production export is inches.
   add(0,'SECTION');add(2,'HEADER');
   add(9,'$ACADVER');add(1,'AC1015');
   add(9,'$INSUNITS');add(70,unitDef.insunits);
   add(9,'$MEASUREMENT');add(70,unitDef.measurement);
   add(9,'$LUNITS');add(70,2);
   add(9,'$LUPREC');add(70,4);
+  add(9,'$HANDSEED');add(5,'FFFF');
   add(0,'ENDSEC');
-  add(0,'SECTION');add(2,'TABLES');add(0,'TABLE');add(2,'LAYER');add(70,2);
-  for(const [name,color] of [['CUT',7],['BEND',3]]){add(0,'LAYER');add(2,name);add(70,0);add(62,color);add(6,'CONTINUOUS');}
-  add(0,'ENDTAB');add(0,'ENDSEC');add(0,'SECTION');add(2,'ENTITIES');
-  const entity=(layer,a,b)=>{a=sp(a);b=sp(b);add(0,'LINE');add(8,layer);add(10,dxfNum(a[0]));add(20,dxfNum(a[1]));add(30,0);add(11,dxfNum(b[0]));add(21,dxfNum(b[1]));add(31,0);};
+
+  // Minimal but standards-compliant R2000 symbol tables.
+  add(0,'SECTION');add(2,'TABLES');
+  add(0,'TABLE');add(2,'LTYPE');add(5,'2');add(330,'0');add(100,'AcDbSymbolTable');add(70,1);
+  add(0,'LTYPE');add(5,'20');add(330,'2');add(100,'AcDbSymbolTableRecord');add(100,'AcDbLinetypeTableRecord');add(2,'Continuous');add(70,0);add(3,'Solid line');add(72,65);add(73,0);add(40,0);
+  add(0,'ENDTAB');
+
+  add(0,'TABLE');add(2,'LAYER');add(5,'1');add(330,'0');add(100,'AcDbSymbolTable');add(70,3);
+  for(const [handle,name,color] of [['21','0',7],['22','CUT',7],['23','BEND',3]]){
+    add(0,'LAYER');add(5,handle);add(330,'1');add(100,'AcDbSymbolTableRecord');add(100,'AcDbLayerTableRecord');add(2,name);add(70,0);add(62,color);add(6,'Continuous');
+  }
+  add(0,'ENDTAB');
+
+  add(0,'TABLE');add(2,'BLOCK_RECORD');add(5,'3');add(330,'0');add(100,'AcDbSymbolTable');add(70,2);
+  for(const [handle,name] of [['10','*Model_Space'],['11','*Paper_Space']]){
+    add(0,'BLOCK_RECORD');add(5,handle);add(330,'3');add(100,'AcDbSymbolTableRecord');add(100,'AcDbBlockTableRecord');add(2,name);
+  }
+  add(0,'ENDTAB');add(0,'ENDSEC');
+
+  // Matching model/paper space block definitions for the BLOCK_RECORD table.
+  add(0,'SECTION');add(2,'BLOCKS');
+  for(const [owner,blockHandle,endHandle,name] of [['10','30','31','*Model_Space'],['11','32','33','*Paper_Space']]){
+    add(0,'BLOCK');add(5,blockHandle);add(330,owner);add(100,'AcDbEntity');add(8,'0');add(100,'AcDbBlockBegin');add(2,name);add(70,0);add(10,0);add(20,0);add(30,0);add(3,name);add(1,'');
+    add(0,'ENDBLK');add(5,endHandle);add(330,owner);add(100,'AcDbEntity');add(8,'0');add(100,'AcDbBlockEnd');
+  }
+  add(0,'ENDSEC');
+
+  add(0,'SECTION');add(2,'ENTITIES');
+  let nextHandle=0x100;
+  const handle=()=>((nextHandle++).toString(16).toUpperCase());
+  const entityBase=(type,layer,subclass)=>{add(0,type);add(5,handle());add(330,'10');add(100,'AcDbEntity');add(8,layer);add(100,subclass);};
+  const lineEntity=(layer,a,b)=>{a=sp(a);b=sp(b);entityBase('LINE',layer,'AcDbLine');add(10,dxfNum(a[0]));add(20,dxfNum(a[1]));add(30,0);add(11,dxfNum(b[0]));add(21,dxfNum(b[1]));add(31,0);};
   const primitives=Array.isArray(result.boundaryPrimitives)&&result.boundaryPrimitives.length?result.boundaryPrimitives:null;
   if(primitives){
     for(const primitive of primitives){
-      if(primitive.kind==='line')entity('CUT',primitive.a,primitive.b);
-      else if(primitive.kind==='circle'){const center=sp(primitive.center);add(0,'CIRCLE');add(8,'CUT');add(10,dxfNum(center[0]));add(20,dxfNum(center[1]));add(30,0);add(40,dxfNum(sv(primitive.radius)));}
-      else if(primitive.kind==='arc'){const center=sp(primitive.center);add(0,'ARC');add(8,'CUT');add(10,dxfNum(center[0]));add(20,dxfNum(center[1]));add(30,0);add(40,dxfNum(sv(primitive.radius)));add(50,dxfNum((primitive.startRad*180/Math.PI+360)%360));add(51,dxfNum((primitive.endRad*180/Math.PI+360)%360));}
-      else if(primitive.kind==='polyline'){for(let i=0;i+1<primitive.points.length;i++)entity('CUT',primitive.points[i],primitive.points[i+1]);}
+      if(primitive.kind==='line')lineEntity('CUT',primitive.a,primitive.b);
+      else if(primitive.kind==='circle'){
+        const center=sp(primitive.center);entityBase('CIRCLE','CUT','AcDbCircle');add(10,dxfNum(center[0]));add(20,dxfNum(center[1]));add(30,0);add(40,dxfNum(sv(primitive.radius)));
+      }else if(primitive.kind==='arc'){
+        const center=sp(primitive.center);add(0,'ARC');add(5,handle());add(330,'10');add(100,'AcDbEntity');add(8,'CUT');add(100,'AcDbCircle');add(10,dxfNum(center[0]));add(20,dxfNum(center[1]));add(30,0);add(40,dxfNum(sv(primitive.radius)));add(100,'AcDbArc');add(50,dxfNum((primitive.startRad*180/Math.PI+360)%360));add(51,dxfNum((primitive.endRad*180/Math.PI+360)%360));
+      }else if(primitive.kind==='polyline'){
+        for(let i=0;i+1<primitive.points.length;i++)lineEntity('CUT',primitive.points[i],primitive.points[i+1]);
+      }
     }
-  }else for(const [a,b] of result.boundaryEdges)entity('CUT',a,b);
-  for(const bend of result.bendLines)entity('BEND',bend.a,bend.b);
+  }else for(const [a,b] of result.boundaryEdges)lineEntity('CUT',a,b);
+  for(const bend of result.bendLines)lineEntity('BEND',bend.a,bend.b);
   add(0,'ENDSEC');add(0,'EOF');return lines.join('\r\n')+'\r\n';
 }
 

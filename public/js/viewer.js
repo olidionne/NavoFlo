@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.16.8';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.16.9';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -75,7 +75,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.16.8';
+const WORKER_URL = '/js/step-worker.js?v=8.16.9';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -1260,7 +1260,7 @@ function clearFlatPattern(){
 async function exportFlatPatternDxf(){
   if(!flatPatternResult){setSheetMetalStatus(SMT.noFlat,'warn');return;}
   try{
-    const base=(currentFile?.name||'part').replace(/\.[^.]+$/,'')||'part',name=`${base}_FLAT.dxf`,text=flatPatternToDxf(flatPatternResult,{partName:base,units:'mm'}),blob=new Blob([text],{type:'application/dxf'});
+    const base=(currentFile?.name||'part').replace(/\.[^.]+$/,'')||'part',name=`${base}_FLAT.dxf`,text=flatPatternToDxf(flatPatternResult,{partName:base,units:'in'}),blob=new Blob([text],{type:'application/dxf'});
     if(typeof window.showSaveFilePicker==='function'){
       const handle=await window.showSaveFilePicker({suggestedName:name,types:[{description:'AutoCAD DXF',accept:{'application/dxf':['.dxf'],'text/plain':['.dxf']}}]});const writable=await handle.createWritable();await writable.write(blob);await writable.close();
     }else{const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);}
