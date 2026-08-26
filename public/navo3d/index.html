@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/viewer.css?v=8.16">
+  <link rel="stylesheet" href="/css/viewer.css?v=8.17.2">
   <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.3">
   <script type="importmap">
   {
@@ -38,6 +38,7 @@
 <div class="n3-workspace-wrap">
   <div id="cad-workspace" class="cad-workspace">
     <canvas id="viewer-canvas" aria-label="Navo3D"></canvas>
+    <button id="sheetmetal-toggle" class="sheetmetal-float-toggle" type="button" hidden disabled title="Déplier automatiquement la tôle"><span class="tool-icon">⌁</span><span>Déplier</span></button>
 
     <div class="cad-toolbar" role="toolbar">
       <label id="open-model-button" class="tool-button file-tool">
@@ -116,10 +117,6 @@
 
       <div class="toolbar-spacer"></div>
 
-      <button id="sheetmetal-toggle" class="tool-button" type="button" disabled title="Déplier automatiquement la tôle">
-        <span class="tool-icon">⌁</span><span>Déplier</span>
-      </button>
-
       <button id="properties-toggle" class="tool-button" type="button" disabled>
         <span class="tool-icon">ⓘ</span><span>Propriétés</span>
       </button>
@@ -188,35 +185,25 @@
 
 
       <div id="sheetmetal-section" class="drawer-section sheetmetal-section" hidden>
-        <div class="drawer-section-title">TÔLERIE</div>
+        <div id="sm-section-title" class="drawer-section-title">TÔLERIE</div>
 
         <div class="sheetmetal-unfold-engine">
-          <div class="sheetmetal-engine-title">DÉPLIAGE AUTOMATIQUE · NAVOUNFOLD</div>
-          <p class="sheetmetal-engine-note">Face fixe, épaisseur, rayon de pliage et facteur K détectés automatiquement. Utilisez les paramètres avancés seulement pour forcer une valeur.</p>
-          <div class="sheetmetal-view-toggle" role="group" aria-label="État de la pièce">
-            <button id="sm-view-folded" type="button" disabled>PLIÉE</button>
-            <button id="sm-view-flat" type="button" disabled>DÉPLIÉE</button>
-          </div>
-          <div id="sm-status" class="sheetmetal-status">Détection automatique prête.</div>
+          <div class="sheetmetal-engine-title">DÉTECTION AUTOMATIQUE · NAVOUNFOLD</div>
+          <p id="sm-engine-note" class="sheetmetal-engine-note">Face fixe, épaisseur, rayon de pliage et facteur K détectés automatiquement. Utilisez les paramètres avancés seulement pour forcer une valeur.</p>
+          <div id="sm-status" class="sheetmetal-status">Analyse automatique en cours…</div>
           <dl class="drawer-stats compact-stats sheetmetal-unfold-results">
             <div><dt>T utilisé</dt><dd id="sm-detected-thickness">—</dd></div>
-            <div><dt>Facteur K</dt><dd id="sm-k">—</dd></div>
-            <div><dt>Plis</dt><dd id="sm-detected-bends">—</dd></div>
+            <div id="sm-k-row"><dt>Facteur K</dt><dd id="sm-k">—</dd></div>
+            <div id="sm-bends-row"><dt>Plis</dt><dd id="sm-detected-bends">—</dd></div>
             <div><dt>Encombrement</dt><dd id="sm-flat-size">—</dd></div>
           </dl>
-          <button id="sm-export-dxf" class="sheetmetal-export" type="button" disabled>Exporter le développé DXF</button>
+          <button id="sm-export-dxf" class="sheetmetal-export" type="button" disabled>Exporter DXF</button>
         </div>
 
-        <details class="sheetmetal-k-table">
+        <details id="sm-advanced" class="sheetmetal-k-table">
           <summary>Paramètres avancés / correction manuelle</summary>
-          <div class="sheetmetal-intro">
-            <strong>Facteur K automatique</strong>
-            <span>Règle CD-401 basée sur le rapport rayon intérieur / épaisseur.</span>
-          </div>
-          <label class="sheetmetal-field">
-            <span>Famille matériau</span>
-            <select id="sm-material-class"><option value="hard">Acier / matériaux durs</option><option value="medium">Aluminium · moyen</option><option value="soft">Aluminium · doux</option></select>
-          </label>
+          <div class="sheetmetal-intro"><strong>Facteur K automatique</strong><span>Règle CD-401 basée sur le rapport rayon intérieur / épaisseur.</span></div>
+          <label class="sheetmetal-field"><span>Famille matériau</span><select id="sm-material-class"><option value="hard">Acier / matériaux durs</option><option value="medium">Aluminium · moyen</option><option value="soft">Aluminium · doux</option></select></label>
           <div class="sheetmetal-input-grid">
             <label class="sheetmetal-field"><span>Épaisseur T</span><div class="sheetmetal-number"><input id="sm-thickness" type="number" inputmode="decimal" min="0" step="any" placeholder="AUTO"><em id="sm-thickness-unit">mm</em></div></label>
             <label class="sheetmetal-field"><span>Rayon intérieur R</span><div class="sheetmetal-number"><input id="sm-radius" type="number" inputmode="decimal" min="0" step="any" placeholder="AUTO"><em id="sm-radius-unit">mm</em></div></label>
@@ -226,20 +213,11 @@
           <label class="sheetmetal-check"><span>Forcer un facteur K</span><input id="sm-manual-k-toggle" type="checkbox"></label>
           <label id="sm-manual-k-row" class="sheetmetal-field" hidden><span>Facteur K manuel</span><div class="sheetmetal-number"><input id="sm-manual-k" type="number" inputmode="decimal" min="0" max="1" step="0.001" value="0.40"><em>K</em></div></label>
           <div class="sheetmetal-fixed-row"><button id="sm-set-fixed-face" type="button">↳ Forcer face fixe depuis sélection</button><span id="sm-fixed-face" class="sheetmetal-fixed-face">AUTO</span></div>
-          <dl class="drawer-stats compact-stats sheetmetal-results">
-            <div><dt>R / T</dt><dd id="sm-ratio">—</dd></div><div><dt>Plage</dt><dd id="sm-band">—</dd></div><div><dt>Rayon neutre</dt><dd id="sm-neutral-radius">—</dd></div><div><dt>Bend allowance</dt><dd id="sm-bend-allowance">—</dd></div><div><dt>Bend deduction</dt><dd id="sm-bend-deduction">—</dd></div>
-          </dl>
+          <dl class="drawer-stats compact-stats sheetmetal-results"><div><dt>R / T</dt><dd id="sm-ratio">—</dd></div><div><dt>Plage</dt><dd id="sm-band">—</dd></div><div><dt>Rayon neutre</dt><dd id="sm-neutral-radius">—</dd></div><div><dt>Bend allowance</dt><dd id="sm-bend-allowance">—</dd></div><div><dt>Bend deduction</dt><dd id="sm-bend-deduction">—</dd></div></dl>
           <button id="sm-unfold" class="sheetmetal-unfold-primary" type="button">Recalculer le déplié</button>
           <details class="sheetmetal-k-table"><summary>Table Air Bending CD-401</summary><table><thead><tr><th>R / T</th><th>Al doux</th><th>Al moyen</th><th>Acier</th></tr></thead><tbody><tr><td>0 → 1</td><td>0,33</td><td>0,38</td><td>0,40</td></tr><tr><td>1 → 3</td><td>0,40</td><td>0,43</td><td>0,45</td></tr><tr><td>&gt; 3</td><td>0,50</td><td>0,50</td><td>0,50</td></tr></tbody></table></details>
         </details>
         <p class="sheetmetal-warning">Développé calculé localement. Valider le résultat selon la procédure de fabrication avant production.</p>
-      </div>
-      <div class="drawer-section">
-        <div class="drawer-section-title">CAPACITÉ PC</div>
-        <div class="pc-tier"><b>Minimum conseillé</b><span>4 threads CPU · 8 Go RAM · WebAssembly · WebGL2</span></div>
-        <div class="pc-tier"><b>Recommandé STEP</b><span>8+ threads CPU · 16 Go RAM</span></div>
-        <div class="pc-tier"><b>Gros assemblages</b><span>32 Go RAM recommandé</span></div>
-        <div id="pc-check" class="pc-check">Votre navigateur: …</div>
       </div>
     </aside>
 
@@ -267,6 +245,6 @@
 </section>
 </main>
 
-<script type="module" src="/js/viewer.js?v=8.17.1"></script>
+<script type="module" src="/js/viewer.js?v=8.17.2"></script>
 </body>
 </html>

@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/viewer.css?v=8.16">
+  <link rel="stylesheet" href="/css/viewer.css?v=8.17.2">
   <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.3">
   <script type="importmap">
   {
@@ -38,6 +38,7 @@
 <div class="n3-workspace-wrap">
   <div id="cad-workspace" class="cad-workspace">
     <canvas id="viewer-canvas" aria-label="Navo3D"></canvas>
+    <button id="sheetmetal-toggle" class="sheetmetal-float-toggle" type="button" hidden disabled title="Automatically unfold sheet metal"><span class="tool-icon">⌁</span><span>Unfold</span></button>
 
     <div class="cad-toolbar" role="toolbar">
       <label id="open-model-button" class="tool-button file-tool">
@@ -116,10 +117,6 @@
 
       <div class="toolbar-spacer"></div>
 
-      <button id="sheetmetal-toggle" class="tool-button" type="button" disabled title="Automatically unfold sheet metal">
-        <span class="tool-icon">⌁</span><span>Unfold</span>
-      </button>
-
       <button id="properties-toggle" class="tool-button" type="button" disabled>
         <span class="tool-icon">ⓘ</span><span>Properties</span>
       </button>
@@ -188,20 +185,29 @@
 
 
       <div id="sheetmetal-section" class="drawer-section sheetmetal-section" hidden>
-        <div class="drawer-section-title">SHEET METAL</div>
+        <div id="sm-section-title" class="drawer-section-title">SHEET METAL</div>
+
         <div class="sheetmetal-unfold-engine">
-          <div class="sheetmetal-engine-title">AUTOMATIC UNFOLD · NAVOUNFOLD</div>
-          <p class="sheetmetal-engine-note">Fixed face, thickness, bend radius and K-factor are detected automatically. Use advanced parameters only to override a value.</p>
-          <div class="sheetmetal-view-toggle" role="group" aria-label="Part state"><button id="sm-view-folded" type="button" disabled>FOLDED</button><button id="sm-view-flat" type="button" disabled>FLAT</button></div>
-          <div id="sm-status" class="sheetmetal-status">Automatic detection ready.</div>
-          <dl class="drawer-stats compact-stats sheetmetal-unfold-results"><div><dt>T used</dt><dd id="sm-detected-thickness">—</dd></div><div><dt>K-factor</dt><dd id="sm-k">—</dd></div><div><dt>Bends</dt><dd id="sm-detected-bends">—</dd></div><div><dt>Overall size</dt><dd id="sm-flat-size">—</dd></div></dl>
-          <button id="sm-export-dxf" class="sheetmetal-export" type="button" disabled>Export flat DXF</button>
+          <div class="sheetmetal-engine-title">AUTOMATIC DETECTION · NAVOUNFOLD</div>
+          <p id="sm-engine-note" class="sheetmetal-engine-note">Fixed face, thickness, bend radius and K-factor are detected automatically. Use advanced settings only to override a value.</p>
+          <div id="sm-status" class="sheetmetal-status">Automatic analysis in progress…</div>
+          <dl class="drawer-stats compact-stats sheetmetal-unfold-results">
+            <div><dt>Thickness used</dt><dd id="sm-detected-thickness">—</dd></div>
+            <div id="sm-k-row"><dt>K-factor</dt><dd id="sm-k">—</dd></div>
+            <div id="sm-bends-row"><dt>Bends</dt><dd id="sm-detected-bends">—</dd></div>
+            <div><dt>Flat size</dt><dd id="sm-flat-size">—</dd></div>
+          </dl>
+          <button id="sm-export-dxf" class="sheetmetal-export" type="button" disabled>Export DXF</button>
         </div>
-        <details class="sheetmetal-k-table">
-          <summary>Advanced parameters / manual correction</summary>
+
+        <details id="sm-advanced" class="sheetmetal-k-table">
+          <summary>Advanced settings / manual correction</summary>
           <div class="sheetmetal-intro"><strong>Automatic K-factor</strong><span>CD-401 rule based on inside-radius / thickness ratio.</span></div>
           <label class="sheetmetal-field"><span>Material family</span><select id="sm-material-class"><option value="hard">Steel / hard materials</option><option value="medium">Aluminum · medium</option><option value="soft">Aluminum · soft</option></select></label>
-          <div class="sheetmetal-input-grid"><label class="sheetmetal-field"><span>Thickness T</span><div class="sheetmetal-number"><input id="sm-thickness" type="number" inputmode="decimal" min="0" step="any" placeholder="AUTO"><em id="sm-thickness-unit">mm</em></div></label><label class="sheetmetal-field"><span>Inside radius R</span><div class="sheetmetal-number"><input id="sm-radius" type="number" inputmode="decimal" min="0" step="any" placeholder="AUTO"><em id="sm-radius-unit">mm</em></div></label></div>
+          <div class="sheetmetal-input-grid">
+            <label class="sheetmetal-field"><span>Thickness T</span><div class="sheetmetal-number"><input id="sm-thickness" type="number" inputmode="decimal" min="0" step="any" placeholder="AUTO"><em id="sm-thickness-unit">mm</em></div></label>
+            <label class="sheetmetal-field"><span>Inside radius R</span><div class="sheetmetal-number"><input id="sm-radius" type="number" inputmode="decimal" min="0" step="any" placeholder="AUTO"><em id="sm-radius-unit">mm</em></div></label>
+          </div>
           <div class="sheetmetal-pick-actions"><button id="sm-use-measure" type="button">↳ T from measurement</button><button id="sm-use-radius" type="button">↳ R from selection</button></div>
           <label class="sheetmetal-field"><span>Bend angle</span><div class="sheetmetal-number"><input id="sm-angle" type="number" inputmode="decimal" min="0.01" max="179.99" step="0.1" value="90"><em>°</em></div></label>
           <label class="sheetmetal-check"><span>Force a K-factor</span><input id="sm-manual-k-toggle" type="checkbox"></label>
@@ -209,16 +215,9 @@
           <div class="sheetmetal-fixed-row"><button id="sm-set-fixed-face" type="button">↳ Force fixed face from selection</button><span id="sm-fixed-face" class="sheetmetal-fixed-face">AUTO</span></div>
           <dl class="drawer-stats compact-stats sheetmetal-results"><div><dt>R / T</dt><dd id="sm-ratio">—</dd></div><div><dt>Band</dt><dd id="sm-band">—</dd></div><div><dt>Neutral radius</dt><dd id="sm-neutral-radius">—</dd></div><div><dt>Bend allowance</dt><dd id="sm-bend-allowance">—</dd></div><div><dt>Bend deduction</dt><dd id="sm-bend-deduction">—</dd></div></dl>
           <button id="sm-unfold" class="sheetmetal-unfold-primary" type="button">Recalculate flat pattern</button>
-          <details class="sheetmetal-k-table"><summary>Air Bending CD-401 table</summary><table><thead><tr><th>R / T</th><th>Soft Al</th><th>Medium Al</th><th>Steel</th></tr></thead><tbody><tr><td>0 → 1</td><td>0.33</td><td>0.38</td><td>0.40</td></tr><tr><td>1 → 3</td><td>0.40</td><td>0.43</td><td>0.45</td></tr><tr><td>&gt; 3</td><td>0.50</td><td>0.50</td><td>0.50</td></tr></tbody></table></details>
+          <details class="sheetmetal-k-table"><summary>CD-401 Air Bending table</summary><table><thead><tr><th>R / T</th><th>Soft Al</th><th>Medium Al</th><th>Steel</th></tr></thead><tbody><tr><td>0 → 1</td><td>0.33</td><td>0.38</td><td>0.40</td></tr><tr><td>1 → 3</td><td>0.40</td><td>0.43</td><td>0.45</td></tr><tr><td>&gt; 3</td><td>0.50</td><td>0.50</td><td>0.50</td></tr></tbody></table></details>
         </details>
-        <p class="sheetmetal-warning">Flat pattern calculated locally. Validate the result against your manufacturing procedure before production.</p>
-      </div>
-      <div class="drawer-section">
-        <div class="drawer-section-title">PC CAPABILITY</div>
-        <div class="pc-tier"><b>Suggested minimum</b><span>4 CPU threads · 8 GB RAM · WebAssembly · WebGL2</span></div>
-        <div class="pc-tier"><b>Recommended STEP</b><span>8+ CPU threads · 16 GB RAM</span></div>
-        <div class="pc-tier"><b>Large assemblies</b><span>32 GB RAM recommended</span></div>
-        <div id="pc-check" class="pc-check">Your browser: …</div>
+        <p class="sheetmetal-warning">Flat pattern calculated locally. Validate the result using your manufacturing procedure before production.</p>
       </div>
     </aside>
 
@@ -246,6 +245,6 @@
 </section>
 </main>
 
-<script type="module" src="/js/viewer.js?v=8.17.1"></script>
+<script type="module" src="/js/viewer.js?v=8.17.2"></script>
 </body>
 </html>

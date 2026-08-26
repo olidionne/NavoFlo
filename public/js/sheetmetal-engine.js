@@ -1,7 +1,7 @@
-import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.1';
+import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.2';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.17.1
+ * NavoFlo Sheet Metal Engine — V8.17.2
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -279,6 +279,30 @@ function detectThickness(cylinders,tol){
   const seed=median(nearest);if(!Number.isFinite(seed))return null;
   const band=Math.max(seed*0.08,tol*20),cluster=nearest.filter(v=>Math.abs(v-seed)<=band),value=median(cluster.length?cluster:nearest);
   return{value,count:cluster.length||nearest.length,samples:nearest.length,confidence:(cluster.length||nearest.length)/nearest.length};
+}
+
+function detectPlanarThickness(planarGroups,tol){
+  // Flat laser-cut plates may contain no bend cylinders at all. In that case the
+  // two dominant, parallel planar skins are the most reliable local thickness
+  // signal. Rank by usable skin area so opposite side walls of a rectangular
+  // solid cannot beat the large top/bottom faces.
+  const groups=(planarGroups?.groups||[]).filter(g=>g?.stats?.area>EPS);
+  let best=null;
+  for(let i=0;i<groups.length;i++)for(let j=i+1;j<groups.length;j++){
+    const a=groups[i],b=groups[j],na=V3.unit(a.stats.normal),nb=V3.unit(b.stats.normal);
+    if(!na||!nb||Math.abs(V3.dot(na,nb))<0.9995)continue;
+    const d=V3.sub(b.stats.centroid,a.stats.centroid),signed=V3.dot(d,na),gap=Math.abs(signed);
+    if(!(gap>Math.max(tol*25,1e-7)))continue;
+    const areaA=Number(a.stats.area)||0,areaB=Number(b.stats.area)||0,maxArea=Math.max(areaA,areaB),minArea=Math.min(areaA,areaB);
+    if(!(minArea>EPS))continue;
+    const ratio=minArea/Math.max(maxArea,EPS);if(ratio<0.55)continue;
+    const span=Math.sqrt(minArea),lateral=V3.len(V3.sub(d,V3.scale(na,signed)));
+    if(gap>Math.max(span*0.5,tol*100))continue;
+    if(lateral>Math.max(span*0.20,gap*4,tol*100))continue;
+    const score=minArea*ratio/(1+lateral/Math.max(span,EPS));
+    if(!best||score>best.score)best={value:gap,score,areaRatio:ratio,lateral,groups:[a.id,b.id]};
+  }
+  return best?{value:best.value,count:2,samples:2,confidence:best.areaRatio,source:'parallel-planar-skins',groups:best.groups}:null;
 }
 
 function cylinderPartner(cyl,cylinders,thickness,tol){
@@ -650,7 +674,7 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   }
   if(!fixedPanel)return{ok:false,code:'fixed-panel-missing',message:'A usable planar sheet panel could not be selected automatically.'};
 
-  const autoThickness=detectThickness(cylinders,tol);let resolvedThickness=Number(thickness);
+  const autoThickness=detectThickness(cylinders,tol)||detectPlanarThickness(planarGroups,tol);let resolvedThickness=Number(thickness);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)resolvedThickness=Number(autoThickness?.value);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)return{ok:false,code:'thickness-unresolved',message:'Sheet thickness could not be detected. Enter T and try again.',detectedThickness:autoThickness,fixedFaceId:fixed};
 
@@ -689,6 +713,21 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   if(cycleLinks.length)warnings.push('Closed/cyclic sheet topology contains an inconsistent closure; a spanning-tree seam was kept for safety.');
   if(!usedBends.length){
     const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,fixedPanelCandidateBends:connected,tolerance:tol,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
+
+    // V8.17.2 — zero-bend STEP support. A plain plate is already its own flat
+    // pattern, so return the exact dominant planar skin instead of treating
+    // "no bends" as an error. This gives the same one-click DXF workflow to
+    // laser-cut plates and to formed sheet-metal parts.
+    if(!connected&&candidateBends.length===0&&autoThickness?.source==='parallel-planar-skins'){
+      const mapped=projectPanelTriangles(ctx,fixedPanel,rootMap),triangles=mapped,flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6);
+      const boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,[],flatTol,planarGroups),bounds=bounds2D(triangles);
+      if(triangles.length&&boundaryEdges.length){
+        const primitivesClosed=boundaryPrimitivesClosed(boundaryPrimitives,Math.max(resolvedThickness*1e-5,1e-6));
+        if(!primitivesClosed)warnings.push('Exact CUT primitives contain an open chain; DXF export will use the welded mesh boundary as a safe fallback.');
+        return{ok:true,version:'NavoUnfold MVP 2.0',flatPlate:true,fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds:fixedPanel.faceIds.slice(),bendCount:0,panelCount:1,triangles,selectionFaces:[{id:'flat-panel-1',kind:'panel',sourceFaceIds:fixedPanel.faceIds.slice(),triangles:mapped}],boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines:[],bounds,warnings,cycleLinks:[],cycleClosures:[],diagnostics:{...diagnostics,flatPlate:true}};
+      }
+    }
+
     const message=connected?'A cylindrical bend touches the fixed panel, but its geometry could not be resolved safely. Check T / inside radius / K-factor.':'No standard cylindrical bend connected to the fixed panel was detected.';
     return{ok:false,code:connected?'bend-resolution-failed':'no-bends',message,detectedThickness:autoThickness,warnings,diagnostics,fixedFaceId:fixed};
   }
@@ -709,5 +748,5 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const primitivesClosed=boundaryPrimitivesClosed(boundaryPrimitives,Math.max(resolvedThickness*1e-5,1e-6));
   if(!primitivesClosed)warnings.push('Exact CUT primitives contain an open chain; DXF export will use the welded mesh boundary as a safe fallback.');
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 1.9',fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,selectionFaces,boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines,bounds,warnings,cycleLinks,cycleClosures,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
+  return{ok:true,version:'NavoUnfold MVP 2.0',fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,selectionFaces,boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines,bounds,warnings,cycleLinks,cycleClosures,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol}};
 }

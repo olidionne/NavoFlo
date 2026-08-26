@@ -1,5 +1,5 @@
 /*
- * NavoFlo DXF R2000 template — V8.17.1
+ * NavoFlo DXF R2000 template — V8.17.2
  * Full AC1015 document skeleton with AutoCAD-compatible tables, layouts and objects.
  */
 
@@ -848,7 +848,7 @@ $PROXYGRAPHICS
   9
 $MEASUREMENT
  70
-1
+__MEASUREMENT__
   9
 $CELWEIGHT
 370

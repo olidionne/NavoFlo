@@ -71,7 +71,16 @@
     auditRefresh: fr ? 'Actualiser' : 'Refresh',
     auditMore: fr ? 'Afficher plus' : 'Show more',
     auditEmpty: fr ? 'Aucune activité ne correspond à ces filtres.' : 'No activity matches these filters.',
-    auditError: fr ? 'Impossible de charger le journal d’audit.' : 'Unable to load the audit log.'
+    auditError: fr ? 'Impossible de charger le journal d’audit.' : 'Unable to load the audit log.',
+    pcTitle: fr ? 'Capacité de cet ordinateur' : 'This computer capability',
+    pcIntro: fr ? 'Indicateur local utilisé par Navo2D / Navo3D. Aucune information matérielle n’est envoyée à NavoFlo.' : 'Local indicator used by Navo2D / Navo3D. No hardware information is sent to NavoFlo.',
+    pcGood: fr ? 'Compatible' : 'Compatible',
+    pcLimited: fr ? 'Limitée' : 'Limited',
+    pcBad: fr ? 'Incompatible' : 'Incompatible',
+    pcThreads: fr ? 'threads CPU' : 'CPU threads',
+    pcRam: fr ? 'RAM' : 'RAM',
+    pcUnknown: fr ? 'non exposé par le navigateur' : 'not exposed by the browser',
+    pcTargets: fr ? 'Repères : minimum 4 threads / 8 Go · STEP recommandé 8+ threads / 16 Go · gros assemblages 32 Go.' : 'Guidance: minimum 4 threads / 8 GB · recommended STEP 8+ threads / 16 GB · large assemblies 32 GB.'
   };
 
   async function api(path, options = {}) {
@@ -386,6 +395,26 @@
     </section>`;
   }
 
+  function pcCapabilityHtml() {
+    const wasm=typeof WebAssembly==='object';
+    let webgl2=false;try{webgl2=!!document.createElement('canvas').getContext('webgl2')}catch{}
+    const threads=Number(navigator.hardwareConcurrency)||null,ram=Number(navigator.deviceMemory)||null;
+    const required=wasm&&webgl2,cpuOk=threads==null||threads>=4,ramOk=ram==null||ram>=8;
+    const level=required&&cpuOk&&ramOk?'good':required?'limited':'bad';
+    const label=level==='good'?t.pcGood:level==='limited'?t.pcLimited:t.pcBad;
+    const ramText=ram?`${ram} GB+`:`${t.pcUnknown}`;
+    return `<section class="license-panel pc-account-panel">
+      <div class="license-panel-head pc-account-heading"><div><h2>${t.pcTitle}</h2><p>${t.pcIntro}</p></div><span class="pc-account-status ${level}">${label}</span></div>
+      <div class="pc-account-grid">
+        <div class="${wasm?'ok':'bad'}"><span>WebAssembly</span><strong>${wasm?'✓':'✕'}</strong></div>
+        <div class="${webgl2?'ok':'bad'}"><span>WebGL2</span><strong>${webgl2?'✓':'✕'}</strong></div>
+        <div class="${cpuOk?'ok':'warn'}"><span>CPU</span><strong>${threads??'?'} ${t.pcThreads}</strong></div>
+        <div class="${ramOk?'ok':'warn'}"><span>${t.pcRam}</span><strong>${ramText}</strong></div>
+      </div>
+      <p class="pc-account-targets">${t.pcTargets}</p>
+    </section>`;
+  }
+
   function render() {
     if (!state) return;
     const manager = ['owner', 'admin'].includes(state.user.role);
@@ -401,7 +430,8 @@
         const pending = Number(member.pending_license) && !Number(member.licensed);
         const isAdmin = member.license_type === 'admin' || member.role === 'owner';
         return `<div class="license-member"><div><strong>${esc(member.display_name || member.email)}</strong><small>${esc(member.email)}</small><small>${accountStatus(member)}</small></div><span class="role-badge">${isAdmin ? 'ADMIN' : 'USER'}</span><button class="license-toggle ${Number(member.licensed) ? 'on' : ''}" data-license-user="${member.user_id}" data-active="${Number(member.licensed) ? '1' : '0'}" ${pending || isAdmin ? 'disabled' : ''}>${pending ? t.pending : (Number(member.licensed) ? t.assigned : t.unassigned)}</button>${!isAdmin && Number(member.licensed) ? `<button class="license-transfer" data-transfer-user="${member.user_id}">${t.transfer}</button>` : ''}${member.user_status !== 'active' ? `<button class="license-invite" data-invite-user="${member.user_id}">${t.inviteAgain}</button>` : ''}${member.role === 'owner' ? '' : `<button class="license-remove" data-remove-user="${member.user_id}">${t.remove}</button>`}</div>`;
-      }).join('')}</div></section>` : ''}`;
+      }).join('')}</div></section>` : ''}
+      ${pcCapabilityHtml()}`;
 
     root.querySelector('[data-billing]')?.addEventListener('click', async event => {
       event.currentTarget.disabled = true;

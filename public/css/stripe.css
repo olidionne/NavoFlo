@@ -59,3 +59,23 @@
 .audit-filter-actions .button.secondary{
   color:#e8eef3 !important;
 }
+
+/* V8.17.2 — PC capability moved out of Navo3D properties and into Account */
+.pc-account-panel{margin-bottom:0}
+.pc-account-heading{align-items:center}
+.pc-account-heading h2{margin-bottom:6px}
+.pc-account-heading p{margin:0;max-width:760px}
+.pc-account-status{flex:0 0 auto;border:1px solid #3b5060;border-radius:999px;padding:7px 10px;font-size:.76rem;font-weight:850;text-transform:uppercase;letter-spacing:.04em}
+.pc-account-status.good{border-color:#2c8f6c;background:#10261f;color:#bff6df}
+.pc-account-status.limited{border-color:#806b2c;background:#29240f;color:#f2dda0}
+.pc-account-status.bad{border-color:#71404a;background:#281419;color:#ffb2bb}
+.pc-account-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:16px}
+.pc-account-grid>div{display:grid;gap:6px;min-height:70px;padding:13px;border:1px solid #263541;border-radius:11px;background:#0a1016}
+.pc-account-grid span{color:#91a2ae;font-size:.78rem;font-weight:750;text-transform:uppercase;letter-spacing:.03em}
+.pc-account-grid strong{color:#dce7ed;font-size:.96rem}
+.pc-account-grid>div.ok strong{color:#bff6df}
+.pc-account-grid>div.warn strong{color:#f2dda0}
+.pc-account-grid>div.bad strong{color:#ffb2bb}
+.pc-account-targets{margin:12px 0 0!important;color:#7f919d!important;font-size:.82rem;line-height:1.45}
+@media(max-width:760px){.pc-account-heading{align-items:flex-start;flex-direction:column}.pc-account-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:480px){.pc-account-grid{grid-template-columns:1fr}}

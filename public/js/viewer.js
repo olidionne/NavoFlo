@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.1';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.2';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -58,7 +58,7 @@ const E = {
   propParts:$('prop-parts'), propGeometries:$('prop-geometries'), propTriangles:$('prop-triangles'),
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
   stepDate:$('step-date'), stepAuthor:$('step-author'), stepOrg:$('step-org'),
-  stepOrigin:$('step-origin'), stepTree:$('step-tree'), stepCustomSection:$('step-custom-section'), stepCustomProperties:$('step-custom-properties'), stepCustomNote:$('step-custom-note'), pc:$('pc-check'),
+  stepOrigin:$('step-origin'), stepTree:$('step-tree'), stepCustomSection:$('step-custom-section'), stepCustomProperties:$('step-custom-properties'), stepCustomNote:$('step-custom-note'),
   sheetMetal:$('sheetmetal-toggle'), sheetMetalSection:$('sheetmetal-section'),
   smMaterial:$('sm-material-class'), smThickness:$('sm-thickness'), smThicknessUnit:$('sm-thickness-unit'),
   smRadius:$('sm-radius'), smRadiusUnit:$('sm-radius-unit'), smAngle:$('sm-angle'),
@@ -66,8 +66,8 @@ const E = {
   smManualToggle:$('sm-manual-k-toggle'), smManualRow:$('sm-manual-k-row'), smManualK:$('sm-manual-k'),
   smRatio:$('sm-ratio'), smBand:$('sm-band'), smK:$('sm-k'), smNeutralRadius:$('sm-neutral-radius'),
   smBendAllowance:$('sm-bend-allowance'), smBendDeduction:$('sm-bend-deduction'), smStatus:$('sm-status'),
-  smSetFixedFace:$('sm-set-fixed-face'), smFixedFace:$('sm-fixed-face'), smUnfold:$('sm-unfold'),
-  smFoldedView:$('sm-view-folded'), smFlatView:$('sm-view-flat'), smExportDxf:$('sm-export-dxf'),
+  smSetFixedFace:$('sm-set-fixed-face'), smFixedFace:$('sm-fixed-face'), smUnfold:$('sm-unfold'), smExportDxf:$('sm-export-dxf'),
+  smSectionTitle:$('sm-section-title'), smEngineNote:$('sm-engine-note'), smAdvanced:$('sm-advanced'), smKRow:$('sm-k-row'), smBendsRow:$('sm-bends-row'),
   smDetectedThickness:$('sm-detected-thickness'), smDetectedBends:$('sm-detected-bends'), smFlatSize:$('sm-flat-size'),
   statusFile:$('status-file'), statusFormat:$('status-format'), statusUnits:$('status-units'),
   docTabs:$('n3-doc-tabs'), docTabList:$('n3-doc-tab-list'), docTabAdd:$('n3-doc-tab-add')
@@ -75,7 +75,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.17.1';
+const WORKER_URL = '/js/step-worker.js?v=8.17.2';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -107,7 +107,8 @@ const SMT = FR ? {
   unfoldFailed:'Impossible de déplier cette géométrie.',
   flatView:'Vue dépliée',
   foldedView:'Vue pliée',
-  exportReady:'DXF du développé généré.',
+  flatPlateReady:'Plaque plane détectée · DXF 1:1 prêt.',
+  exportReady:'DXF généré.',
   noFlat:'Calculez d’abord le développé.',
   unsupportedTopology:'Cette pièce sort du MVP: épaisseur constante + faces planes + plis cylindriques standards requis.'
 } : {
@@ -134,7 +135,8 @@ const SMT = FR ? {
   unfoldFailed:'This geometry could not be unfolded.',
   flatView:'Flat view',
   foldedView:'Folded view',
-  exportReady:'Flat-pattern DXF generated.',
+  flatPlateReady:'Flat plate detected · 1:1 DXF ready.',
+  exportReady:'DXF generated.',
   noFlat:'Calculate the flat pattern first.',
   unsupportedTopology:'This part is outside the MVP: constant thickness + planar faces + standard cylindrical bends are required.'
 };
@@ -150,6 +152,7 @@ const sheetMetalState = {
 };
 
 let flatPatternRoot=null,flatPatternResult=null,flatPatternActive=false,flatPatternCameraState=null,sheetMetalUnfoldPromise=null;
+let sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false};
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, multiMeasureRoot, grid;
 let cameraProjectionMode='orthographic';
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
@@ -482,7 +485,6 @@ async function init() {
   createGrid(10);
   bindUI();
   bindSuitePersistence(persistModelSession);
-  updatePCCheck();
   resize();
   renderModelDocumentTabs();
   await restoreModelSession();
@@ -611,8 +613,6 @@ function bindUI() {
   E.smUseRadius.addEventListener('click', captureSheetMetalRadius);
   E.smSetFixedFace?.addEventListener('click',captureSheetMetalFixedFace);
   E.smUnfold?.addEventListener('click',()=>runSheetMetalUnfold({activate:true,force:true}));
-  E.smFoldedView?.addEventListener('click',()=>setFlatPatternView(false));
-  E.smFlatView?.addEventListener('click',async()=>{if(flatPatternResult)setFlatPatternView(true);else await runSheetMetalUnfold({activate:true});});
   E.smExportDxf?.addEventListener('click',exportFlatPatternDxf);
 
   initSheetMetalUI();
@@ -841,6 +841,7 @@ function resetSheetMetalForModel() {
   sheetMetalState.manualKEnabled=false;
   sheetMetalState.manualK=AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness ?? 0.40;
   sheetMetalState.fixedFace=null;
+  sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false};
 
   if(E.smAngle)E.smAngle.value='90';
   if(E.smManualToggle)E.smManualToggle.checked=false;
@@ -1100,34 +1101,48 @@ async function captureSheetMetalRadius() {
 
 
 function syncSheetMetalUnfoldUI(){
+  const recognized=Boolean(currentStepResult&&sheetMetalCapability.recognized);
+  const hasBends=recognized&&sheetMetalCapability.bendCount>0;
+  const flatPlate=recognized&&sheetMetalCapability.flatPlate;
+
+  if(E.sheetMetalSection)E.sheetMetalSection.hidden=!recognized;
+  if(E.sheetMetal){
+    E.sheetMetal.hidden=!hasBends;
+    E.sheetMetal.disabled=!hasBends||Boolean(sheetMetalUnfoldPromise);
+    E.sheetMetal.classList.toggle('active',Boolean(flatPatternActive));
+    const label=E.sheetMetal.querySelector('span:last-child');
+    if(label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Déplier':'Unfold');
+    E.sheetMetal.title=flatPatternActive?(FR?'Revenir à la pièce pliée':'Return to folded part'):(FR?'Déplier automatiquement la tôle':'Automatically unfold sheet metal');
+  }
+
+  if(E.smSectionTitle)E.smSectionTitle.textContent=flatPlate?(FR?'DXF':'DXF'):(FR?'TÔLERIE':'SHEET METAL');
+  if(E.smEngineNote)E.smEngineNote.textContent=flatPlate
+    ? (FR?'Plaque plane détectée automatiquement. Le DXF reprend directement le contour exact de la pièce.':'Flat plate detected automatically. DXF uses the exact part contour directly.')
+    : (FR?'Face fixe, épaisseur, rayon de pliage et facteur K détectés automatiquement. Utilisez les paramètres avancés seulement pour forcer une valeur.':'Fixed face, thickness, bend radius and K-factor are detected automatically. Use advanced settings only to override a value.');
+  if(E.smAdvanced)E.smAdvanced.hidden=flatPlate;
+  if(E.smKRow)E.smKRow.hidden=flatPlate;
+  if(E.smBendsRow)E.smBendsRow.hidden=flatPlate;
+
   if(E.smFixedFace)E.smFixedFace.textContent=sheetMetalState.fixedFace?`Face #${sheetMetalState.fixedFace.elementId}`:(FR?'AUTO':'AUTO');
   if(E.smDetectedThickness){
     const value=flatPatternResult?.thickness;
     E.smDetectedThickness.textContent=Number.isFinite(value)?formatLength(value):'—';
   }
   if(E.smDetectedBends)E.smDetectedBends.textContent=flatPatternResult?.ok?String(flatPatternResult.bendCount):'—';
-  if(E.smK&&flatPatternResult?.ok){
-    const ks=[...new Set((flatPatternResult.bendLines||[]).map(b=>Number(b.k)).filter(Number.isFinite).map(k=>Number(k.toFixed(3))))];
-    if(ks.length)E.smK.textContent=`${ks.map(k=>formatSheetMetalScalar(k,3)).join(' / ')} · ${sheetMetalState.manualKEnabled?'MANUAL':'AUTO'}`;
+  if(E.smK){
+    E.smK.textContent='—';
+    if(flatPatternResult?.ok&&flatPatternResult.bendCount>0){
+      const ks=[...new Set((flatPatternResult.bendLines||[]).map(b=>Number(b.k)).filter(Number.isFinite).map(k=>Number(k.toFixed(3))))];
+      if(ks.length)E.smK.textContent=`${ks.map(k=>formatSheetMetalScalar(k,3)).join(' / ')} · ${sheetMetalState.manualKEnabled?'MANUAL':'AUTO'}`;
+    }
   }
   if(E.smFlatSize){
     const b=flatPatternResult?.bounds;
     E.smFlatSize.textContent=b?`${formatLength(b.width)} × ${formatLength(b.height)}`:'—';
   }
-  E.smFoldedView?.classList.toggle('active',Boolean(currentStepResult&&!flatPatternActive));
-  E.smFlatView?.classList.toggle('active',Boolean(flatPatternResult&&flatPatternActive));
-  if(E.smFoldedView)E.smFoldedView.disabled=!currentStepResult;
-  // DÉPLIÉE is now the one-click action: it remains available before a flat
-  // pattern exists and launches automatic face/T/R/K detection on demand.
-  if(E.smFlatView)E.smFlatView.disabled=!currentStepResult;
-  if(E.smExportDxf)E.smExportDxf.disabled=!flatPatternResult;
+  if(flatPlate&&flatPatternResult?.ok&&E.smStatus&&!E.smStatus.classList.contains('warn'))setSheetMetalStatus(SMT.flatPlateReady,'ok');
+  if(E.smExportDxf)E.smExportDxf.disabled=!recognized||Boolean(sheetMetalUnfoldPromise);
   if(E.smUnfold)E.smUnfold.disabled=!currentStepResult||Boolean(sheetMetalUnfoldPromise);
-  if(E.sheetMetal){
-    E.sheetMetal.classList.toggle('active',Boolean(flatPatternActive));
-    const label=E.sheetMetal.querySelector('span:last-child');
-    if(label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Déplier':'Unfold');
-    E.sheetMetal.title=flatPatternActive?(FR?'Revenir à la pièce pliée':'Return to folded part'):(FR?'Déplier automatiquement la tôle':'Automatically unfold sheet metal');
-  }
 }
 
 async function captureSheetMetalFixedFace({silent=false}={}){
@@ -1237,6 +1252,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
 
       const result=best.result;
       flatPatternResult=result;
+      sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate)};
       sheetMetalState.fixedFace={geometryId:String(best.geometry.id),elementId:Number(result.fixedFaceId)};
       if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
       const firstR=result.bendLines?.find(b=>Number.isFinite(b.insideRadius))?.insideRadius;
@@ -1378,7 +1394,7 @@ function setFlatPatternView(active){
   clearSelections();clearPreselection();clearGroup(measureOverlayRoot);clearDimensionLabel();
   if(active&&!flatPatternCameraState)flatPatternCameraState=captureCameraState();flatPatternActive=active;
   if(modelRoot)modelRoot.visible=!active;if(flatPatternRoot)flatPatternRoot.visible=active;
-  // V8.17.1: selection + measurement remain fully available on the complete flat solid.
+  // V8.17.2: selection + measurement remain fully available on the complete flat solid.
   for(const group of [selectionRoot,preselectionRoot,measureOverlayRoot,multiMeasureRoot])if(group)group.visible=true;
   if(E.measure)E.measure.disabled=!currentModel;if(E.multiMeasure)E.multiMeasure.disabled=!currentModel;if(E.section)E.section.disabled=active||!currentModel;
   if(active){closeSelectOther();fitFlatPatternView();if(measureEnabled){E.measureBadge.textContent=FR?'DÉPLIÉ 2D':'FLAT 2D';setMeasurePrompt(T.selectFirst);}}
@@ -1395,9 +1411,13 @@ function clearFlatPattern(){
 }
 
 async function exportFlatPatternDxf(){
-  if(!flatPatternResult){setSheetMetalStatus(SMT.noFlat,'warn');return;}
+  if(!currentStepResult){setSheetMetalStatus(SMT.needStep,'warn');return;}
+  if(!flatPatternResult){
+    const result=await runSheetMetalUnfold({activate:false,quiet:false});
+    if(!result?.ok){setSheetMetalStatus(SMT.noFlat,'warn');return;}
+  }
   try{
-    const base=(currentFile?.name||'part').replace(/\.[^.]+$/,'')||'part',name=`${base}_FLAT.dxf`,text=flatPatternToDxf(flatPatternResult,{partName:base,units:'in'}),blob=new Blob([text],{type:'application/dxf'});
+    const base=(currentFile?.name||'part').replace(/\.[^.]+$/,'')||'part',suffix=flatPatternResult?.bendCount>0?'_FLAT':'',name=`${base}${suffix}.dxf`,text=flatPatternToDxf(flatPatternResult,{partName:base,units:'in'}),blob=new Blob([text],{type:'application/dxf'});
     if(typeof window.showSaveFilePicker==='function'){
       const handle=await window.showSaveFilePicker({suggestedName:name,types:[{description:'AutoCAD DXF',accept:{'application/dxf':['.dxf'],'text/plain':['.dxf']}}]});const writable=await handle.createWritable();await writable.write(blob);await writable.close();
     }else{const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);}
@@ -3367,7 +3387,7 @@ function fillProperties() {
 
   if (currentStepResult) {
     E.stepMeta.hidden=false;
-    E.sheetMetalSection.hidden=false;
+    E.sheetMetalSection.hidden=!sheetMetalCapability.recognized;
     const h=currentStepHeader||{};
     E.stepName.textContent=h.name||currentFile.name||'—';
     E.stepSchema.textContent=h.schema||'—';
@@ -3603,7 +3623,8 @@ function enableTools(on) {
   [E.clear,E.save,E.saveAs,E.fit,E.edges,E.gridToggle,E.unitSelect,E.measure,E.multiMeasure,E.section,E.viewButton,E.props].filter(Boolean).forEach(el=>el.disabled=!on);
   document.querySelectorAll('[data-select-mode]').forEach(el=>el.disabled=!on);
   E.measureType.disabled=!on||!measureEnabled;
-  E.sheetMetal.disabled=!on||!currentStepResult;
+  E.sheetMetal.disabled=!on||!currentStepResult||!sheetMetalCapability.recognized||sheetMetalCapability.bendCount<=0;
+  E.sheetMetal.hidden=!on||!sheetMetalCapability.recognized||sheetMetalCapability.bendCount<=0;
   if(E.smSetFixedFace)E.smSetFixedFace.disabled=!on||!currentStepResult;
   if(E.smUnfold)E.smUnfold.disabled=!on||!currentStepResult;
   syncSheetMetalUnfoldUI();
@@ -3615,18 +3636,6 @@ function showError(message) {
   E.statusFile.textContent=message;
   E.empty.classList.remove('hidden');
 }
-
-function updatePCCheck() {
-  if (!E.pc) return;
-  const wasm=typeof WebAssembly==='object';
-  let webgl2=false;try{webgl2=!!document.createElement('canvas').getContext('webgl2')}catch{}
-  const threads=navigator.hardwareConcurrency||null,ram=navigator.deviceMemory||null;
-  const required=wasm&&webgl2,cpuOk=threads==null||threads>=4,ramOk=ram==null||ram>=8;
-  const good=required&&cpuOk&&ramOk,limited=required&&!good;
-  E.pc.className='pc-check '+(good?'ok':limited?'warn':'bad');
-  E.pc.textContent=`${T.browser}: ${good?T.compatible:limited?T.limited:T.incompatible} · WebAssembly ${wasm?'✓':'✕'} · WebGL2 ${webgl2?'✓':'✕'} · ${threads??'?'} ${T.threads} · ${ram?ram+' GB+':'?'} ${T.ram}`;
-}
-
 
 function unitLabel(unit=displayUnit) {
   if (unit==='in') return FR ? 'po' : 'in';
