@@ -1,7 +1,7 @@
-import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.3';
+import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.4';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.17.3
+ * NavoFlo Sheet Metal Engine — V8.17.4
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -303,6 +303,85 @@ function detectPlanarThickness(planarGroups,tol){
     if(!best||score>best.score)best={value:gap,score,areaRatio:ratio,lateral,groups:[a.id,b.id]};
   }
   return best?{value:best.value,count:2,samples:2,confidence:best.areaRatio,source:'parallel-planar-skins',groups:best.groups}:null;
+}
+
+
+// V8.17.4 — exact flat-prism proof.
+//
+// A rounded CUT contour must never be confused with a sheet-metal bend.  The
+// reliable distinction is not "does the solid contain cylinders?" but "is the
+// whole solid an extrusion between two translated, congruent planar caps?".
+//
+// For an actually flat laser-cut plate, the two sheet skins are exact translated
+// copies.  Every point of the solid lies between those two support planes and
+// their projected B-Rep boundary edges are congruent.  Cylinders whose axes run
+// through the thickness (rounded outside corners, holes, etc.) are therefore cut
+// geometry, not bends.  A formed sheet cannot pass this proof because another
+// flange leaves the cap slab and/or the two cap boundaries stop being translated
+// copies.
+function canonicalDirection(v){
+  let n=V3.unit(v);if(!n)return null;
+  let k=0;for(let i=1;i<3;i++)if(Math.abs(n[i])>Math.abs(n[k]))k=i;
+  if(n[k]<0)n=V3.scale(n,-1);return n;
+}
+function planeBasis(normal){
+  const n=canonicalDirection(normal);if(!n)return null;
+  const refs=[[1,0,0],[0,1,0],[0,0,1]].sort((a,b)=>Math.abs(V3.dot(a,n))-Math.abs(V3.dot(b,n)));
+  const u=V3.unit(V3.cross(n,refs[0]));if(!u)return null;const v=V3.unit(V3.cross(n,u));if(!v)return null;
+  return{n,u,v};
+}
+function allGeometryPoints(geometry,ctx){
+  const out=[],p=geometry?.positions||[];
+  for(let i=0;i+2<p.length;i+=3){const q=p3FromArray(p,i);if(q.every(Number.isFinite))out.push(q);}
+  for(const edge of geometry?.edges||[])for(const q of exactEdgePoints(ctx,edge))if(q?.length===3&&q.every(Number.isFinite))out.push(q);
+  return out;
+}
+function planarGroupBoundaryEdges(group,ctx){
+  if(!group?.faceSet)return[];const ids=new Set();
+  for(const fid of group.faceIds||[])for(const raw of ctx.faceById.get(Number(fid))?.edgeIndices||[]){
+    const eid=Number(raw),owners=ctx.edgeOwnersById.get(eid)||new Set(),inside=[...owners].filter(id=>group.faceSet.has(Number(id))).length;
+    if(inside===1)ids.add(eid);
+  }
+  return[...ids].map(id=>ctx.edgeById.get(id)).filter(Boolean);
+}
+function qnum(v,step){return Math.round(Number(v)/step);}
+function point2Key(p,basis,step){return`${qnum(V3.dot(p,basis.u),step)},${qnum(V3.dot(p,basis.v),step)}`;}
+function projectedEdgeSignature(edge,ctx,basis,step){
+  const info=ctx.edgeInfoById.get(Number(edge?.id))||{},fam=family(info.family||'other'),pts=exactEdgePoints(ctx,edge);
+  if(pts.length<2)return null;
+  let a=point2Key(pts[0],basis,step),b=point2Key(pts.at(-1),basis,step);if(a>b)[a,b]=[b,a];
+  const len=Number(info.length),parts=[fam,Number.isFinite(len)?qnum(len,step):0,a,b];
+  const center=Array.isArray(info.localCenter)?info.localCenter.map(Number).slice(0,3):null,radius=Number(info.radius);
+  if(center?.length===3&&center.every(Number.isFinite))parts.push(point2Key(center,basis,step));
+  if(Number.isFinite(radius))parts.push(qnum(radius,step));
+  return parts.join('|');
+}
+function projectedBoundarySignature(group,ctx,basis,step){
+  const sig=[];for(const edge of planarGroupBoundaryEdges(group,ctx)){const s=projectedEdgeSignature(edge,ctx,basis,step);if(s)sig.push(s);}
+  sig.sort();return sig;
+}
+function signaturesEqual(a,b){if(a.length!==b.length)return false;for(let i=0;i<a.length;i++)if(a[i]!==b[i])return false;return true;}
+function detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag){
+  const groups=(planarGroups?.groups||[]).filter(g=>g?.stats?.area>EPS),points=allGeometryPoints(geometry,ctx);if(groups.length<2||points.length<3)return null;
+  const maxArea=Math.max(...groups.map(g=>Number(g.stats.area)||0)),supportTol=Math.max(tol*40,diag*2e-6,1e-6),matchStep=Math.max(tol*8,diag*5e-7,1e-7);
+  let best=null;
+  for(let i=0;i<groups.length;i++)for(let j=i+1;j<groups.length;j++){
+    const a=groups[i],b=groups[j],basis=planeBasis(a.stats.normal),nb=canonicalDirection(b.stats.normal);if(!basis||!nb||Math.abs(V3.dot(basis.n,nb))<0.99995)continue;
+    const da=V3.dot(a.stats.centroid,basis.n),db=V3.dot(b.stats.centroid,basis.n),lo=Math.min(da,db),hi=Math.max(da,db),thickness=hi-lo;if(!(thickness>supportTol))continue;
+    let minN=Infinity,maxN=-Infinity,minU=Infinity,maxU=-Infinity,minV=Infinity,maxV=-Infinity;
+    for(const p of points){const pn=V3.dot(p,basis.n),pu=V3.dot(p,basis.u),pv=V3.dot(p,basis.v);minN=Math.min(minN,pn);maxN=Math.max(maxN,pn);minU=Math.min(minU,pu);maxU=Math.max(maxU,pu);minV=Math.min(minV,pv);maxV=Math.max(maxV,pv);}
+    // Both cap planes must be the global support planes of the entire solid.
+    if(Math.abs(lo-minN)>supportTol||Math.abs(hi-maxN)>supportTol)continue;
+    const inPlaneSpan=Math.max(maxU-minU,maxV-minV);if(!(inPlaneSpan>supportTol)||thickness>inPlaneSpan*0.75)continue;
+    const areaA=Number(a.stats.area)||0,areaB=Number(b.stats.area)||0,areaRatio=Math.min(areaA,areaB)/Math.max(areaA,areaB,EPS);
+    // The cap pair must be a dominant skin pair. This rejects small parallel
+    // machining faces that happen to sit at an extremum.
+    if(areaRatio<0.995||Math.min(areaA,areaB)<maxArea*0.45)continue;
+    const sa=projectedBoundarySignature(a,ctx,basis,matchStep),sb=projectedBoundarySignature(b,ctx,basis,matchStep);if(!sa.length||!signaturesEqual(sa,sb))continue;
+    const score=Math.min(areaA,areaB)*areaRatio/(1+thickness/Math.max(inPlaneSpan,EPS));
+    if(!best||score>best.score)best={score,value:thickness,groups:[a.id,b.id],capA:a,capB:b,basis,areaRatio,boundaryEdges:sa.length,supportError:Math.max(Math.abs(lo-minN),Math.abs(hi-maxN)),source:'translated-congruent-caps',confidence:1};
+  }
+  return best;
 }
 
 function cylinderPartner(cyl,cylinders,thickness,tol){
@@ -652,8 +731,13 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const planarGroups=buildPlanarGroups(geometry,ctx,tol);
   const cylinders=buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups);
 
+  const hasRequestedFixed=fixedFaceId!==null&&fixedFaceId!==undefined&&fixedFaceId!==''&&Number.isFinite(Number(fixedFaceId)),requestedFixed=hasRequestedFixed?Number(fixedFaceId):NaN;
+  // Only automatic preflight may promote the exact prism proof. A manually
+  // selected fixed face remains a true expert override.
+  const exactFlatPrism=!hasRequestedFixed?detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag):null;
+
   let rejectedNonBendCylinders=0;
-  const candidateBends=cylinders.map(c=>{
+  const candidateBends=exactFlatPrism?[]:cylinders.map(c=>{
     const unique=[];for(const b of c.boundaries){if(!unique.some(x=>x.groupId===b.groupId))unique.push(b);}
     if(unique.length<2)return null;
     const candidate={...c,boundaries:unique},pair=chooseBendBoundaryPair(candidate,planarGroups);
@@ -661,7 +745,6 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
     candidate.boundaries=[pair.a,pair.b];candidate.pairGeometry=pair.geom;return candidate;
   }).filter(Boolean);
 
-  const hasRequestedFixed=fixedFaceId!==null&&fixedFaceId!==undefined&&fixedFaceId!==''&&Number.isFinite(Number(fixedFaceId)),requestedFixed=hasRequestedFixed?Number(fixedFaceId):NaN;
   let fixed=requestedFixed,fixedGroupId=null,fixedPanel=null,fixedWasAutomatic=false;
   if(hasRequestedFixed){
     const fixedInfo=ctx.infoById.get(fixed);
@@ -669,8 +752,16 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
     if(!isPlanar(fixedInfo?.family))return{ok:false,code:'fixed-face-not-planar',message:'The fixed face must be planar.'};
     fixedGroupId=planarGroups.faceToGroup.get(fixed);fixedPanel=planarGroups.byId.get(fixedGroupId);
   }else{
-    const automatic=chooseAutomaticFixedPanel(planarGroups,candidateBends,ctx);
-    if(automatic){fixed=automatic.faceId;fixedPanel=automatic.panel;fixedGroupId=automatic.panel.id;fixedWasAutomatic=true;}
+    if(exactFlatPrism){
+      // Use one proven cap as the DXF plane. Picking the translated cap pair here
+      // prevents a rounded side-wall fillet from becoming the automatic fixed face.
+      fixedPanel=exactFlatPrism.capA;fixedGroupId=fixedPanel.id;
+      fixed=[...(fixedPanel.faceIds||[])].sort((a,b)=>(Number(ctx.statsById.get(b)?.area)||0)-(Number(ctx.statsById.get(a)?.area)||0))[0];
+      fixedWasAutomatic=true;
+    }else{
+      const automatic=chooseAutomaticFixedPanel(planarGroups,candidateBends,ctx);
+      if(automatic){fixed=automatic.faceId;fixedPanel=automatic.panel;fixedGroupId=automatic.panel.id;fixedWasAutomatic=true;}
+    }
   }
   if(!fixedPanel)return{ok:false,code:'fixed-panel-missing',message:'A usable planar sheet panel could not be selected automatically.'};
 
@@ -680,7 +771,8 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   // even though the part is simply a flat plate ready for DXF.
   const planarThickness=detectPlanarThickness(planarGroups,tol);
   const cylindricalThickness=detectThickness(cylinders,tol);
-  const autoThickness=(candidateBends.length===0&&planarThickness)?planarThickness:(cylindricalThickness||planarThickness);
+  const exactFlatThickness=exactFlatPrism?{value:exactFlatPrism.value,count:2,samples:2,confidence:1,source:exactFlatPrism.source,groups:exactFlatPrism.groups}:null;
+  const autoThickness=exactFlatThickness||((candidateBends.length===0&&planarThickness)?planarThickness:(cylindricalThickness||planarThickness));
   let resolvedThickness=Number(thickness);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)resolvedThickness=Number(autoThickness?.value);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)return{ok:false,code:'thickness-unresolved',message:'Sheet thickness could not be detected. Enter T and try again.',detectedThickness:autoThickness,fixedFaceId:fixed};
@@ -719,13 +811,13 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   }
   if(cycleLinks.length)warnings.push('Closed/cyclic sheet topology contains an inconsistent closure; a spanning-tree seam was kept for safety.');
   if(!usedBends.length){
-    const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,fixedPanelCandidateBends:connected,tolerance:tol,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
+    const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,fixedPanelCandidateBends:connected,tolerance:tol,exactFlatPrism:exactFlatPrism?{source:exactFlatPrism.source,groups:exactFlatPrism.groups,thickness:exactFlatPrism.value,areaRatio:exactFlatPrism.areaRatio,boundaryEdges:exactFlatPrism.boundaryEdges,supportError:exactFlatPrism.supportError}:null,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
 
     // V8.17.2 — zero-bend STEP support. A plain plate is already its own flat
     // pattern, so return the exact dominant planar skin instead of treating
     // "no bends" as an error. This gives the same one-click DXF workflow to
     // laser-cut plates and to formed sheet-metal parts.
-    if(!connected&&candidateBends.length===0&&autoThickness?.source==='parallel-planar-skins'){
+    if(!connected&&candidateBends.length===0&&(exactFlatPrism||autoThickness?.source==='parallel-planar-skins')){
       const mapped=projectPanelTriangles(ctx,fixedPanel,rootMap),triangles=mapped,flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6);
       const boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,[],flatTol,planarGroups),bounds=bounds2D(triangles);
       if(triangles.length&&boundaryEdges.length){
