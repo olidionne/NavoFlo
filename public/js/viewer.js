@@ -5,7 +5,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.20.1';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.20.2';
 import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.20.0';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.20.1';
@@ -58,6 +58,7 @@ const E = {
   viewButton:$('view-menu-button'), viewMenu:$('view-menu'), perspectiveToggle:$('perspective-toggle'),
   props:$('properties-toggle'), propsDrawer:$('properties-drawer'), propsClose:$('properties-close'), fullscreen:$('fullscreen-toggle'),
   propFile:$('prop-file'), propFormat:$('prop-format'), propType:$('prop-type'), propUnits:$('prop-units'),
+  propSheetDimensionsRow:$('prop-sheet-dimensions-row'), propSheetDimensionsLabel:$('prop-sheet-dimensions-label'), propSheetDimensions:$('prop-sheet-dimensions'),
   propParts:$('prop-parts'), propGeometries:$('prop-geometries'), propTriangles:$('prop-triangles'),
   profileStandardSection:$('profile-standard-section'), profileAiscLabel:$('profile-aisc-label'), profileMetricLabel:$('profile-metric-label'),
   profileFamily:$('profile-family'), profileDimensions:$('profile-dimensions'), profileThickness:$('profile-thickness'), profileArea:$('profile-area'),
@@ -81,7 +82,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.20.0';
+const WORKER_URL = '/js/step-worker.js?v=8.20.2';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -200,7 +201,7 @@ let baseMaterials = new Set();
 // File objects and per-document camera/unit state stay local in the browser.
 const modelDocuments=new Map();
 let activeModelDocumentId=null,modelDocumentSeq=0,modelDocumentBusy=false,pendingModelDocumentId=null;
-const MODEL_ANALYSIS_CACHE_VERSION=6;
+const MODEL_ANALYSIS_CACHE_VERSION=7;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -250,6 +251,7 @@ function restoreModelDocumentAnalysis(snapshot,main){
   syncSheetMetalInputs();
   syncSheetMetalUnfoldUI();
   updateGeometryTypeIndicator();
+  updateSheetMetalDimensionsUI();
   updateProfileStandardUI();
   updateManufacturingUI();
   return true;
@@ -1221,6 +1223,7 @@ function syncSheetMetalUnfoldUI(){
   if(flatPlate&&flatPatternResult?.ok&&E.smStatus&&!E.smStatus.classList.contains('warn'))setSheetMetalStatus(SMT.flatPlateReady,'ok');
   if(E.smExportDxf)E.smExportDxf.disabled=!recognized||busyUnfold;
   if(E.smUnfold)E.smUnfold.disabled=!currentStepResult||busyUnfold;
+  updateSheetMetalDimensionsUI();
   positionFloatingCadActions();
 }
 
@@ -1325,28 +1328,46 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       const manufacturingByGeometry=new Map();
       for(const geometry of geometries){
         if(currentStepResult!==stepRef)return null;
-        let exact;
-        try{exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});}catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
-        const result=analyzeAndUnfold({
+        let exact,result;
+        const analyzeWith=info=>analyzeAndUnfold({
           geometry,
-          faceInfo:exact?.faces||[],
-          edgeInfo:exact?.edges||[],
-          logicalGroups:exact?.logicalGroups||[],
+          faceInfo:info?.faces||[],
+          edgeInfo:info?.edges||[],
+          logicalGroups:info?.logicalGroups||[],
           fixedFaceId:fixed&&String(fixed.geometryId)===String(geometry.id)?fixed.elementId:null,
           thickness:sheetMetalState.thickness,
           fallbackInsideRadius:sheetMetalState.radius,
           kResolver:resolveUnfoldK
         });
-        let manufacturing=null;
         try{
-          manufacturing=buildManufacturingKnowledge({
-            geometry,
-            faceInfo:exact?.faces||[],
-            edgeInfo:exact?.edges||[],
-            sheetResult:result?.ok?result:null,
-            structuralProfile:result?.code==='structural-profile'?(result.profile||null):null
-          });
-        }catch(error){console.warn('[NavoFlo Manufacturing Recognition Engine]',error);}
+          // V8.20.2 — sheet metal gets a lightweight first pass. A perforated
+          // bent part can contain hundreds of cylindrical hole faces and thousands
+          // of edges; none of those hole descriptors are needed to prove its bends.
+          exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});
+          const fastResult=analyzeWith(exact);
+          result=fastResult;
+          if(!(fastResult?.ok&&(Number(fastResult.bendCount)||0)>0)){
+            try{
+              const fullExact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});
+              exact=fullExact;result=analyzeWith(fullExact);
+            }catch(error){
+              if(!fastResult?.ok)throw error;
+              console.warn('[NavoFlo manufacturing enrichment fallback]',error);
+            }
+          }
+        }catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
+        let manufacturing=null;
+        if(!(result?.ok&&(Number(result.bendCount)||0)>0)){
+          try{
+            manufacturing=buildManufacturingKnowledge({
+              geometry,
+              faceInfo:exact?.faces||[],
+              edgeInfo:exact?.edges||[],
+              sheetResult:result?.ok?result:null,
+              structuralProfile:result?.code==='structural-profile'?(result.profile||null):null
+            });
+          }catch(error){console.warn('[NavoFlo Manufacturing Recognition Engine]',error);}
+        }
 
         // V8.19 — capabilities are independent from stock/process labels.  A
         // turned shaft can mathematically satisfy a naive two-plane slab proof,
@@ -3876,6 +3897,21 @@ function updateManufacturingUI(){
 }
 
 
+function updateSheetMetalDimensionsUI(){
+  const row=E.propSheetDimensionsRow,label=E.propSheetDimensionsLabel,value=E.propSheetDimensions;if(!row||!label||!value)return;
+  const result=flatPatternResult,b=result?.bounds,t=Number(result?.thickness);
+  const recognized=Boolean(sheetMetalCapability?.recognized&&result?.ok),h=Number(b?.height),w=Number(b?.width);
+  if(!recognized||!(t>0)||!(h>0)||!(w>0)){row.hidden=true;value.textContent='—';return;}
+  const bent=(Number(sheetMetalCapability?.bendCount)||0)>0;
+  label.textContent=bent?(FR?'Dimensions dépliées (T × H × L)':'Flat dimensions (T × H × W)'):(FR?'Dimensions (T × H × L)':'Dimensions (T × H × W)');
+  // The fixed-face basis can exchange its two in-plane axes between files. Keep
+  // the manufacturing dimensional stable: smaller developed side = H, larger = L/W.
+  const height=Math.min(h,w),width=Math.max(h,w);
+  value.textContent=`${formatLength(t)} × ${formatLength(height)} × ${formatLength(width)}`;
+  row.hidden=false;
+}
+
+
 function updateGeometryTypeIndicator(){
   if(!E.propType)return;
   if(!currentStepResult){E.propType.textContent=currentModel?(FR?'Maillage':'Mesh'):'—';return;}
@@ -4187,6 +4223,7 @@ function updateDisplayedUnits() {
   const label=unitLabel(displayUnit);
   E.statusUnits.textContent=label;
   E.propUnits.textContent=label;
+  updateSheetMetalDimensionsUI();
   if(currentStepResult)syncSheetMetalInputs();
   updateProfileStandardUI();
   updateManufacturingUI();

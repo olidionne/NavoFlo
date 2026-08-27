@@ -1,7 +1,7 @@
 import OcctJS from 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.mjs';
 
 const WASM_URL = 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.wasm';
-const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.20.0';
+const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.20.2';
 
 let occtPromise = null;
 let exactModelId = null;
@@ -9,6 +9,8 @@ let bindingByGeometry = new Map();
 let topologyByGeometry = new Map();
 let logicalFaceGroupCache = new Map();
 let logicalEdgeGroupCache = new Map();
+let sheetInfoBaseCache = new Map();
+let sheetInfoFullCache = new Map();
 
 function getOcct() {
   if (!occtPromise) {
@@ -31,6 +33,8 @@ function releaseCurrent(occt) {
   topologyByGeometry = new Map();
   logicalFaceGroupCache = new Map();
   logicalEdgeGroupCache = new Map();
+  sheetInfoBaseCache = new Map();
+  sheetInfoFullCache = new Map();
 }
 
 function plainNode(node) {
@@ -229,14 +233,42 @@ function assignVirtualSameDomainGroups(faces){
   }
 }
 
-function sheetMetalFaceInfo(occt,geometryId){
-  const gid=String(geometryId),topo=topologyByGeometry.get(gid);
-  if(!topo)throw new Error(`No STEP topology for geometry ${gid}.`);
+function logicalGroupsFromFaceInfo(gid,topo,faces){
+  const byId=new Map((faces||[]).map(f=>[Number(f.id),f])),edgeToFaces=new Map();
+  for(const edge of topo.edges||[]){
+    const owners=Array.from(edge.ownerFaceIds||[]).map(Number).filter(Number.isFinite);
+    edgeToFaces.set(Number(edge.id),owners);
+  }
+  const neighbors=new Map((faces||[]).map(f=>[Number(f.id),new Set()]));
+  for(const owners of edgeToFaces.values())for(let i=0;i<owners.length;i++)for(let j=i+1;j<owners.length;j++){
+    neighbors.get(owners[i])?.add(owners[j]);neighbors.get(owners[j])?.add(owners[i]);
+  }
+  const groups=[],seen=new Set();
+  for(const seed of faces||[]){
+    const sid=Number(seed.id);if(seen.has(sid)||!isCylinderFamily(seed))continue;
+    const group=new Set([sid]),queue=[sid];seen.add(sid);
+    while(queue.length){
+      const id=queue.shift();
+      for(const nId of neighbors.get(id)||[]){
+        const n=Number(nId),nf=byId.get(n);if(group.has(n)||!nf||!sameCylinder(seed,nf))continue;
+        group.add(n);seen.add(n);queue.push(n);
+      }
+    }
+    if(group.size<2)continue;
+    const faceSet=new Set(group),seamEdgeIds=[];
+    for(const [eid,owners] of edgeToFaces){if(owners.filter(id=>faceSet.has(Number(id))).length>=2)seamEdgeIds.push(Number(eid));}
+    groups.push({geometryId:String(gid),faceIds:[...group].sort((a,b)=>a-b),seamEdgeIds:[...new Set(seamEdgeIds)].sort((a,b)=>a-b)});
+  }
+  return groups;
+}
+
+function buildSheetMetalBaseInfo(occt,geometryId){
+  const gid=String(geometryId),cached=sheetInfoBaseCache.get(gid);if(cached)return cached;
+  const topo=topologyByGeometry.get(gid);if(!topo)throw new Error(`No STEP topology for geometry ${gid}.`);
+  const topoFaceById=new Map((topo.faces||[]).map(f=>[Number(f.id),f]));
   const faces=[];
-  const allowCompoundRecognition=(topo.faces?.length||0)<=600;
   for(const face of topo.faces||[]){
-    const id=Number(face.id),selection={geometryId:gid,kind:'face',elementId:id},sig=exactGeometrySignature(occt,selection);
-    const topoFace=(topo.faces||[]).find(f=>Number(f.id)===id);
+    const id=Number(face.id),selection={geometryId:gid,kind:'face',elementId:id},sig=exactGeometrySignature(occt,selection),topoFace=topoFaceById.get(id);
     const out={id,family:String(sig?.family||'other'),edgeIds:Array.from(topoFace?.edgeIndices||[]).map(Number)};
     if(Number.isFinite(Number(sig?.radius)))out.radius=Number(sig.radius);
     const center=Array.isArray(sig?.localCenter)?sig.localCenter.map(Number).slice(0,3):null;
@@ -249,9 +281,6 @@ function sheetMetalFaceInfo(occt,geometryId){
       const centroid=Array.isArray(area.localCentroid)?area.localCentroid.map(Number).slice(0,3):null;
       if(centroid?.length===3&&centroid.every(Number.isFinite)){
         out.localCentroid=centroid;
-        // Tessellation normals are adequate for display, but unfolding must use the
-        // exact B-Rep plane normal. Evaluate it at the exact face centroid so STEP
-        // meshing/triangle winding cannot turn a valid bend into a false 0°/no-bend.
         if(String(out.family).toLowerCase()==='plane'){
           const normal=occt.EvaluateExactFaceNormal(exactModelId,shapeHandle(gid),'face',id,centroid);
           const n=Array.isArray(normal?.localNormal)?normal.localNormal.map(Number).slice(0,3):null;
@@ -259,100 +288,71 @@ function sheetMetalFaceInfo(occt,geometryId){
         }
       }
     }
-    // V8.18.5 — retain the exact axial extent of analytic faces.  This lets the
-    // manufacturing classifier distinguish a simple through-cut cylinder from
-    // a blind bore / counterbore / turned step without guessing from face count.
+    faces.push(out);
+  }
+  // V8.20.2: the sheet-metal preflight deliberately stops here. On perforated
+  // parts this avoids thousands of exact edge measurements plus one expensive
+  // hole-description call per cylinder. NavoUnfold can resolve bends from exact
+  // face geometry + the STEP topology edge points already present in geometry.
+  const result={geometryId:gid,faces,edges:[],logicalGroups:logicalGroupsFromFaceInfo(gid,topo,faces),mode:'sheetmetal-fast'};
+  sheetInfoBaseCache.set(gid,result);return result;
+}
+
+function buildManufacturingFaceInfo(occt,geometryId){
+  const gid=String(geometryId),cached=sheetInfoFullCache.get(gid);if(cached)return cached;
+  const topo=topologyByGeometry.get(gid);if(!topo)throw new Error(`No STEP topology for geometry ${gid}.`);
+  const base=buildSheetMetalBaseInfo(occt,gid),faces=base.faces.map(f=>({...f}));
+  const topoFaceById=new Map((topo.faces||[]).map(f=>[Number(f.id),f])),topoEdgeById=new Map((topo.edges||[]).map(e=>[Number(e.id),e]));
+  const allowCompoundRecognition=(topo.faces?.length||0)<=600;
+  for(const out of faces){
+    const id=Number(out.id),topoFace=topoFaceById.get(id),axis=Array.isArray(out.axisDirection)?out.axisDirection.map(Number).slice(0,3):null;
     if(axis?.length===3&&axis.every(Number.isFinite)&&topoFace){
       const la=Math.hypot(...axis);
       if(la>1e-12){
         const u=axis.map(v=>v/la);let lo=Infinity,hi=-Infinity;
         for(const edgeId of topoFace.edgeIndices||[]){
-          const topoEdge=(topo.edges||[]).find(e=>Number(e.id)===Number(edgeId)),pts=Array.from(topoEdge?.points||[]).map(Number);
-          for(let k=0;k+2<pts.length;k+=3){
-            const d=pts[k]*u[0]+pts[k+1]*u[1]+pts[k+2]*u[2];
-            if(Number.isFinite(d)){lo=Math.min(lo,d);hi=Math.max(hi,d);}
-          }
+          const topoEdge=topoEdgeById.get(Number(edgeId)),pts=Array.from(topoEdge?.points||[]).map(Number);
+          for(let k=0;k+2<pts.length;k+=3){const d=pts[k]*u[0]+pts[k+1]*u[1]+pts[k+2]*u[2];if(Number.isFinite(d)){lo=Math.min(lo,d);hi=Math.max(hi,d);}}
         }
         if(Number.isFinite(lo)&&Number.isFinite(hi)&&hi>=lo){out.axisMin=lo;out.axisMax=hi;out.axisSpan=hi-lo;}
       }
     }
     const analyticFamily=String(out.family||'').toLowerCase();
     if(['cylinder','cylindrical'].includes(analyticFamily)){
-      try{
-        const hole=occt.DescribeExactHole(exactModelId,shapeHandle(gid),'face',id);
-        if(hole?.ok)out.hole={diameter:Number(hole.diameter),radius:Number(hole.radius),depth:Number(hole.depth),isThrough:hole.isThrough===true?true:hole.isThrough===false?false:null};
-      }catch{}
+      try{const hole=occt.DescribeExactHole(exactModelId,shapeHandle(gid),'face',id);if(hole?.ok)out.hole={diameter:Number(hole.diameter),radius:Number(hole.radius),depth:Number(hole.depth),isThrough:hole.isThrough===true?true:hole.isThrough===false?false:null};}catch{}
     }
     if(allowCompoundRecognition&&['cylinder','cylindrical','cone','conical'].includes(analyticFamily)){
-      try{
-        const compound=occt.DescribeExactCompoundHole(exactModelId,shapeHandle(gid),'face',id);
-        if(compound?.ok)out.compoundHole={
-          family:String(compound.family||''),holeDiameter:Number(compound.holeDiameter),holeDepth:Number(compound.holeDepth),isThrough:compound.isThrough===true?true:compound.isThrough===false?false:null,
-          counterboreDiameter:Number(compound.counterboreDiameter),counterboreDepth:Number(compound.counterboreDepth),
-          countersinkDiameter:Number(compound.countersinkDiameter),countersinkAngle:Number(compound.countersinkAngle),
-          axisDirection:Array.isArray(compound.axisDirection)?compound.axisDirection.map(Number).slice(0,3):null
-        };
-      }catch{}
+      try{const compound=occt.DescribeExactCompoundHole(exactModelId,shapeHandle(gid),'face',id);if(compound?.ok)out.compoundHole={family:String(compound.family||''),holeDiameter:Number(compound.holeDiameter),holeDepth:Number(compound.holeDepth),isThrough:compound.isThrough===true?true:compound.isThrough===false?false:null,counterboreDiameter:Number(compound.counterboreDiameter),counterboreDepth:Number(compound.counterboreDepth),countersinkDiameter:Number(compound.countersinkDiameter),countersinkAngle:Number(compound.countersinkAngle),axisDirection:Array.isArray(compound.axisDirection)?compound.axisDirection.map(Number).slice(0,3):null};}catch{}
     }
-    // V8.20.0 — use the exact OCCT chamfer helper when available.  This is a
-    // stronger manufacturing signal than merely seeing an extra planar face.
     if(allowCompoundRecognition&&analyticFamily==='plane'){
-      try{
-        const chamfer=occt.DescribeExactChamfer(exactModelId,shapeHandle(gid),'face',id);
-        if(chamfer?.ok)out.chamfer={
-          profile:String(chamfer.profile||''),variant:String(chamfer.variant||''),
-          distanceA:Number(chamfer.distanceA),distanceB:Number(chamfer.distanceB),supportAngle:Number(chamfer.supportAngle)
-        };
-      }catch{}
+      try{const chamfer=occt.DescribeExactChamfer(exactModelId,shapeHandle(gid),'face',id);if(chamfer?.ok)out.chamfer={profile:String(chamfer.profile||''),variant:String(chamfer.variant||''),distanceA:Number(chamfer.distanceA),distanceB:Number(chamfer.distanceB),supportAngle:Number(chamfer.supportAngle)};}catch{}
     }
-    faces.push(out);
   }
   const edges=[];
   for(const edge of topo.edges||[]){
-    const id=Number(edge.id),selection={geometryId:gid,kind:'edge',elementId:id},sig=exactGeometrySignature(occt,selection);
-    const topoEdge=(topo.edges||[]).find(e=>Number(e.id)===id);
+    const id=Number(edge.id),selection={geometryId:gid,kind:'edge',elementId:id},sig=exactGeometrySignature(occt,selection),topoEdge=topoEdgeById.get(id);
     const out={id,family:String(sig?.family||'other'),ownerFaceIds:Array.from(topoEdge?.ownerFaceIds||[]).map(Number)};
     if(Number.isFinite(Number(sig?.radius)))out.radius=Number(sig.radius);
-    const center=Array.isArray(sig?.localCenter)?sig.localCenter.map(Number).slice(0,3):null;
-    const axis=Array.isArray(sig?.axisDirection)?sig.axisDirection.map(Number).slice(0,3):null;
-    if(center?.length===3)out.localCenter=center;
-    if(axis?.length===3)out.axisDirection=axis;
+    const center=Array.isArray(sig?.localCenter)?sig.localCenter.map(Number).slice(0,3):null,axis=Array.isArray(sig?.axisDirection)?sig.axisDirection.map(Number).slice(0,3):null;
+    if(center?.length===3)out.localCenter=center;if(axis?.length===3)out.axisDirection=axis;
     const length=occt.MeasureExactEdgeLength(exactModelId,shapeHandle(gid),'edge',id);
     if(length?.ok&&Number.isFinite(Number(length.value))){
       out.length=Number(length.value);
-      const a=Array.isArray(length.localStartPoint)?length.localStartPoint.map(Number).slice(0,3):null;
-      const b=Array.isArray(length.localEndPoint)?length.localEndPoint.map(Number).slice(0,3):null;
-      if(a?.length===3&&a.every(Number.isFinite))out.localStartPoint=a;
-      if(b?.length===3&&b.every(Number.isFinite))out.localEndPoint=b;
-      if(!out.localStartPoint||!out.localEndPoint){
-        const topoEdge=(topo.edges||[]).find(e=>Number(e.id)===id),pts=Array.from(topoEdge?.points||[]).map(Number);
-        if(pts.length>=6){
-          const sa=pts.slice(0,3),sb=pts.slice(-3);
-          if(!out.localStartPoint&&sa.every(Number.isFinite))out.localStartPoint=sa;
-          if(!out.localEndPoint&&sb.every(Number.isFinite))out.localEndPoint=sb;
-        }
-      }
+      const a=Array.isArray(length.localStartPoint)?length.localStartPoint.map(Number).slice(0,3):null,b=Array.isArray(length.localEndPoint)?length.localEndPoint.map(Number).slice(0,3):null;
+      if(a?.length===3&&a.every(Number.isFinite))out.localStartPoint=a;if(b?.length===3&&b.every(Number.isFinite))out.localEndPoint=b;
+      if(!out.localStartPoint||!out.localEndPoint){const pts=Array.from(topoEdge?.points||[]).map(Number);if(pts.length>=6){const sa=pts.slice(0,3),sb=pts.slice(-3);if(!out.localStartPoint&&sa.every(Number.isFinite))out.localStartPoint=sa;if(!out.localEndPoint&&sb.every(Number.isFinite))out.localEndPoint=sb;}}
     }
     edges.push(out);
   }
-  // V8.19 — explicit face-adjacency graph (AAG) at the worker boundary.  This
-  // keeps feature recognition deterministic and independent from triangle order.
   const neighbors=new Map(faces.map(f=>[Number(f.id),new Set()]));
-  for(const edge of edges){
-    const owners=(edge.ownerFaceIds||[]).map(Number).filter(Number.isFinite);
-    for(let i=0;i<owners.length;i++)for(let j=i+1;j<owners.length;j++){
-      neighbors.get(owners[i])?.add(owners[j]);neighbors.get(owners[j])?.add(owners[i]);
-    }
-  }
+  for(const edge of edges){const owners=(edge.ownerFaceIds||[]).map(Number).filter(Number.isFinite);for(let i=0;i<owners.length;i++)for(let j=i+1;j<owners.length;j++){neighbors.get(owners[i])?.add(owners[j]);neighbors.get(owners[j])?.add(owners[i]);}}
   for(const face of faces)face.neighborFaceIds=[...(neighbors.get(Number(face.id))||[])].sort((a,b)=>a-b);
-  // Virtual equivalent of OCCT ShapeUpgrade_UnifySameDomain for analysis: keep
-  // the original B-Rep IDs for selection, but annotate adjacent coincident
-  // planes/cylinders as one physical domain so exporter seam lines cannot be
-  // mistaken for pockets or independent machining features.
   assignVirtualSameDomainGroups(faces);
-  const logicalGroups=allLogicalFaceGroups(occt).filter(group=>String(group.geometryId)===gid);
-  return{geometryId:gid,faces,edges,logicalGroups};
+  const result={geometryId:gid,faces,edges,logicalGroups:base.logicalGroups,mode:'manufacturing-full'};
+  sheetInfoFullCache.set(gid,result);return result;
 }
+
+function sheetMetalFaceInfo(occt,geometryId){return buildSheetMetalBaseInfo(occt,geometryId);}
 
 function shapeHandle(geometryId) {
   const handle = bindingByGeometry.get(String(geometryId));
@@ -587,6 +587,11 @@ self.onmessage = async (event) => {
 
     if (action === 'sheetmetal-face-info') {
       const result=sheetMetalFaceInfo(occt,payload.geometryId);
+      self.postMessage({id,ok:true,result});
+      return;
+    }
+    if (action === 'manufacturing-face-info') {
+      const result=buildManufacturingFaceInfo(occt,payload.geometryId);
       self.postMessage({id,ok:true,result});
       return;
     }

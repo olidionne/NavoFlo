@@ -1,7 +1,7 @@
 import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.7';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.20.1
+ * NavoFlo Sheet Metal Engine — V8.20.2
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
