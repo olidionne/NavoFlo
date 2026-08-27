@@ -5,10 +5,11 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.20.4';
-import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.20.4';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.21.0';
+import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.21.0';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.20.1';
+import { fastenerNameHint } from './fastener-recognition.js?v=8.21.0';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -85,7 +86,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.20.4';
+const WORKER_URL = '/js/step-worker.js?v=8.21.0';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -100,7 +101,7 @@ const ASMT = FR ? {
   batchCancelled:'Export DXF annulé.', spreadConfirm:n=>`Ouvrir ${n} pièces dans des onglets Navo3D ?`,
   spreadLimit:n=>`La branche contient ${n} pièces. Navo3D ouvrira au maximum 60 onglets à la fois.`,
   dxfExported:n=>`${n} DXF exporté(s)`, dxfSkipped:n=>`${n} ignoré(s)`,
-  directoryPrompt:'Choisissez le dossier de destination des DXF.'
+  directoryPrompt:'Choisissez le dossier de destination des DXF.', collapse:'Réduire', expand:'Développer', occurrences:n=>`${n} occurrences`, hardware:'Boulonnerie'
 } : {
   assembly:'STEP assembly', subassembly:'STEP sub-assembly', part:'STEP part',
   openPart:'Open part', openSubassembly:'Open sub-assembly',
@@ -108,7 +109,7 @@ const ASMT = FR ? {
   batchCancelled:'DXF batch export cancelled.', spreadConfirm:n=>`Open ${n} parts in Navo3D tabs?`,
   spreadLimit:n=>`This branch contains ${n} parts. Navo3D will open at most 60 tabs at a time.`,
   dxfExported:n=>`${n} DXF exported`, dxfSkipped:n=>`${n} skipped`,
-  directoryPrompt:'Choose the DXF destination folder.'
+  directoryPrompt:'Choose the DXF destination folder.', collapse:'Collapse', expand:'Expand', occurrences:n=>`${n} occurrences`, hardware:'Fastener'
 };
 
 const SMT = FR ? {
@@ -230,11 +231,11 @@ let activeModelDocumentId=null,modelDocumentSeq=0,modelDocumentBusy=false,pendin
 let currentAssemblyFocus=null,currentAssemblyMode=false,currentAssemblyHierarchyAvailable=false;
 let currentHierarchyRootSpecs=[];
 let currentActiveGeometryIds=new Set();
-let assemblyTreeRecords=new Map(),assemblyOccurrenceRecords=[];
+let assemblyTreeRecords=new Map(),assemblySyntheticGroups=new Map(),assemblyOccurrenceRecords=[];
 let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
 const assemblyExpandedKeys=new Set();
 
-const MODEL_ANALYSIS_CACHE_VERSION=9;
+const MODEL_ANALYSIS_CACHE_VERSION=10;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -299,7 +300,7 @@ function currentAssemblyTreeState(){
 }
 function restoreAssemblyTreeState(state){
   if(!state||!assemblyTreeRecords.size)return;
-  if(Array.isArray(state.expandedKeys)){assemblyExpandedKeys.clear();for(const key of state.expandedKeys)if(assemblyTreeRecords.has(key))assemblyExpandedKeys.add(key);}
+  if(Array.isArray(state.expandedKeys)){assemblyExpandedKeys.clear();for(const key of state.expandedKeys)assemblyExpandedKeys.add(String(key));}
   const hidden=new Set(Array.isArray(state.hiddenKeys)?state.hiddenKeys:[]);for(const occ of assemblyOccurrenceRecords)occ.group.visible=!hidden.has(occ.treeKey);
   if(state.selectedKey&&assemblyTreeRecords.has(state.selectedKey))selectAssemblyTreeNode(state.selectedKey);
 }
@@ -459,14 +460,49 @@ function assemblyNodeAtKey(roots,key){
   return node;
 }
 function assemblyNodeIsAssembly(node){return Boolean(node?.isAssembly||(Array.isArray(node?.children)&&node.children.length));}
-function assemblyRecordIsAssembly(record){return Boolean(record?.isAssembly||record?.childrenKeys?.length);}
+function assemblyRecordForKey(key){return assemblyTreeRecords.get(key)||assemblySyntheticGroups.get(key)||null;}
+function assemblyRecordIsAssembly(record){return Boolean(record?.syntheticGroup||record?.isAssembly||record?.childrenKeys?.length);}
 function assemblyCurrentScopeKey(){return currentHierarchyRootSpecs.length===1?currentHierarchyRootSpecs[0].key:null;}
 function assemblyDescendantRecord(record,key){return Boolean(record&&(key==null||record.key===key||record.key.startsWith(String(key)+'/')));}
-function assemblyRecordsForKey(key=null){return [...assemblyTreeRecords.values()].filter(record=>assemblyDescendantRecord(record,key));}
-function assemblyOccurrencesForKey(key=null){return assemblyOccurrenceRecords.filter(occ=>key==null||occ.treeKey===key||occ.treeKey.startsWith(String(key)+'/'));}
-function assemblyLeafRecordsForKey(key=null){
-  return assemblyRecordsForKey(key).filter(record=>record.occurrences.length&&!record.childrenKeys.length);
+function assemblyPartNumberBase(name){
+  let s=String(name||'').replace(/^.*[\\/]/,'').replace(/\.(ipt|iam|step|stp)$/i,'').trim();
+  // Inventor occurrence suffixes: PART:1, PART <1>, PART (1), PART [1]. Keep
+  // manufacturing suffixes such as _0 because those belong to the part number.
+  s=s.replace(/\s*(?::\s*\d+|<\s*\d+\s*>|\(\s*\d+\s*\)|\[\s*\d+\s*\])\s*$/,'').trim();
+  return s||String(name||'(unnamed)');
 }
+function assemblyPartNumberKey(name){return assemblyPartNumberBase(name).replace(/\s+/g,' ').toUpperCase();}
+function assemblyStableHash(value){let h=2166136261;for(const ch of String(value||'')){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return(h>>>0).toString(36);}
+function assemblySyntheticKey(parentToken,nameKey){return`@group:${assemblyStableHash(parentToken)}:${assemblyStableHash(nameKey)}`;}
+function assemblyDisplayRecords(keys,parentToken='ROOT',depth=0){
+  const actual=(keys||[]).map(key=>assemblyTreeRecords.get(key)).filter(Boolean),buckets=new Map();
+  for(const record of actual){
+    if(assemblyRecordIsAssembly(record)||record.childrenKeys.length)continue;
+    const k=assemblyPartNumberKey(record.name);if(!k)continue;
+    if(!buckets.has(k))buckets.set(k,[]);buckets.get(k).push(record);
+  }
+  const emitted=new Set(),out=[];
+  for(const record of actual){
+    const k=assemblyPartNumberKey(record.name),members=buckets.get(k)||[];
+    if(members.length<2){out.push(record);continue;}
+    if(emitted.has(k))continue;emitted.add(k);
+    const key=assemblySyntheticKey(parentToken,k),base=assemblyPartNumberBase(members[0].name);
+    const synthetic={key,parentKey:parentToken==='ROOT'?null:parentToken,node:null,group:null,name:base,isAssembly:true,syntheticGroup:true,depth,childrenKeys:members.map(r=>r.key),groupMemberKeys:members.map(r=>r.key),occurrences:[],meshIndices:[]};
+    assemblySyntheticGroups.set(key,synthetic);out.push(synthetic);
+  }
+  return out;
+}
+function assemblyRecordsForKey(key=null){
+  const synthetic=key!=null?assemblySyntheticGroups.get(String(key)):null;
+  if(synthetic){const seen=new Set(),out=[];for(const member of synthetic.groupMemberKeys||[])for(const record of assemblyRecordsForKey(member)){if(seen.has(record.key))continue;seen.add(record.key);out.push(record);}return out;}
+  return [...assemblyTreeRecords.values()].filter(record=>assemblyDescendantRecord(record,key));
+}
+function assemblyOccurrencesForKey(key=null){
+  const synthetic=key!=null?assemblySyntheticGroups.get(String(key)):null;
+  if(synthetic){const allowed=new Set(synthetic.groupMemberKeys||[]);return assemblyOccurrenceRecords.filter(occ=>[...allowed].some(member=>occ.treeKey===member||occ.treeKey.startsWith(String(member)+'/')));}
+  return assemblyOccurrenceRecords.filter(occ=>key==null||occ.treeKey===key||occ.treeKey.startsWith(String(key)+'/'));
+}
+function assemblyLeafRecordsForKey(key=null){return assemblyRecordsForKey(key).filter(record=>record.occurrences.length&&!record.childrenKeys.length);}
 function assemblyRecordVisibility(record){
   const occs=assemblyOccurrencesForKey(record?.key);if(!occs.length)return 'visible';
   const shown=occs.filter(occ=>occ.group.visible!==false).length;
@@ -485,19 +521,23 @@ function setAssemblyBatchBusy(busy){
   [E.assemblyTreeBatchDxf,E.assemblyTreeSpread].filter(Boolean).forEach(button=>button.disabled=assemblyBatchBusy);
 }
 function closeAssemblyContextMenu(){if(E.assemblyContextMenu)E.assemblyContextMenu.hidden=true;assemblyContextKey=null;}
-function openAssemblyContextMenu(event,key){
-  const record=assemblyTreeRecords.get(key);if(!record||!E.assemblyContextMenu)return;
-  event.preventDefault();event.stopPropagation();selectAssemblyTreeNode(key);assemblyContextKey=key;
-  const menu=E.assemblyContextMenu,isAssembly=assemblyRecordIsAssembly(record);
-  const open=menu.querySelector('[data-assembly-action="open"]'),spread=menu.querySelector('[data-assembly-action="spread"]');
-  if(open)open.textContent=isAssembly?ASMT.openSubassembly:ASMT.openPart;
+function openAssemblyContextMenuAt(clientX,clientY,key,{select=true}={}){
+  const record=assemblyRecordForKey(key);if(!record||!E.assemblyContextMenu)return;
+  if(select)selectAssemblyTreeNode(key);assemblyContextKey=key;
+  const menu=E.assemblyContextMenu,isAssembly=assemblyRecordIsAssembly(record),hasChildren=Boolean(record.childrenKeys?.length);
+  const open=menu.querySelector('[data-assembly-action="open"]'),spread=menu.querySelector('[data-assembly-action="spread"]'),toggle=menu.querySelector('[data-assembly-action="toggle-collapse"]');
+  if(open){open.hidden=Boolean(record.syntheticGroup);open.textContent=isAssembly?ASMT.openSubassembly:ASMT.openPart;}
   if(spread)spread.hidden=!isAssembly;
-  menu.hidden=false;menu.style.left=`${event.clientX}px`;menu.style.top=`${event.clientY}px`;
+  if(toggle){toggle.hidden=!hasChildren;toggle.textContent=assemblyExpandedKeys.has(key)?ASMT.collapse:ASMT.expand;}
+  menu.hidden=false;menu.style.left=`${clientX}px`;menu.style.top=`${clientY}px`;
   requestAnimationFrame(()=>{
     const r=menu.getBoundingClientRect(),pad=8;
-    menu.style.left=`${Math.max(pad,Math.min(event.clientX,innerWidth-r.width-pad))}px`;
-    menu.style.top=`${Math.max(pad,Math.min(event.clientY,innerHeight-r.height-pad))}px`;
+    menu.style.left=`${Math.max(pad,Math.min(clientX,innerWidth-r.width-pad))}px`;
+    menu.style.top=`${Math.max(pad,Math.min(clientY,innerHeight-r.height-pad))}px`;
   });
+}
+function openAssemblyContextMenu(event,key){
+  event.preventDefault();event.stopPropagation();openAssemblyContextMenuAt(event.clientX,event.clientY,key);
 }
 function clearAssemblyTreeSelection({rerender=true}={}){
   for(const occ of assemblyOccurrenceRecords){
@@ -518,26 +558,32 @@ function assemblyHighlightClone(material){
   const clone=material.clone();clone.color?.set?.(0x2d8cff);clone.emissive?.set?.(0x0a355a);if('emissiveIntensity'in clone)clone.emissiveIntensity=.95;clone.needsUpdate=true;return clone;
 }
 function selectAssemblyTreeNode(key,{fit=false}={}){
-  const record=assemblyTreeRecords.get(key);if(!record)return;
+  const record=assemblyRecordForKey(key);if(!record)return;
   clearAssemblyTreeSelection({rerender:false});assemblySelectedKey=key;
+  if(!record.syntheticGroup){
+    let parent=record.parentKey;
+    while(parent){assemblyExpandedKeys.add(parent);parent=assemblyTreeRecords.get(parent)?.parentKey||null;}
+  }
   for(const occ of assemblyOccurrencesForKey(key))for(const mesh of occ.surfaceMeshes||[]){
     mesh.userData.assemblyTreeOriginalMaterial=mesh.material;
     mesh.material=Array.isArray(mesh.material)?mesh.material.map(assemblyHighlightClone):assemblyHighlightClone(mesh.material);
   }
-  renderAssemblyTree();if(fit)fitAssemblyTreeNode(key);
+  renderAssemblyTree();
+  requestAnimationFrame(()=>E.assemblyTreeList?.querySelector?.('.assembly-tree-row.selected')?.scrollIntoView?.({block:'nearest'}));
+  if(fit)fitAssemblyTreeNode(key);
 }
 function setAssemblyNodeVisibility(key,visible){
   for(const occ of assemblyOccurrencesForKey(key))occ.group.visible=Boolean(visible);
   renderAssemblyTree();
 }
 function isolateAssemblyTreeNode(key){
-  const prefix=String(key)+'/';
-  for(const occ of assemblyOccurrenceRecords)occ.group.visible=occ.treeKey===key||occ.treeKey.startsWith(prefix);
+  const keep=new Set(assemblyOccurrencesForKey(key));
+  for(const occ of assemblyOccurrenceRecords)occ.group.visible=keep.has(occ);
   renderAssemblyTree();
 }
 function showAssemblyTreeOthers(key){
-  const prefix=String(key)+'/';
-  for(const occ of assemblyOccurrenceRecords)if(!(occ.treeKey===key||occ.treeKey.startsWith(prefix)))occ.group.visible=true;
+  const selected=new Set(assemblyOccurrencesForKey(key));
+  for(const occ of assemblyOccurrenceRecords)if(!selected.has(occ))occ.group.visible=true;
   renderAssemblyTree();
 }
 function showAllAssemblyTreeNodes(){for(const occ of assemblyOccurrenceRecords)occ.group.visible=true;renderAssemblyTree();}
@@ -552,29 +598,45 @@ function renderAssemblyTree(){
   if(!E.assemblyTreePanel||!E.assemblyTreeList)return;
   const show=Boolean(currentStepResult&&currentAssemblyHierarchyAvailable&&currentAssemblyMode&&assemblyTreeRecords.size);
   E.assemblyTreePanel.hidden=!show;if(!show){E.assemblyTreeList.replaceChildren();closeAssemblyContextMenu();return;}
-  E.assemblyTreeList.replaceChildren();
-  const appendRecord=(record)=>{
-    if(!record)return;
-    const row=document.createElement('div');row.className=`assembly-tree-row ${assemblyRecordIsAssembly(record)?'assembly':'part'}`;row.dataset.treeKey=record.key;row.setAttribute('role','treeitem');row.style.paddingLeft=`${Math.min(record.depth,14)*13}px`;row.title=record.name;
-    const visibility=assemblyRecordVisibility(record);row.classList.toggle('is-hidden',visibility==='hidden');row.classList.toggle('selected',assemblySelectedKey===record.key);
-    const hasChildren=record.childrenKeys.length>0,expanded=assemblyExpandedKeys.has(record.key);if(hasChildren)row.setAttribute('aria-expanded',expanded?'true':'false');
-    const caret=document.createElement('button');caret.type='button';caret.className='tree-caret'+(hasChildren?'':' placeholder');caret.textContent=hasChildren?(expanded?'▾':'▸'):'·';caret.tabIndex=-1;if(hasChildren)caret.addEventListener('click',event=>{event.stopPropagation();toggleAssemblyExpanded(record.key);});
-    const eye=document.createElement('button');eye.type='button';eye.className='tree-eye';eye.textContent=visibility==='hidden'?'○':visibility==='mixed'?'◐':'●';eye.title=visibility==='hidden'?(FR?'Montrer':'Show'):(FR?'Cacher':'Hide');eye.tabIndex=-1;eye.addEventListener('click',event=>{event.stopPropagation();setAssemblyNodeVisibility(record.key,visibility==='hidden');});
-    const icon=document.createElement('span');icon.className='tree-icon';icon.textContent=assemblyRecordIsAssembly(record)?'▦':'◇';
-    const name=document.createElement('span');name.className='tree-name';name.textContent=record.name||'(unnamed)';
-    row.append(caret,eye,icon,name);
-    row.addEventListener('click',event=>{if(event.target.closest('button'))return;selectAssemblyTreeNode(record.key);});
-    row.addEventListener('dblclick',event=>{event.preventDefault();selectAssemblyTreeNode(record.key,{fit:true});});
-    row.addEventListener('contextmenu',event=>openAssemblyContextMenu(event,record.key));
-    E.assemblyTreeList.append(row);
-    if(hasChildren&&expanded)for(const childKey of record.childrenKeys)appendRecord(assemblyTreeRecords.get(childKey));
-  };
-  for(const spec of currentHierarchyRootSpecs)appendRecord(assemblyTreeRecords.get(spec.key));
-}
+  E.assemblyTreeList.replaceChildren();assemblySyntheticGroups.clear();
 
+  const selectedActual=assemblySelectedKey&&!String(assemblySelectedKey).startsWith('@group:')?assemblySelectedKey:null;
+  const appendLevel=(keys,parentToken='ROOT',depth=0)=>{
+    const records=assemblyDisplayRecords(keys,parentToken,depth);
+    for(const record of records){
+      if(!record)continue;
+      if(record.syntheticGroup&&selectedActual&&(record.groupMemberKeys||[]).includes(selectedActual))assemblyExpandedKeys.add(record.key);
+      const row=document.createElement('div');
+      const hinted=!record.syntheticGroup&&!assemblyRecordIsAssembly(record)?fastenerNameHint(record.name):null;
+      row.className=`assembly-tree-row ${assemblyRecordIsAssembly(record)?'assembly':'part'}${record.syntheticGroup?' repeated-group':''}${hinted?.recognized?' fastener':''}`;
+      row.dataset.treeKey=record.key;row.setAttribute('role','treeitem');row.style.paddingLeft=`${Math.min(depth,14)*13}px`;
+      row.title=record.syntheticGroup?`${record.name} · ${ASMT.occurrences((record.groupMemberKeys||[]).length)}`:record.name;
+      const visibility=assemblyRecordVisibility(record);row.classList.toggle('is-hidden',visibility==='hidden');row.classList.toggle('selected',assemblySelectedKey===record.key);
+      const hasChildren=Boolean(record.childrenKeys?.length),expanded=assemblyExpandedKeys.has(record.key);if(hasChildren)row.setAttribute('aria-expanded',expanded?'true':'false');
+      const caret=document.createElement('button');caret.type='button';caret.className='tree-caret'+(hasChildren?'':' placeholder');caret.textContent=hasChildren?(expanded?'▾':'▸'):'·';caret.tabIndex=-1;if(hasChildren)caret.addEventListener('click',event=>{event.stopPropagation();toggleAssemblyExpanded(record.key);});
+      const eye=document.createElement('button');eye.type='button';eye.className='tree-eye';eye.textContent=visibility==='hidden'?'○':visibility==='mixed'?'◐':'●';eye.title=visibility==='hidden'?(FR?'Montrer':'Show'):(FR?'Cacher':'Hide');eye.tabIndex=-1;eye.addEventListener('click',event=>{event.stopPropagation();setAssemblyNodeVisibility(record.key,visibility==='hidden');});
+      const icon=document.createElement('span');icon.className='tree-icon';icon.textContent=record.syntheticGroup?'▣':hinted?.recognized?'⊙':assemblyRecordIsAssembly(record)?'▦':'◇';
+      const name=document.createElement('span');name.className='tree-name';
+      name.textContent=record.syntheticGroup?`${record.name} ×${(record.groupMemberKeys||[]).length}`:(record.name||'(unnamed)');
+      row.append(caret,eye,icon,name);
+      row.addEventListener('click',event=>{if(event.target.closest('button'))return;selectAssemblyTreeNode(record.key);});
+      row.addEventListener('dblclick',event=>{event.preventDefault();selectAssemblyTreeNode(record.key,{fit:true});});
+      row.addEventListener('contextmenu',event=>openAssemblyContextMenu(event,record.key));
+      E.assemblyTreeList.append(row);
+      if(!hasChildren||!expanded)continue;
+      if(record.syntheticGroup){
+        appendLevel(record.groupMemberKeys||[],record.key,depth+1);
+      }else{
+        appendLevel(record.childrenKeys||[],record.key,depth+1);
+      }
+    }
+  };
+  appendLevel(currentHierarchyRootSpecs.map(spec=>spec.key),'ROOT',0);
+}
 function assemblyGeometryFingerprint(record){return [...new Set(assemblyOccurrencesForKey(record.key).map(occ=>occ.geometryId))].sort().join('|');}
 async function openAssemblyNodeInTab(key){
-  const record=assemblyTreeRecords.get(key),sourceDoc=activeModelDocumentId?modelDocuments.get(activeModelDocumentId):null;if(!record||!sourceDoc?.main)return;
+  const record=assemblyRecordForKey(key),sourceDoc=activeModelDocumentId?modelDocuments.get(activeModelDocumentId):null;if(!record||!sourceDoc?.main)return;
+  if(record.syntheticGroup){await spreadAssemblyNodeToTabs(key);return;}
   const signature=modelFileSignature(sourceDoc.main);
   const existing=[...modelDocuments.values()].find(doc=>doc.focus?.key===key&&modelFileSignature(doc.main)===signature);
   if(existing){await activateModelDocument(existing.id);return;}
@@ -611,19 +673,29 @@ function assemblyBatchTargets(key=null){
 }
 async function analyzeAssemblyGeometryForDxf(target){
   const geometry=target?.geometry;if(!geometry)return{ok:false,reason:'geometry'};
+  const componentName=target?.name||geometry?.name||'',fastenerHint=fastenerNameHint(componentName);
   const analyzeWith=info=>analyzeAndUnfold({geometry,faceInfo:info?.faces||[],edgeInfo:info?.edges||[],logicalGroups:info?.logicalGroups||[],fixedFaceId:null,thickness:null,fallbackInsideRadius:null,kResolver:resolveUnfoldK});
   let exact,result;
-  try{exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});result=analyzeWith(exact);}catch(error){return{ok:false,reason:error?.message||'sheet-info'};}
-  if(!(result?.ok&&(Number(result.bendCount)||0)>0)){
-    try{exact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});result=analyzeWith(exact);}catch(error){if(!result?.ok)return{ok:false,reason:error?.message||'manufacturing-info'};}
-  }
-  if(!result?.ok)return{ok:false,reason:result?.code||'not-flat'};
-  if(result.flatPlate&&exact){
+  try{
+    exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});
+    result=(await enforceStructuralProfileAuthority(analyzeWith(exact))).result;
+  }catch(error){return{ok:false,reason:error?.message||'sheet-info'};}
+  if(Boolean(fastenerHint?.recognized)||!(result?.ok&&(Number(result.bendCount)||0)>0)){
     try{
-      const manufacturing=buildManufacturingKnowledge({geometry,faceInfo:exact.faces||[],edgeInfo:exact.edges||[],sheetResult:result});
-      if(manufacturing?.capabilities?.export2dDxf===false&&manufacturingLooksLikeRoundShaft(manufacturing))return{ok:false,reason:'round-stock'};
+      exact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});
+      result=(await enforceStructuralProfileAuthority(analyzeWith(exact))).result;
+    }catch(error){if(!result?.ok)return{ok:false,reason:error?.message||'manufacturing-info'};}
+  }
+  if(result?.code==='structural-profile')return{ok:false,reason:'structural-profile'};
+  let manufacturing=null;
+  if(exact){
+    try{
+      manufacturing=buildManufacturingKnowledge({geometry,faceInfo:exact.faces||[],edgeInfo:exact.edges||[],sheetResult:result?.ok?result:null,structuralProfile:result?.code==='structural-profile'?result.profile||null:null,componentName});
     }catch{}
   }
+  if(manufacturing?.stockType==='fastener')return{ok:false,reason:'fastener'};
+  if(!result?.ok)return{ok:false,reason:result?.code||'not-flat'};
+  if(manufacturing?.capabilities?.export2dDxf===false)return{ok:false,reason:manufacturingLooksLikeRoundShaft(manufacturing)?'round-stock':'manufacturing-suppressed'};
   return{ok:true,result};
 }
 function batchDxfFilename(target,result,used){
@@ -859,6 +931,7 @@ function bindUI() {
     else if(action==='isolate')isolateAssemblyTreeNode(key);
     else if(action==='show-others')showAssemblyTreeOthers(key);
     else if(action==='show-all')showAllAssemblyTreeNodes();
+    else if(action==='toggle-collapse')toggleAssemblyExpanded(key);
   });
   addEventListener('pointerdown',event=>{if(E.assemblyContextMenu&&!E.assemblyContextMenu.hidden&&!E.assemblyContextMenu.contains(event.target))closeAssemblyContextMenu();},true);
   E.fit.addEventListener('click', () => flatPatternActive?fitFlatPatternView():fitCurrentView());
@@ -1082,6 +1155,10 @@ function bindUI() {
     }
 
     if (button===2 && !moved) {
+      if(currentAssemblyMode){
+        const treeKey=assemblyTreeKeyAtClient(event.clientX,event.clientY);
+        if(treeKey){openAssemblyContextMenuAt(event.clientX,event.clientY,treeKey);return;}
+      }
       openSelectOther(event.clientX,event.clientY);
     }
   };
@@ -1572,6 +1649,38 @@ function manufacturingHasPlateSecondaryMachining(c){
   );
 }
 function emptySheetMetalCapability(){return{recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:false,rolledPlateData:null,profile:false,profileType:null,profileData:null};}
+function componentNameForGeometry(geometry){
+  if(currentAssemblyFocus?.name)return currentAssemblyFocus.name;
+  const geometryId=String(geometry?.id??'');
+  const record=[...assemblyTreeRecords.values()].find(r=>(r.occurrences||[]).some(o=>String(o.geometryId)===geometryId));
+  return record?.name||geometry?.name||currentFile?.name||'';
+}
+function isStrongStructuralProfileAuthority(profile,match){
+  if(!profile||!match)return false;
+  const level=String(match.level||''),confidence=Number(match.confidence)||0,aspect=Number(profile.aspect)||0,side=Number(profile.sideAreaRatio)||0;
+  const samples=Number(profile.sectionAreaSampleCount)||0,areaRatio=Number(match.areaRatio),dimError=Number(match.maxDimensionErrorRatio);
+  const standardStrong=(level==='high'&&confidence>=0.76)||(level==='probable'&&confidence>=0.90);
+  const sectionStrong=samples>=3&&aspect>=1.55&&side>=0.52&&(aspect>=2.45||profile.shortProfileProof===true);
+  const areaStrong=!Number.isFinite(areaRatio)||(areaRatio>=0.90&&areaRatio<=1.10);
+  const dimensionStrong=!Number.isFinite(dimError)||dimError<=0.032;
+  return standardStrong&&sectionStrong&&areaStrong&&dimensionStrong;
+}
+async function enforceStructuralProfileAuthority(result){
+  const profile=result?.code==='structural-profile'?(result.profile||null):(result?.diagnostics?.structuralProfile||null);
+  if(!profile)return{result,match:null,authoritative:false};
+  let match=null;
+  try{match=await matchAiscProfile(profile);}catch(error){console.warn('[NavoFlo deterministic profile authority]',error);}
+  const authoritative=Boolean(result?.ok&&Number(result?.bendCount)>0&&isStrongStructuralProfileAuthority(profile,match));
+  if(!authoritative)return{result:match&&result?.code==='structural-profile'?{...result,standardMatch:match}:result,match,authoritative:false};
+  return{
+    result:{
+      ok:false,code:'structural-profile',profile:true,profileType:profile.kind||'constant-section-profile',profile,standardMatch:match,
+      message:'A standard structural profile is proven by invariant cross-sections + AISC geometry; sheet-metal bend interpretation is suppressed.',
+      diagnostics:{...(result?.diagnostics||{}),structuralProfile:profile,structuralProfileAuthority:{source:'multi-section+AISC',level:match.level,confidence:match.confidence,imperialLabel:match.imperialLabel||null,metricLabel:match.metricLabel||null}}
+    },
+    match,authoritative:true
+  };
+}
 async function scheduleManufacturingMlReview(localKnowledge,sheetResult,docId=activeModelDocumentId,file=currentFile,stepRef=currentStepResult){
   if(!localKnowledge?.diagnostics?.needsMlReview||!file||!stepRef)return;
   const prediction=await requestManufacturingMlReview(file,localKnowledge).catch(()=>null);if(!prediction?.ok)return;
@@ -1612,7 +1721,8 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       const manufacturingByGeometry=new Map();
       for(const geometry of geometries){
         if(currentStepResult!==stepRef)return null;
-        let exact,result;
+        const componentName=componentNameForGeometry(geometry),fastenerHint=fastenerNameHint(componentName);
+        let exact,result,profileStandardMatch=null;
         const analyzeWith=info=>analyzeAndUnfold({
           geometry,
           faceInfo:info?.faces||[],
@@ -1628,29 +1738,40 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           // bent part can contain hundreds of cylindrical hole faces and thousands
           // of edges; none of those hole descriptors are needed to prove its bends.
           exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});
-          const fastResult=analyzeWith(exact);
-          result=fastResult;
-          if(!(fastResult?.ok&&(Number(fastResult.bendCount)||0)>0)){
+          const fastResult=analyzeWith(exact),fastAuthority=await enforceStructuralProfileAuthority(fastResult);
+          result=fastAuthority.result;profileStandardMatch=fastAuthority.match||null;
+          // Full exact manufacturing metadata is normally skipped for a proven
+          // perforated bent sheet.  We still request it for anything ambiguous,
+          // for a structural-profile candidate, or when Inventor metadata says
+          // the component is hardware.  This preserves UI responsiveness while
+          // keeping the deterministic classifier authoritative.
+          if(Boolean(fastenerHint?.recognized)||!(result?.ok&&(Number(result.bendCount)||0)>0)){
             try{
               const fullExact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});
-              exact=fullExact;result=analyzeWith(fullExact);
+              exact=fullExact;
+              const fullAuthority=await enforceStructuralProfileAuthority(analyzeWith(fullExact));
+              result=fullAuthority.result;profileStandardMatch=fullAuthority.match||profileStandardMatch;
             }catch(error){
-              if(!fastResult?.ok)throw error;
+              if(!result?.ok)throw error;
               console.warn('[NavoFlo manufacturing enrichment fallback]',error);
             }
           }
         }catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
         let manufacturing=null;
-        if(!(result?.ok&&(Number(result.bendCount)||0)>0)){
+        if(!(result?.ok&&(Number(result.bendCount)||0)>0)||Boolean(fastenerHint?.recognized)){
           try{
             manufacturing=buildManufacturingKnowledge({
               geometry,
               faceInfo:exact?.faces||[],
               edgeInfo:exact?.edges||[],
               sheetResult:result?.ok||result?.code==='rolled-plate'?result:null,
-              structuralProfile:result?.code==='structural-profile'?(result.profile||null):null
+              structuralProfile:result?.code==='structural-profile'?(result.profile||null):null,
+              componentName
             });
           }catch(error){console.warn('[NavoFlo Manufacturing Recognition Engine]',error);}
+        }
+        if(manufacturing?.stockType==='fastener'){
+          result={ok:false,code:'fastener',message:'Standard fastener / hardware component detected; sheet-metal and machining classification are suppressed.',diagnostics:{fastener:manufacturing.fastener||null}};
         }
 
         // V8.19 — capabilities are independent from stock/process labels.  A
@@ -1675,7 +1796,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
             // the MRE knowledge object is still retained with the document so later
             // feature/capability layers do not have to re-analyse this geometry.
             const confidence=Number(result?.profile?.confidence)||0;
-            if(!bestProfile||confidence>(Number(bestProfile?.profile?.confidence)||0))bestProfile={...result,geometryId:String(geometry.id),manufacturing};
+            if(!bestProfile||confidence>(Number(bestProfile?.profile?.confidence)||0))bestProfile={...result,geometryId:String(geometry.id),manufacturing,standardMatch:result.standardMatch||profileStandardMatch||null};
             continue;
           }
           if(manufacturing){
@@ -1714,8 +1835,10 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           manufacturingCapability=bestProfile.manufacturing||null;
           sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:false,rolledPlateData:null,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
           modelAnalysisReady=true;
+          if(bestProfile.standardMatch){profileMatchEpoch++;currentProfileMatch=bestProfile.standardMatch;}
+          else currentProfileMatch=null;
           syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateProfileStandardUI();updateManufacturingUI();captureActiveModelDocumentState();
-          void resolveProfileStandardMatch(sheetMetalCapability.profileData);
+          if(!bestProfile.standardMatch)void resolveProfileStandardMatch(sheetMetalCapability.profileData);
           if(!quiet)console.info('[NavoFlo profile detection]',bestProfile);
           return null;
         }
@@ -2262,7 +2385,7 @@ function getWorker() {
 
 function buildExactStepScene(result) {
   const defs=(result.geometries||[]).map(makeCadDefinition),roots=result.rootNodes||[];
-  assemblyTreeRecords=new Map();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblySelectedKey=null;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();
+  assemblyTreeRecords=new Map();assemblySyntheticGroups.clear();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblySelectedKey=null;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();
 
   currentAssemblyHierarchyAvailable=Boolean(roots.some(node=>assemblyNodeIsAssembly(node))||(roots.length>1&&Number(result?.stats?.partCount)>1));
   let rootSpecs=[];
@@ -2613,6 +2736,20 @@ function setRayFromClient(clientX,clientY) {
   raycaster.setFromCamera(pointer,camera);
   return rect;
 }
+
+function objectWorldVisible(object){
+  for(let current=object;current;current=current.parent)if(current.visible===false)return false;
+  return true;
+}
+function assemblyTreeKeyAtClient(clientX,clientY){
+  if(!currentAssemblyMode||!assemblyTreeRecords.size)return null;
+  setRayFromClient(clientX,clientY);
+  const candidates=surfaceMeshes.filter(mesh=>mesh?.userData?.assemblyTreeKey&&objectWorldVisible(mesh));
+  const hit=raycaster.intersectObjects(candidates,false)[0]||null;
+  const key=hit?.object?.userData?.assemblyTreeKey;
+  return key&&assemblyTreeRecords.has(String(key))?String(key):null;
+}
+
 
 function screenDistance(point,clientX,clientY,rect) {
   const projected=point.clone().project(camera);
@@ -4179,8 +4316,15 @@ async function resolveProfileStandardMatch(profile){
 function clearProfileStandardMatch(){currentProfileMatch=null;profileMatchEpoch++;updateProfileStandardUI();}
 
 
+function fastenerTypeLabel(type){
+  const key=String(type||'fastener').toLowerCase();
+  const fr={bolt:'Boulon',screw:'Vis',nut:'Écrou',washer:'Rondelle',stud:'Goujon / tige filetée',fastener:'Boulonnerie'};
+  const en={bolt:'Bolt',screw:'Screw',nut:'Nut',washer:'Washer',stud:'Stud / threaded rod',fastener:'Fastener'};
+  return (FR?fr:en)[key]||(FR?'Boulonnerie':'Fastener');
+}
 function manufacturingLabel(c){
   if(!c)return '—';const len=profileLengthMm;
+  if(c.stockType==='fastener')return `${FR?'Boulonnerie':'Fastener'} · ${fastenerTypeLabel(c.fastenerType||c.fastener?.type)}`;
   if(c.stockType==='round-bar')return `${FR?'Barre ronde':'Round bar'} · Ø ${len(c.diameterMm)}`;
   if(c.stockType==='square-bar')return `${FR?'Barre carrée':'Square bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
   if(c.stockType==='flat-bar')return `${FR?'Barre plate':'Flat bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
@@ -4200,7 +4344,7 @@ function manufacturingLabelForCurrentContext(c){
   }
   return manufacturingLabel(c);
 }
-function manufacturingEvidenceText(c){const map=FR?{turning:'tournage',drilling:'perçage/alésage',chamfering:'chanfreins',fillets:'rayons/fillets',groove:'rainure / rayon','blind-hole':'trou borgne / alésage',counterbore:'lamage',recess:'alésage / lamage / trou borgne',pocket:'poche','through-hole':'trou traversant','material-removal':'enlèvement de matière','commercial-stock-plate':'dimensions de plaque / hors flat bar'}:{turning:'turning',drilling:'drilling/boring',chamfering:'chamfers',fillets:'fillets',groove:'groove / fillet','blind-hole':'blind hole / bore',counterbore:'counterbore',recess:'bore / counterbore / blind feature',pocket:'pocket','through-hole':'through hole','material-removal':'material removal','commercial-stock-plate':'plate dimensions / beyond flat-bar range'};return (c?.evidence||[]).map(x=>map[x]||x).join(' · ')||'—';}
+function manufacturingEvidenceText(c){const map=FR?{turning:'tournage',drilling:'perçage/alésage',chamfering:'chanfreins',fillets:'rayons/fillets',groove:'rainure / rayon','blind-hole':'trou borgne / alésage',counterbore:'lamage',recess:'alésage / lamage / trou borgne',pocket:'poche','through-hole':'trou traversant','material-removal':'enlèvement de matière','commercial-stock-plate':'dimensions de plaque / hors flat bar',fastener:'boulonnerie','metadata-fastener':'nom/metadata boulonnerie','cylindrical-shank':'corps cylindrique','head-envelope':'tête distincte','central-through-hole':'trou axial central','short-annulus':'anneau court','polygonal-body':'corps polygonal'}:{turning:'turning',drilling:'drilling/boring',chamfering:'chamfers',fillets:'fillets',groove:'groove / fillet','blind-hole':'blind hole / bore',counterbore:'counterbore',recess:'bore / counterbore / blind feature',pocket:'pocket','through-hole':'through hole','material-removal':'material removal','commercial-stock-plate':'plate dimensions / beyond flat-bar range',fastener:'fastener','metadata-fastener':'fastener name/metadata','cylindrical-shank':'cylindrical shank','head-envelope':'distinct head','central-through-hole':'central axial hole','short-annulus':'short annulus','polygonal-body':'polygonal body'};return (c?.evidence||[]).map(x=>map[x]||x).join(' · ')||'—';}
 function manufacturingFeatureText(c){
   const labels=FR?{
     'turned-step':'diamètre tourné','turned-groove':'gorge tournée','turned-groove-fillet':'gorge/rayon tourné','turned-chamfer-taper':'chanfrein/conicité tournée','turned-shoulder':'épaulement tourné',
@@ -4215,7 +4359,7 @@ function manufacturingFeatureText(c){
 }
 function ensureManufacturingSection(){
   const drawer=E.propsDrawer,anchor=drawer?.querySelector?.('.drawer-stats');if(!drawer||!anchor)return null;let section=$('manufacturing-section');if(!section){section=document.createElement('div');section.id='manufacturing-section';section.className='drawer-section';anchor.after(section);}
-  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.20.3 · B-Rep/AAG + arbitrage critique + ML optionnel':'MRE V8.20.3 · B-Rep/AAG + critical arbitration + optional ML'}</p>`;
+  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.21.0 · B-Rep/AAG + multi-sections + preuves topologiques + ML optionnel':'MRE V8.21.0 · B-Rep/AAG + multi-sections + topology proofs + optional ML'}</p>`;
   return section;
 }
 function updateManufacturingUI(){
@@ -4224,7 +4368,8 @@ function updateManufacturingUI(){
   const process=$('manufacturing-process'),stock=$('manufacturing-stock'),length=$('manufacturing-length'),rem=$('manufacturing-removal'),features=$('manufacturing-features'),evidence=$('manufacturing-evidence'),conf=$('manufacturing-confidence');
   const directDxf=Boolean(c?.capabilities?.directFlatDxf||sheetMetalCapability?.flatPlate),plateMachining=directDxf&&Boolean(c?.processes?.machining||manufacturingHasPlateSecondaryMachining(c));
   let processText;
-  if(c?.stockType==='rolled-plate'||sheetMetalCapability?.rolledPlate)processText=c?.processes?.drilling?(FR?'Roulage + perçage':'Rolling + drilling'):(FR?'Roulage de plaque':'Plate rolling');
+  if(c?.stockType==='fastener')processText=FR?'Composante standard / boulonnerie':'Standard hardware / fastener';
+  else if(c?.stockType==='rolled-plate'||sheetMetalCapability?.rolledPlate)processText=c?.processes?.drilling?(FR?'Roulage + perçage':'Rolling + drilling'):(FR?'Roulage de plaque':'Plate rolling');
   else if(directDxf)processText=plateMachining?(FR?'Découpe de plaque + usinage':'Plate cutting + machining'):(FR?'Découpe de plaque':'Plate cutting');
   else if(c?.processes?.turning)processText=c?.processes?.drilling?(FR?'Tournage + perçage/alésage':'Turning + drilling/boring'):(FR?'Tournage / usinage':'Turning / machining');
   else if(c?.processes?.machining||c.machined)processText=FR?'Usinage probable':'Probable machining';
@@ -4262,6 +4407,7 @@ function updateGeometryTypeIndicator(){
   if(!E.propType)return;
   if(!currentStepResult){E.propType.textContent=currentModel?(FR?'Maillage':'Mesh'):'—';return;}
   if(currentAssemblyMode){E.propType.textContent=currentAssemblyFocus?ASMT.subassembly:ASMT.assembly;return;}
+  if(manufacturingCapability?.stockType==='fastener'){E.propType.textContent=`${FR?'Boulonnerie':'Fastener'} · ${fastenerTypeLabel(manufacturingCapability.fastenerType||manufacturingCapability.fastener?.type)}`;return;}
   if(sheetMetalCapability.rolledPlate){const drilled=Boolean(manufacturingCapability?.processes?.drilling);E.propType.textContent=drilled?(FR?'Plaque roulée · perçage':'Rolled plate · drilling'):(FR?'Plaque roulée':'Rolled plate');return;}
   if(sheetMetalCapability.profile){
     const match=currentProfileMatch,label=match&&(match.level==='high'||match.level==='probable')?(match.imperialLabel||match.metricLabel):null;
@@ -4498,7 +4644,7 @@ async function clearModel(showMessage=true) {
   modelRoot.position.set(0,0,0);
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();logicalEdgeGroupCache=new Map();logicalHiddenEdgeKeys.clear();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];manufacturingCapability=null;
-  currentAssemblyFocus=null;currentAssemblyMode=false;currentAssemblyHierarchyAvailable=false;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();assemblyTreeRecords=new Map();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblySelectedKey=null;assemblyContextKey=null;
+  currentAssemblyFocus=null;currentAssemblyMode=false;currentAssemblyHierarchyAvailable=false;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();assemblyTreeRecords=new Map();assemblySyntheticGroups.clear();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblySelectedKey=null;assemblyContextKey=null;
   resetSheetMetalForModel();
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;multiMeasureEnabled=false;
   cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;

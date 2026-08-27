@@ -1,7 +1,7 @@
 import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.7';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.20.3
+ * NavoFlo Sheet Metal Engine — V8.21.0
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -615,7 +615,9 @@ function profileStockSectionFingerprint(geometry,basis,lo,hi,crossSpan){
   const fracs=[0.083,0.137,0.211,0.293,0.379,0.467,0.557,0.647,0.733,0.821,0.893,0.941],tol=Math.max(crossSpan*2e-5,length*2e-8,1e-5),samples=[];
   for(const fraction of fracs){const slice=profileSectionSlice(geometry,basis,lo+length*fraction,tol);if(slice)samples.push({...slice,fraction});}
   if(!samples.length)return null;samples.sort((a,b)=>b.area-a.area);const best=samples[0],areas=samples.map(s=>s.area).sort((a,b)=>a-b),med=areas[Math.floor(areas.length/2)]||best.area;
-  return{stockSectionArea:best.area,sectionComponentCount:best.outerCount,sectionHoleCount:best.holeCount,sectionLoopCount:best.loopCount,sectionSampleFraction:best.fraction,sectionAreaMedian:med,sectionAreaSampleCount:samples.length,sectionCentroid2D:best.sectionCentroid2D||null,sectionCentroidOffsetU:Number.isFinite(best.sectionCentroidOffsetU)?best.sectionCentroidOffsetU:null,sectionCentroidOffsetV:Number.isFinite(best.sectionCentroidOffsetV)?best.sectionCentroidOffsetV:null,sectionSpanU:Number.isFinite(best.sectionSpanU)?best.sectionSpanU:null,sectionSpanV:Number.isFinite(best.sectionSpanV)?best.sectionSpanV:null};
+  const minArea=areas[0]||best.area,maxArea=areas.at(-1)||best.area,nearStock=samples.filter(sample=>sample.area>=maxArea*0.965).length;
+  const sectionStableFraction=samples.length?nearStock/samples.length:0,sectionAreaSpread=maxArea>EPS?(maxArea-minArea)/maxArea:0,sectionMedianRatio=maxArea>EPS?med/maxArea:null;
+  return{stockSectionArea:best.area,sectionComponentCount:best.outerCount,sectionHoleCount:best.holeCount,sectionLoopCount:best.loopCount,sectionSampleFraction:best.fraction,sectionAreaMedian:med,sectionAreaMin:minArea,sectionAreaMax:maxArea,sectionAreaSpread,sectionMedianRatio,sectionStableFraction,sectionAreaSampleCount:samples.length,sectionCentroid2D:best.sectionCentroid2D||null,sectionCentroidOffsetU:Number.isFinite(best.sectionCentroidOffsetU)?best.sectionCentroidOffsetU:null,sectionCentroidOffsetV:Number.isFinite(best.sectionCentroidOffsetV)?best.sectionCentroidOffsetV:null,sectionSpanU:Number.isFinite(best.sectionSpanU)?best.sectionSpanU:null,sectionSpanV:Number.isFinite(best.sectionSpanV)?best.sectionSpanV:null};
 }
 
 function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
@@ -639,10 +641,12 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   for(const p of points){const d=V3.dot(p,basis.n),u=V3.dot(p,basis.u),v=V3.dot(p,basis.v);lo=Math.min(lo,d);hi=Math.max(hi,d);minU=Math.min(minU,u);maxU=Math.max(maxU,u);minV=Math.min(minV,v);maxV=Math.max(maxV,v);}
   const length=hi-lo,spanU=maxU-minU,spanV=maxV-minV,crossSpan=Math.max(spanU,spanV);if(!(length>tol*50&&crossSpan>tol*20))return null;
   const aspect=length/crossSpan;
-  // 2.45 keeps this intentionally conservative. The real regression profiles
-  // supplied for V8.17.6 range from ~2.82 to >32, while the formed-sheet
-  // regression parts stay below 1.85.
-  if(aspect<2.45)return null;
+  // V8.21 keeps 2.45 as the ordinary profile threshold, but no longer throws
+  // away shorter structural members before their section can be examined. A
+  // short W/C/HSS member can have L/depth < 2.45 and is still a standard shape.
+  // Below 2.45 it must later pass a much stronger invariant-section topology
+  // proof (many longitudinal traces + stable sampled sections).
+  if(aspect<1.55)return null;
   const longEdges=best.members.filter(e=>e.length>=length*0.55);if(longEdges.length<5)return null;
   const traceStep=Math.max(tol*20,crossSpan*1e-5,1e-6),traceKeys=new Set();
   for(const e of longEdges){const p=V3.scale(V3.add(e.a,e.b),0.5),u=V3.dot(p,basis.u),v=V3.dot(p,basis.v);traceKeys.add(`${Math.round(u/traceStep)},${Math.round(v/traceStep)}`);}
@@ -661,9 +665,13 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   const confidence=clamp(0.45+Math.min((aspect-2.45)/6,0.25)+Math.min((longEdges.length-5)/20,0.15)+Math.min(Math.max(sideAreaRatio-0.52,0)*0.35,0.15),0,1);
   const volume=triangulatedSolidVolume(geometry),averageSectionArea=volume&&length>EPS?volume/length:null;
   const section=profileStockSectionFingerprint(geometry,basis,lo,hi,crossSpan);
+  if(aspect<2.45){
+    const shortProfileProof=traceKeys.size>=10&&longitudinalPlaneCount>=6&&longitudinalCylinderCount>=2&&Number(section?.sectionAreaSampleCount)>=5&&Number(section?.sectionStableFraction)>=0.50&&Number(section?.sectionMedianRatio)>=0.88;
+    if(!shortProfileProof)return null;
+  }
   const stockSectionArea=Number(section?.stockSectionArea);
   const approxMassKgPerM=Number.isFinite(stockSectionArea)?stockSectionArea*0.00785:(Number.isFinite(averageSectionArea)?averageSectionArea*0.00785:null);
-  return{kind:'constant-section-profile',axis:basis.n,length,crossSpan,spanU,spanV,aspect,longEdgeCount:longEdges.length,traceCount:traceKeys.size,sideAreaRatio,coverage,confidence,averageSectionArea,stockSectionArea:Number.isFinite(stockSectionArea)?stockSectionArea:null,approxMassKgPerM,longitudinalPlaneCount,longitudinalCylinderCount,longitudinalCylinderRadii,...(section||{})};
+  return{kind:'constant-section-profile',axis:basis.n,length,crossSpan,spanU,spanV,aspect,longEdgeCount:longEdges.length,traceCount:traceKeys.size,sideAreaRatio,coverage,confidence,averageSectionArea,stockSectionArea:Number.isFinite(stockSectionArea)?stockSectionArea:null,approxMassKgPerM,longitudinalPlaneCount,longitudinalCylinderCount,longitudinalCylinderRadii,shortProfileProof:aspect<2.45,...(section||{})};
 }
 
 // V8.17.7 — manufacturing-neutral geometry arbitration.

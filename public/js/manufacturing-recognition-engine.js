@@ -1,4 +1,4 @@
-/* NavoFlo V8.20.3 — Manufacturing Recognition Engine (MRE)
+/* NavoFlo V8.21.0 — Manufacturing Recognition Engine (MRE)
  *
  * Architecture:
  *   exact B-Rep/AAG -> stock hypothesis -> virtual delta/removal features
@@ -11,7 +11,8 @@
  */
 import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.20.0';
 import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.20.0';
-import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.20.0';
+import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.21.0';
+import { detectFastenerComponent, FASTENER_RECOGNIZER_VERSION } from './fastener-recognition.js?v=8.21.0';
 
 const EPS=1e-8;
 const V={
@@ -212,37 +213,34 @@ function isSupportedPocketFloor(id,ctx,aag,normal){
   if(!wallIds.length)return false;
   let touchesLow=false,touchesHigh=false;
   for(const wallId of wallIds){for(const n of aag.nodes.get(wallId)?.neighbors||[]){if(ctx.lowSkinIds?.has(Number(n)))touchesLow=true;if(ctx.highSkinIds?.has(Number(n)))touchesHigh=true;}}
-  // A true pocket floor is bounded by walls that terminate at at least one
-  // physical skin. A same-domain split/seam on a skin has no offset floor and
-  // cannot satisfy this topology after skin removal.
-  return touchesLow||touchesHigh;
+  // V8.21: a true blind pocket floor must be connected to exactly ONE physical
+  // skin through its side walls. If the component reaches both skins it is a
+  // through-cut/through-passage and cannot prove milling.
+  return touchesLow!==touchesHigh;
 }
 function globalPlateAnalyticFeatures({faceInfo,ctx,normal,thickness,stock,excludeFaceIds=null}){
-  const out=[],excluded=excludeFaceIds instanceof Set?excludeFaceIds:new Set(excludeFaceIds||[]);const stockAxis=canonicalAxis(stock?.axis),stockCenter=vec(stock?.axisCenter),stockR=Number(stock?.diameterMm)/2;
+  // V8.21 deterministic proof floor.  Surface family alone is NOT a process
+  // proof: a torus can be a rolled/stock fillet, a cone can be a bevel-cut edge,
+  // and a transverse cylinder can be an external radius.  Only exact OCCT hole
+  // descriptors are promoted here.  Pocket/groove topology is handled by the AAG
+  // component pass above where skin contact can actually prove a blind feature.
+  const out=[],excluded=excludeFaceIds instanceof Set?excludeFaceIds:new Set(excludeFaceIds||[]);
   for(const f of faceInfo||[]){
     const family=fam(f.family),id=Number(f.id);if(ctx.skinIds.has(id)||excluded.has(id))continue;
-    if(['torus','toroidal'].includes(family)){
-      const a=canonicalAxis(f.axisDirection),aligned=!a||Math.abs(V.dot(a,normal))>0.96;
-      if(aligned)out.push(feature('annular-groove','milling',[id],0.97,{analyticFallback:true}));
-      else out.push(feature('groove-fillet','milling',[id],0.90,{analyticFallback:true}));
-      continue;
+    if(f.compoundHole&&fam(f.compoundHole.family)==='counterbore'){
+      out.push(feature('counterbore','drilling',[id],0.995,{analyticFallback:true,exactCompoundHole:true,topologyProven:true}));continue;
     }
-    if(['cone','conical'].includes(family)){
-      out.push(feature('countersink-chamfer','drilling',[id],0.90,{analyticFallback:true}));continue;
+    if(f.compoundHole&&fam(f.compoundHole.family)==='countersink'){
+      out.push(feature('countersink','drilling',[id],0.995,{analyticFallback:true,exactCompoundHole:true,topologyProven:true}));continue;
     }
-    if(f.chamfer){out.push(feature('edge-chamfer','milling',[id],0.94,{exactChamfer:true,variant:f.chamfer.variant||null,distanceA:Number(f.chamfer.distanceA),distanceB:Number(f.chamfer.distanceB)}));continue;}
-    if(!['cylinder','cylindrical'].includes(family))continue;
-    const a=canonicalAxis(f.axisDirection),c=vec(f.localCenter),r=Number(f.radius),span=Number(f.axisSpan);if(!a||!(r>EPS))continue;
-    // Do not turn the outside wall of a round plate into a machining feature.
-    if(stock?.stockType==='round-bar'&&stockAxis&&stockCenter&&Number.isFinite(stockR)&&Math.abs(V.dot(a,stockAxis))>0.998&&c&&axisLineDistance(stockCenter,stockAxis,c)<Math.max(stockR*0.01,0.03)&&Math.abs(r-stockR)<Math.max(stockR*0.01,0.03))continue;
+    if(!['cylinder','cylindrical'].includes(family)||!f.hole)continue;
+    const a=canonicalAxis(f.axisDirection),r=Number(f.radius);if(!a||!(r>EPS))continue;
     const align=Math.abs(V.dot(a,normal));
-    if(align<0.985){out.push(feature('cross-hole','drilling',[id],0.94,{analyticFallback:true}));continue;}
-    if(f.hole?.isThrough===false){out.push(feature('blind-hole','drilling',[id],0.985,{diameterMm:r*2,depthMm:Number(f.hole.depth)||span,analyticFallback:true}));continue;}
-    if(Number.isFinite(span)&&span<thickness*0.90){out.push(feature('blind-hole','drilling',[id],0.95,{diameterMm:r*2,spanRatio:span/Math.max(thickness,EPS),analyticFallback:true}));continue;}
+    if(f.hole.isThrough===false){out.push(feature('blind-hole','drilling',[id],0.992,{diameterMm:r*2,depthMm:Number(f.hole.depth)||Number(f.axisSpan),analyticFallback:true,exactHole:true,topologyProven:true}));continue;}
+    if(f.hole.isThrough===true&&align<0.985){out.push(feature('cross-hole','drilling',[id],0.985,{diameterMm:r*2,analyticFallback:true,exactHole:true,topologyProven:true}));continue;}
   }
   return dedupeFeatures(out);
 }
-
 function componentSkinContact(ids,ctx,aag){
   let low=false,high=false;
   for(const id of ids){
@@ -323,11 +321,11 @@ function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
     const t=classifyPureThroughCutComponent(ids,ctx,aag,normal,thickness);if(t)throughByKey.set([...ids].map(Number).sort((a,b)=>a-b).join(','),t);
   }
   const throughCandidates=[...throughByKey.values()].sort((a,b)=>(Number(b.parameters?.wallAreaMm2)||0)-(Number(a.parameters?.wallAreaMm2)||0));
-  // For ordinary plate blanks the largest full-thickness wall component is the
-  // external perimeter, even when it is all-planar. Round-plate stock already
-  // suppresses its OD via componentIsPureStockBoundary, so keep the historical
-  // >=2 rule there to avoid discarding a lone internal circular hole.
-  const externalThroughFaceKey=stock?.stockType==='round-bar'?(throughCandidates.length>=2?[...throughCandidates[0].faceIds].sort((a,b)=>a-b).join(','):null):(throughCandidates.length?[...throughCandidates[0].faceIds].sort((a,b)=>a-b).join(','):null);
+  // A single proven full-thickness component is much more safely interpreted
+  // as an internal cut than discarded as the outside perimeter. Only nominate
+  // the largest candidate as the external perimeter when there are at least two
+  // closed full-thickness components to compare.
+  const externalThroughFaceKey=throughCandidates.length>=2?[...throughCandidates[0].faceIds].sort((a,b)=>a-b).join(','):null;
   for(const ids of ctx.components){
     if(componentIsPureStockBoundary(ids,ctx,stock,normal,thickness))continue;
     const componentKey=[...ids].map(Number).sort((a,b)=>a-b).join(',');
@@ -340,29 +338,31 @@ function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
     const rawInteriorPlaneIds=ids.filter(id=>ctx.interiorPlanes.some(p=>p.id===Number(id)));
     const interiorPlaneIds=rawInteriorPlaneIds.filter(id=>isSupportedPocketFloor(id,ctx,aag,normal));
     const groups=plateComponentCylinderGroups(ids,ctx,normal,thickness);
+    const skinContact=componentSkinContact(ids,ctx,aag);
     let componentMachining=false;
     for(const g of groups){
-      const align=Math.abs(V.dot(g.axis,normal));if(align<0.985){features.push(feature('cross-hole','drilling',g.faceIds,0.95,{diameterMm:g.radii[0]*2,axis:g.axis}));componentMachining=true;continue;}
+      const align=Math.abs(V.dot(g.axis,normal));if(align<0.985){const exactHole=g.members.some(m=>m.hole);if(exactHole){features.push(feature('cross-hole','drilling',g.faceIds,0.985,{diameterMm:g.radii[0]*2,axis:g.axis,exactHole:true,topologyProven:true}));componentMachining=true;}continue;}
       const spans=g.members.map(m=>m.span).filter(Number.isFinite),maxSpan=spans.length?Math.max(...spans):g.span,spanRatio=Number.isFinite(maxSpan)?maxSpan/Math.max(thickness,EPS):null;
       const explicitThrough=g.members.some(m=>m.hole?.isThrough===true),explicitBlind=g.members.some(m=>m.hole&&m.hole.isThrough===false);
-      const full=explicitThrough||(Number.isFinite(spanRatio)&&spanRatio>=0.92),partial=explicitBlind||(Number.isFinite(spanRatio)&&spanRatio<0.90);
+      const full=explicitThrough||(Number.isFinite(spanRatio)&&spanRatio>=0.92),partialBySpan=Number.isFinite(spanRatio)&&spanRatio<0.90,partial=explicitBlind||(partialBySpan&&!skinContact.both&&(skinContact.low||skinContact.high)&&interiorPlaneIds.length>0);
       const compound=g.members.map(m=>m.face?.compoundHole).find(x=>x&&['counterbore','countersink'].includes(fam(x.family)));
       if(compound&&fam(compound.family)==='counterbore'){
-        features.push(feature('counterbore','drilling',ids,0.995,{holeDiameterMm:Number(compound.holeDiameter),counterboreDiameterMm:Number(compound.counterboreDiameter),counterboreDepthMm:Number(compound.counterboreDepth),through:compound.isThrough===true?true:compound.isThrough===false?false:null}));componentMachining=true;
+        features.push(feature('counterbore','drilling',ids,0.995,{holeDiameterMm:Number(compound.holeDiameter),counterboreDiameterMm:Number(compound.counterboreDiameter),counterboreDepthMm:Number(compound.counterboreDepth),through:compound.isThrough===true?true:compound.isThrough===false?false:null,exactCompoundHole:true,topologyProven:true}));componentMachining=true;
       }else if(compound&&fam(compound.family)==='countersink'){
-        features.push(feature('countersink','drilling',ids,0.995,{holeDiameterMm:Number(compound.holeDiameter),countersinkDiameterMm:Number(compound.countersinkDiameter),countersinkAngleRad:Number(compound.countersinkAngle),through:compound.isThrough===true?true:compound.isThrough===false?false:null}));componentMachining=true;
+        features.push(feature('countersink','drilling',ids,0.995,{holeDiameterMm:Number(compound.holeDiameter),countersinkDiameterMm:Number(compound.countersinkDiameter),countersinkAngleRad:Number(compound.countersinkAngle),through:compound.isThrough===true?true:compound.isThrough===false?false:null,exactCompoundHole:true,topologyProven:true}));componentMachining=true;
       }else if(g.radii.length>=2&&(partial||coneIds.length||torusIds.length||interiorPlaneIds.length)){
         features.push(feature('counterbore','drilling',ids,0.97,{radiiMm:g.radii,spanRatio}));componentMachining=true;
-      }else if(partial){features.push(feature('blind-hole','drilling',g.faceIds,0.96,{diameterMm:g.radii[0]*2,spanRatio}));componentMachining=true;
-      }else if(coneIds.length){features.push(feature('countersink','drilling',ids,0.95,{diameterMm:g.radii[0]*2,spanRatio}));componentMachining=true;
+      }else if(partial){features.push(feature('blind-hole','drilling',g.faceIds,explicitBlind?0.992:0.94,{diameterMm:g.radii[0]*2,spanRatio,exactHole:explicitBlind,topologyProven:explicitBlind||Boolean(interiorPlaneIds.length)}));componentMachining=true;
+      }else if(coneIds.length&&g.members.some(m=>m.hole)){features.push(feature('countersink','drilling',ids,0.96,{diameterMm:g.radii[0]*2,spanRatio,exactHole:true,topologyProven:true}));componentMachining=true;
       }else if(full){features.push(feature('through-hole','cutting',g.faceIds,0.91,{diameterMm:g.radii[0]*2,spanRatio}));}
     }
-    if(torusIds.length){features.push(feature('annular-groove','milling',ids,0.97,{splitFaceCount:torusIds.length}));componentMachining=true;}
-    for(const id of interiorPlaneIds){features.push(feature('pocket-floor','milling',[id],0.94,{}));componentMachining=true;}
+    const blindComponent=(!skinContact.both&&(skinContact.low||skinContact.high));
+    if(torusIds.length&&blindComponent&&(interiorPlaneIds.length||groups.some(g=>g.members.some(m=>m.hole?.isThrough===false)))){features.push(feature('annular-groove','milling',ids,0.97,{splitFaceCount:torusIds.length,topologyProven:true}));componentMachining=true;}
+    for(const id of interiorPlaneIds){features.push(feature('pocket-floor','milling',[id],0.965,{topologyProven:true,oneSkinContact:true}));componentMachining=true;}
     // A cone/toroid cannot be produced by a pure normal 2D profile cut. This
     // fallback intentionally survives missing/fragmented cylinder metadata.
-    if(!groups.length&&coneIds.length){features.push(feature('countersink-chamfer','drilling',ids,0.90,{}));componentMachining=true;}
-    if(!groups.length&&torusIds.length){features.push(feature('groove-fillet','milling',ids,0.92,{}));componentMachining=true;}
+    if(!groups.length&&coneIds.length&&blindComponent&&interiorPlaneIds.length){features.push(feature('countersink-chamfer','drilling',ids,0.91,{topologyProven:true}));componentMachining=true;}
+    if(!groups.length&&torusIds.length&&blindComponent&&interiorPlaneIds.length){features.push(feature('groove-fillet','milling',ids,0.93,{topologyProven:true}));componentMachining=true;}
     if(componentMachining)for(const id of ids)used.add(Number(id));
   }
 
@@ -426,7 +426,7 @@ function recognizeRolledPlateFeatures({faceInfo,stock}){
 
 function recognizeGenericBarFeatures({faceInfo,stock,sheetResult}){
   if(!stock||['round-bar','plate-blank','sheet-metal','rolled-plate','structural-profile'].includes(stock.stockType)||sheetResult?.flatPlate)return[];const axis=canonicalAxis(stock.axis),features=[];if(!axis)return features;
-  for(const f of faceInfo||[]){const family=fam(f.family),a=canonicalAxis(f.axisDirection);if(['cylinder','cylindrical'].includes(family)){const align=a?Math.abs(V.dot(a,axis)):0;features.push(feature(align<0.98?'cross-hole':'axial-bore','drilling',[Number(f.id)],0.90,{diameterMm:Number(f.radius)*2}));}else if(family==='cone')features.push(feature('chamfer-countersink','drilling',[Number(f.id)],0.82,{}));else if(family==='torus')features.push(feature('groove-fillet','milling',[Number(f.id)],0.86,{}));}
+  for(const f of faceInfo||[]){const family=fam(f.family),a=canonicalAxis(f.axisDirection);if(['cylinder','cylindrical'].includes(family)&&f.hole){const align=a?Math.abs(V.dot(a,axis)):0;features.push(feature(align<0.98?'cross-hole':'axial-bore','drilling',[Number(f.id)],f.hole.isThrough===false?0.99:0.97,{diameterMm:Number(f.radius)*2,exactHole:true,through:f.hole.isThrough}));}else if(f.compoundHole){const type=fam(f.compoundHole.family)==='countersink'?'countersink':'counterbore';features.push(feature(type,'drilling',[Number(f.id)],0.995,{exactCompoundHole:true}));}}
   return dedupeFeatures(features);
 }
 
@@ -500,8 +500,23 @@ function compatibilityProjection(stock,legacy,processes,features,evidence){
   const base={...(legacy||{}),...(stock||{})};base.machined=Boolean(processes.machining);base.process=base.machined?'machining':'stock-profile';base.evidence=evidence;base.features={...(legacy?.features||{}),recognizedInstances:features.length,secondaryMachining:base.machined};return base;
 }
 
-export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sheetResult=null,structuralProfile=null,mlPrediction=null}={}){
-  const aag=buildAttributedAdjacencyGraph(faceInfo,edgeInfo);let legacy=null;try{legacy=classifyManufacturingGeometry({geometry,faceInfo,edgeInfo});}catch{}
+export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sheetResult=null,structuralProfile=null,mlPrediction=null,componentName=null}={}){
+  const aag=buildAttributedAdjacencyGraph(faceInfo,edgeInfo);
+  const fastener=detectFastenerComponent({name:componentName||geometry?.name||'',geometry,faceInfo,edgeInfo});
+  if(fastener?.recognized&&Number(fastener.confidence)>=0.92){
+    const processes={cutting:false,bending:false,rolling:false,turning:false,drilling:false,milling:false,machining:false,profile:false,fastener:true};
+    const stock={stockType:'fastener',fastenerType:fastener.type,lengthMm:Number(fastener.lengthMm)||null,diameterMm:Number(fastener.diameterMm)||null,confidence:Number(fastener.confidence)||0.95,source:fastener.source||'deterministic-fastener',fastener};
+    return{
+      kind:'manufacturing-knowledge',knowledgeVersion:5,classification:'fastener',stockType:'fastener',fastenerType:fastener.type,fastener,stock,
+      lengthMm:stock.lengthMm,diameterMm:stock.diameterMm,confidence:stock.confidence,machined:false,process:'fastener',processes,
+      capabilities:{unfold:false,export2dDxf:false,directFlatDxf:false,structuralProfile:false,rolledPlate:false,fastener:true},
+      featureInstances:[],features:{recognizedInstances:0,secondaryMachining:false,definiteMachiningInstances:0,throughCutInstances:0},
+      evidence:['fastener',...(fastener.evidence||[])],delta:{method:'not-applicable-fastener',estimatedRemovedVolumeMm3:null,featureCount:0,featureFaceIds:[]},
+      aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount},materialRemoval:null,
+      diagnostics:{mre:true,fastener:true,needsMlReview:false,analysisPipeline:['brep-aag','fastener-metadata-prior','fastener-brep-signature','manufacturing-exclusion'],fastenerRecognizerVersion:FASTENER_RECOGNIZER_VERSION}
+    };
+  }
+  let legacy=null;try{legacy=classifyManufacturingGeometry({geometry,faceInfo,edgeInfo});}catch{}
   const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile});
   let features=[];
   const roundPlateContext=Boolean(sheetResult?.flatPlate&&stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45);
@@ -540,7 +555,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   const localConfidence=clamp(Math.max(stockConfidence,machineConfidence*0.96));
   const base={
     ...compat,
-    kind:'manufacturing-knowledge',knowledgeVersion:4,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
+    kind:'manufacturing-knowledge',knowledgeVersion:5,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
     aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount},
     confidence:localConfidence,
     diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,surfaceSignals:signals,

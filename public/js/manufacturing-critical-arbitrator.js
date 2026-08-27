@@ -1,4 +1,4 @@
-/* NavoFlo V8.20.0 — Critical Manufacturing Arbitrator
+/* NavoFlo V8.21.0 — Critical Manufacturing Arbitrator
  *
  * The recognizers produce geometric feature hypotheses.  This module answers a
  * different question: does a recognized feature actually REQUIRE secondary
@@ -112,10 +112,8 @@ export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPr
   if(plateContext){
     const sig=out?.diagnostics?.surfaceSignals||{};
     const has=t=>localFeatures.some(f=>normalizeType(f.type)===t);
-    if(Number(sig.torus)>0&&!has('annular-groove'))localFeatures.push({type:'annular-groove',process:'milling',faceIds:[],confidence:.965,parameters:{analyticFloor:true,count:Number(sig.torus)}});
     if(Number(sig.compoundHoles)>0&&!has('counterbore')&&!has('countersink'))localFeatures.push({type:'counterbore',process:'drilling',faceIds:[],confidence:.955,parameters:{analyticFloor:true,count:Number(sig.compoundHoles)}});
-    if((Number(sig.blindCylinders)>0||Number(sig.partialCylinders)>0)&&!has('blind-hole'))localFeatures.push({type:'blind-hole',process:'drilling',faceIds:[],confidence:.95,parameters:{analyticFloor:true,count:Math.max(Number(sig.blindCylinders)||0,Number(sig.partialCylinders)||0)}});
-    if(Number(sig.cone)>0&&!has('countersink')&&!has('countersink-chamfer'))localFeatures.push({type:'countersink-chamfer',process:'drilling',faceIds:[],confidence:.90,parameters:{analyticFloor:true,count:Number(sig.cone)}});
+    if(Number(sig.blindCylinders)>0&&!has('blind-hole'))localFeatures.push({type:'blind-hole',process:'drilling',faceIds:[],confidence:.985,parameters:{analyticFloor:true,exactHole:true,count:Number(sig.blindCylinders)}});
   }
   const features=mergeFeaturePredictions(localFeatures,mlPrediction,{plateContext});
   const definite=features.filter(f=>requiresSecondaryMachining(f,{plateContext}));
@@ -149,4 +147,4 @@ export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPr
   return out;
 }
 
-export const CRITICAL_ARBITRATOR_VERSION='8.20.0';
+export const CRITICAL_ARBITRATOR_VERSION='8.21.0';

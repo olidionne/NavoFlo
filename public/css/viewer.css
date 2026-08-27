@@ -1249,3 +1249,8 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
 @media(max-width:900px){.assembly-tree-panel{width:min(310px,46vw)}.assembly-tree-actions button{padding:0 5px}.assembly-tree-row .tree-name{max-width:225px}}
 @media(max-width:600px){.assembly-tree-panel{top:110px;left:8px;width:min(270px,62vw);font-size:9px}.assembly-tree-actions button{font-size:0;width:26px;padding:0}.assembly-tree-actions button::first-letter{font-size:10px}.assembly-tree-row .tree-name{max-width:190px}}
 .assembly-tree-status[data-tone="ok"]{color:#66dfaa}.assembly-tree-status[data-tone="warn"]{color:#e8ba74}
+
+
+.assembly-tree-row.repeated-group .tree-name{font-weight:700}
+.assembly-tree-row.repeated-group .tree-icon{color:#40dda5}
+.assembly-tree-row.fastener .tree-icon{font-size:11px}
