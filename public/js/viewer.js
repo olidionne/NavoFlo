@@ -5,11 +5,11 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.21.0';
-import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.21.0';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.21.1';
+import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.21.1';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
-import { matchAiscProfile } from './profile-standard-matcher.js?v=8.20.1';
-import { fastenerNameHint } from './fastener-recognition.js?v=8.21.0';
+import { matchAiscProfile, matchAiscProfileWithName, aiscDesignationHint } from './profile-standard-matcher.js?v=8.21.1';
+import { fastenerNameHint } from './fastener-recognition.js?v=8.21.1';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -86,7 +86,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.21.0';
+const WORKER_URL = '/js/step-worker.js?v=8.21.1';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -233,9 +233,10 @@ let currentHierarchyRootSpecs=[];
 let currentActiveGeometryIds=new Set();
 let assemblyTreeRecords=new Map(),assemblySyntheticGroups=new Map(),assemblyOccurrenceRecords=[];
 let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
+const assemblyHighlightedMeshes=new Set();
 const assemblyExpandedKeys=new Set();
 
-const MODEL_ANALYSIS_CACHE_VERSION=10;
+const MODEL_ANALYSIS_CACHE_VERSION=11;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -494,12 +495,14 @@ function assemblyDisplayRecords(keys,parentToken='ROOT',depth=0){
 }
 function assemblyRecordsForKey(key=null){
   const synthetic=key!=null?assemblySyntheticGroups.get(String(key)):null;
-  if(synthetic){const seen=new Set(),out=[];for(const member of synthetic.groupMemberKeys||[])for(const record of assemblyRecordsForKey(member)){if(seen.has(record.key))continue;seen.add(record.key);out.push(record);}return out;}
+  // Synthetic repetition folders are built only from leaf occurrence records.
+  // Resolve them directly instead of recursively re-scanning the full hierarchy.
+  if(synthetic)return (synthetic.groupMemberKeys||[]).map(member=>assemblyTreeRecords.get(member)).filter(Boolean);
   return [...assemblyTreeRecords.values()].filter(record=>assemblyDescendantRecord(record,key));
 }
 function assemblyOccurrencesForKey(key=null){
   const synthetic=key!=null?assemblySyntheticGroups.get(String(key)):null;
-  if(synthetic){const allowed=new Set(synthetic.groupMemberKeys||[]);return assemblyOccurrenceRecords.filter(occ=>[...allowed].some(member=>occ.treeKey===member||occ.treeKey.startsWith(String(member)+'/')));}
+  if(synthetic){const out=[];for(const member of synthetic.groupMemberKeys||[]){const record=assemblyTreeRecords.get(member);if(record?.occurrences?.length)out.push(...record.occurrences);}return out;}
   return assemblyOccurrenceRecords.filter(occ=>key==null||occ.treeKey===key||occ.treeKey.startsWith(String(key)+'/'));
 }
 function assemblyLeafRecordsForKey(key=null){return assemblyRecordsForKey(key).filter(record=>record.occurrences.length&&!record.childrenKeys.length);}
@@ -539,19 +542,26 @@ function openAssemblyContextMenuAt(clientX,clientY,key,{select=true}={}){
 function openAssemblyContextMenu(event,key){
   event.preventDefault();event.stopPropagation();openAssemblyContextMenuAt(event.clientX,event.clientY,key);
 }
+function restoreAssemblyTreeHighlight(mesh){
+  if(!mesh)return;
+  const original=mesh.userData?.assemblyTreeOriginalMaterial;if(!original)return;
+  const current=Array.isArray(mesh.material)?mesh.material:[mesh.material];
+  if(Array.isArray(original))current.forEach((material,index)=>{if(material&&material!==original[index])material.dispose?.();});
+  else current.forEach(material=>{if(material&&material!==original)material.dispose?.();});
+  mesh.material=original;delete mesh.userData.assemblyTreeOriginalMaterial;
+}
+function syncAssemblyTreeSelectionDom(){
+  if(!E.assemblyTreeList)return null;let selectedRow=null;
+  for(const row of E.assemblyTreeList.querySelectorAll('.assembly-tree-row')){const on=String(row.dataset.treeKey||'')===String(assemblySelectedKey||'');row.classList.toggle('selected',on);if(on)selectedRow=row;}
+  return selectedRow;
+}
 function clearAssemblyTreeSelection({rerender=true}={}){
-  for(const occ of assemblyOccurrenceRecords){
-    for(const mesh of occ.surfaceMeshes||[]){
-      const original=mesh.userData?.assemblyTreeOriginalMaterial;if(!original)continue;
-      const current=Array.isArray(mesh.material)?mesh.material:[mesh.material];
-      current.forEach(material=>{if(material&&material!==original&&!Array.isArray(original))material.dispose?.();});
-      if(Array.isArray(original)){
-        current.forEach((material,index)=>{if(material&&material!==original[index])material.dispose?.();});
-      }
-      mesh.material=original;delete mesh.userData.assemblyTreeOriginalMaterial;
-    }
-  }
-  assemblySelectedKey=null;if(rerender)renderAssemblyTree();
+  // Selection cleanup must be O(selected meshes), never O(total assembly).
+  // Large Inventor assemblies can contain thousands of occurrences; walking
+  // every mesh on each click is exactly what made V8.21.0 feel progressively slow.
+  for(const mesh of assemblyHighlightedMeshes)restoreAssemblyTreeHighlight(mesh);
+  assemblyHighlightedMeshes.clear();
+  assemblySelectedKey=null;if(rerender)syncAssemblyTreeSelectionDom();
 }
 function assemblyHighlightClone(material){
   if(!material?.clone)return material;
@@ -559,17 +569,23 @@ function assemblyHighlightClone(material){
 }
 function selectAssemblyTreeNode(key,{fit=false}={}){
   const record=assemblyRecordForKey(key);if(!record)return;
-  clearAssemblyTreeSelection({rerender:false});assemblySelectedKey=key;
+  clearAssemblyTreeSelection({rerender:false});assemblySelectedKey=key;let structureChanged=false;
   if(!record.syntheticGroup){
     let parent=record.parentKey;
-    while(parent){assemblyExpandedKeys.add(parent);parent=assemblyTreeRecords.get(parent)?.parentKey||null;}
+    while(parent){if(!assemblyExpandedKeys.has(parent)){assemblyExpandedKeys.add(parent);structureChanged=true;}parent=assemblyTreeRecords.get(parent)?.parentKey||null;}
+    // If the actual occurrence is currently represented by a repetition folder,
+    // expand that PRESENTATION folder once so 3D -> tree synchronization can reveal it.
+    for(const group of assemblySyntheticGroups.values())if((group.groupMemberKeys||[]).includes(record.key)&&!assemblyExpandedKeys.has(group.key)){assemblyExpandedKeys.add(group.key);structureChanged=true;break;}
   }
   for(const occ of assemblyOccurrencesForKey(key))for(const mesh of occ.surfaceMeshes||[]){
     mesh.userData.assemblyTreeOriginalMaterial=mesh.material;
     mesh.material=Array.isArray(mesh.material)?mesh.material.map(assemblyHighlightClone):assemblyHighlightClone(mesh.material);
+    assemblyHighlightedMeshes.add(mesh);
   }
-  renderAssemblyTree();
-  requestAnimationFrame(()=>E.assemblyTreeList?.querySelector?.('.assembly-tree-row.selected')?.scrollIntoView?.({block:'nearest'}));
+  // Major-CAD style tree behavior: normal selection updates only the selected row.
+  // Rebuild the DOM solely when an ancestor/folder actually had to expand.
+  let row=structureChanged?null:syncAssemblyTreeSelectionDom();if(structureChanged||!row){renderAssemblyTree();row=syncAssemblyTreeSelectionDom();}
+  requestAnimationFrame(()=>row?.scrollIntoView?.({block:'nearest'}));
   if(fit)fitAssemblyTreeNode(key);
 }
 function setAssemblyNodeVisibility(key,visible){
@@ -601,8 +617,11 @@ function renderAssemblyTree(){
   E.assemblyTreeList.replaceChildren();assemblySyntheticGroups.clear();
 
   const selectedActual=assemblySelectedKey&&!String(assemblySelectedKey).startsWith('@group:')?assemblySelectedKey:null;
-  const appendLevel=(keys,parentToken='ROOT',depth=0)=>{
-    const records=assemblyDisplayRecords(keys,parentToken,depth);
+  const appendLevel=(keys,parentToken='ROOT',depth=0,{groupDuplicates=true}={})=>{
+    // Synthetic occurrence folders are a PRESENTATION layer only. Their children
+    // must be emitted raw exactly once; regrouping the same member list recursively
+    // created PART ×80 -> PART ×80 -> PART ×80 ... in V8.21.0.
+    const records=groupDuplicates?assemblyDisplayRecords(keys,parentToken,depth):(keys||[]).map(key=>assemblyTreeRecords.get(key)).filter(Boolean);
     for(const record of records){
       if(!record)continue;
       if(record.syntheticGroup&&selectedActual&&(record.groupMemberKeys||[]).includes(selectedActual))assemblyExpandedKeys.add(record.key);
@@ -625,7 +644,7 @@ function renderAssemblyTree(){
       E.assemblyTreeList.append(row);
       if(!hasChildren||!expanded)continue;
       if(record.syntheticGroup){
-        appendLevel(record.groupMemberKeys||[],record.key,depth+1);
+        appendLevel(record.groupMemberKeys||[],record.key,depth+1,{groupDuplicates:false});
       }else{
         appendLevel(record.childrenKeys||[],record.key,depth+1);
       }
@@ -673,24 +692,24 @@ function assemblyBatchTargets(key=null){
 }
 async function analyzeAssemblyGeometryForDxf(target){
   const geometry=target?.geometry;if(!geometry)return{ok:false,reason:'geometry'};
-  const componentName=target?.name||geometry?.name||'',fastenerHint=fastenerNameHint(componentName);
+  const componentName=target?.name||geometry?.name||'',fastenerHint=fastenerNameHint(componentName),structuralNameHint=aiscDesignationHint(componentName);
   const analyzeWith=info=>analyzeAndUnfold({geometry,faceInfo:info?.faces||[],edgeInfo:info?.edges||[],logicalGroups:info?.logicalGroups||[],fixedFaceId:null,thickness:null,fallbackInsideRadius:null,kResolver:resolveUnfoldK});
   let exact,result;
   try{
     exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});
-    result=(await enforceStructuralProfileAuthority(analyzeWith(exact))).result;
+    result=(await enforceStructuralProfileAuthority(analyzeWith(exact),componentName)).result;
   }catch(error){return{ok:false,reason:error?.message||'sheet-info'};}
-  if(Boolean(fastenerHint?.recognized)||!(result?.ok&&(Number(result.bendCount)||0)>0)){
+  if(Boolean(fastenerHint?.recognized)||Boolean(structuralNameHint)||!(result?.ok&&(Number(result.bendCount)||0)>0)){
     try{
       exact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});
-      result=(await enforceStructuralProfileAuthority(analyzeWith(exact))).result;
+      result=(await enforceStructuralProfileAuthority(analyzeWith(exact),componentName)).result;
     }catch(error){if(!result?.ok)return{ok:false,reason:error?.message||'manufacturing-info'};}
   }
   if(result?.code==='structural-profile')return{ok:false,reason:'structural-profile'};
   let manufacturing=null;
   if(exact){
     try{
-      manufacturing=buildManufacturingKnowledge({geometry,faceInfo:exact.faces||[],edgeInfo:exact.edges||[],sheetResult:result?.ok?result:null,structuralProfile:result?.code==='structural-profile'?result.profile||null:null,componentName});
+      manufacturing=buildManufacturingKnowledge({geometry,faceInfo:exact.faces||[],edgeInfo:exact.edges||[],sheetResult:result?.ok?result:null,structuralProfile:result?.code==='structural-profile'?result.profile||null:(result?.diagnostics?.structuralProfile||null),componentName});
     }catch{}
   }
   if(manufacturing?.stockType==='fastener')return{ok:false,reason:'fastener'};
@@ -1665,20 +1684,32 @@ function isStrongStructuralProfileAuthority(profile,match){
   const dimensionStrong=!Number.isFinite(dimError)||dimError<=0.032;
   return standardStrong&&sectionStrong&&areaStrong&&dimensionStrong;
 }
-async function enforceStructuralProfileAuthority(result){
+function isStrongNamedStructuralAuthority(profile,match){
+  if(!profile||!match||match.sourceKind!=='assembly-name+geometry')return false;
+  const aspect=Number(profile.aspect)||0,side=Number(profile.sideAreaRatio)||0,samples=Number(profile.sectionAreaSampleCount)||0,traces=Number(profile.traceCount)||0;
+  const dimError=Number(match.maxDimensionErrorRatio),areaRatio=Number(match.areaRatio);
+  // Inventor Content Center / BOM designation is strong evidence, but never by
+  // itself: the B-Rep still has to be a longitudinal, invariant extrusion and its
+  // measured envelope must agree with the named AISC section.
+  return aspect>=1.35&&side>=0.48&&samples>=3&&traces>=4&&Number.isFinite(dimError)&&dimError<=0.065&&(!Number.isFinite(areaRatio)||(areaRatio>=0.62&&areaRatio<=1.18));
+}
+async function enforceStructuralProfileAuthority(result,componentName=''){
   const profile=result?.code==='structural-profile'?(result.profile||null):(result?.diagnostics?.structuralProfile||null);
   if(!profile)return{result,match:null,authoritative:false};
-  let match=null;
-  try{match=await matchAiscProfile(profile);}catch(error){console.warn('[NavoFlo deterministic profile authority]',error);}
-  const authoritative=Boolean(result?.ok&&Number(result?.bendCount)>0&&isStrongStructuralProfileAuthority(profile,match));
-  if(!authoritative)return{result:match&&result?.code==='structural-profile'?{...result,standardMatch:match}:result,match,authoritative:false};
+  let match=null,namedMatch=null;
+  try{
+    [match,namedMatch]=await Promise.all([matchAiscProfile(profile),matchAiscProfileWithName(profile,componentName)]);
+  }catch(error){console.warn('[NavoFlo deterministic profile authority]',error);}
+  const preferred=namedMatch||match;
+  const authoritative=Boolean(result?.ok&&Number(result?.bendCount)>0&&(isStrongNamedStructuralAuthority(profile,namedMatch)||isStrongStructuralProfileAuthority(profile,match)));
+  if(!authoritative)return{result:preferred&&result?.code==='structural-profile'?{...result,standardMatch:preferred}:result,match:preferred,authoritative:false};
   return{
     result:{
-      ok:false,code:'structural-profile',profile:true,profileType:profile.kind||'constant-section-profile',profile,standardMatch:match,
-      message:'A standard structural profile is proven by invariant cross-sections + AISC geometry; sheet-metal bend interpretation is suppressed.',
-      diagnostics:{...(result?.diagnostics||{}),structuralProfile:profile,structuralProfileAuthority:{source:'multi-section+AISC',level:match.level,confidence:match.confidence,imperialLabel:match.imperialLabel||null,metricLabel:match.metricLabel||null}}
+      ok:false,code:'structural-profile',profile:true,profileType:profile.kind||'constant-section-profile',profile,standardMatch:preferred,
+      message:'A standard structural profile is proven by STEP hierarchy metadata + invariant cross-sections + AISC geometry; sheet-metal bend interpretation is suppressed.',
+      diagnostics:{...(result?.diagnostics||{}),structuralProfile:profile,structuralProfileAuthority:{source:namedMatch?'inventor-name+multi-section+AISC':'multi-section+AISC',level:preferred?.level||null,confidence:preferred?.confidence||null,imperialLabel:preferred?.imperialLabel||null,metricLabel:preferred?.metricLabel||null}}
     },
-    match,authoritative:true
+    match:preferred,authoritative:true
   };
 }
 async function scheduleManufacturingMlReview(localKnowledge,sheetResult,docId=activeModelDocumentId,file=currentFile,stepRef=currentStepResult){
@@ -1721,7 +1752,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       const manufacturingByGeometry=new Map();
       for(const geometry of geometries){
         if(currentStepResult!==stepRef)return null;
-        const componentName=componentNameForGeometry(geometry),fastenerHint=fastenerNameHint(componentName);
+        const componentName=componentNameForGeometry(geometry),fastenerHint=fastenerNameHint(componentName),structuralNameHint=aiscDesignationHint(componentName);
         let exact,result,profileStandardMatch=null;
         const analyzeWith=info=>analyzeAndUnfold({
           geometry,
@@ -1738,18 +1769,18 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           // bent part can contain hundreds of cylindrical hole faces and thousands
           // of edges; none of those hole descriptors are needed to prove its bends.
           exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});
-          const fastResult=analyzeWith(exact),fastAuthority=await enforceStructuralProfileAuthority(fastResult);
+          const fastResult=analyzeWith(exact),fastAuthority=await enforceStructuralProfileAuthority(fastResult,componentName);
           result=fastAuthority.result;profileStandardMatch=fastAuthority.match||null;
           // Full exact manufacturing metadata is normally skipped for a proven
           // perforated bent sheet.  We still request it for anything ambiguous,
           // for a structural-profile candidate, or when Inventor metadata says
           // the component is hardware.  This preserves UI responsiveness while
           // keeping the deterministic classifier authoritative.
-          if(Boolean(fastenerHint?.recognized)||!(result?.ok&&(Number(result.bendCount)||0)>0)){
+          if(Boolean(fastenerHint?.recognized)||Boolean(structuralNameHint)||!(result?.ok&&(Number(result.bendCount)||0)>0)){
             try{
               const fullExact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});
               exact=fullExact;
-              const fullAuthority=await enforceStructuralProfileAuthority(analyzeWith(fullExact));
+              const fullAuthority=await enforceStructuralProfileAuthority(analyzeWith(fullExact),componentName);
               result=fullAuthority.result;profileStandardMatch=fullAuthority.match||profileStandardMatch;
             }catch(error){
               if(!result?.ok)throw error;
@@ -1765,7 +1796,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
               faceInfo:exact?.faces||[],
               edgeInfo:exact?.edges||[],
               sheetResult:result?.ok||result?.code==='rolled-plate'?result:null,
-              structuralProfile:result?.code==='structural-profile'?(result.profile||null):null,
+              structuralProfile:result?.code==='structural-profile'?(result.profile||null):(result?.diagnostics?.structuralProfile||null),
               componentName
             });
           }catch(error){console.warn('[NavoFlo Manufacturing Recognition Engine]',error);}
@@ -2831,7 +2862,10 @@ function pickSelectionCandidate(clientX,clientY) {
   // vertex wins only when cursor is very close; edge next; otherwise face.
   if (vertexCandidate && vertexCandidate.px<=11) return vertexCandidate.selection;
   if (edgeCandidate && edgeCandidate.px<=7) return edgeCandidate.selection;
-  return faceCandidate?.selection || edgeCandidate?.selection || vertexCandidate?.selection || null;
+  // In Auto mode an edge/vertex outside the visual snap aperture is NOT a hit.
+  // THREE.Line ray thresholds are world-space and could otherwise catch a remote
+  // edge on an empty-looking click, preventing CAD-style deselection.
+  return faceCandidate?.selection || null;
 }
 
 function selectionIncludesCandidate(grouped,candidate){
@@ -4355,11 +4389,11 @@ function manufacturingFeatureText(c){
     'axial-bore':'axial bore','blind-axial-bore':'blind axial bore','blind-hole':'blind hole','through-hole':'through hole','through-slot':'through slot','through-profile':'through profile','through-passage':'through passage','cross-hole':'cross drilling','offset-bore':'offset bore',
     'counterbore':'counterbore','countersink':'countersink','annular-groove':'annular groove','groove-fillet':'groove/fillet','pocket-floor':'pocket','countersink-chamfer':'countersink/chamfer','edge-chamfer':'machined chamfer','one-sided-recess':'one-sided recess / pocket'
   };
-  const counts=new Map();for(const f of c?.featureInstances||[]){const key=labels[f.type]||f.type;counts.set(key,(counts.get(key)||0)+1);}return [...counts].map(([k,n])=>n>1?`${k} ×${n}`:k).join(' · ')||'—';
+  const counts=new Map();for(const f of c?.featureInstances||[]){if(f?.parameters?.advisoryOnly)continue;const key=labels[f.type]||f.type;counts.set(key,(counts.get(key)||0)+1);}return [...counts].map(([k,n])=>n>1?`${k} ×${n}`:k).join(' · ')||'—';
 }
 function ensureManufacturingSection(){
   const drawer=E.propsDrawer,anchor=drawer?.querySelector?.('.drawer-stats');if(!drawer||!anchor)return null;let section=$('manufacturing-section');if(!section){section=document.createElement('div');section.id='manufacturing-section';section.className='drawer-section';anchor.after(section);}
-  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.21.0 · B-Rep/AAG + multi-sections + preuves topologiques + ML optionnel':'MRE V8.21.0 · B-Rep/AAG + multi-sections + topology proofs + optional ML'}</p>`;
+  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.21.1 · preuves géométriques hiérarchisées · ML consultatif':'MRE V8.21.1 · hierarchical geometry proofs · advisory ML'}</p>`;
   return section;
 }
 function updateManufacturingUI(){
@@ -4644,7 +4678,7 @@ async function clearModel(showMessage=true) {
   modelRoot.position.set(0,0,0);
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();logicalEdgeGroupCache=new Map();logicalHiddenEdgeKeys.clear();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];manufacturingCapability=null;
-  currentAssemblyFocus=null;currentAssemblyMode=false;currentAssemblyHierarchyAvailable=false;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();assemblyTreeRecords=new Map();assemblySyntheticGroups.clear();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblySelectedKey=null;assemblyContextKey=null;
+  currentAssemblyFocus=null;currentAssemblyMode=false;currentAssemblyHierarchyAvailable=false;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();assemblyTreeRecords=new Map();assemblySyntheticGroups.clear();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblyHighlightedMeshes.clear();assemblySelectedKey=null;assemblyContextKey=null;
   resetSheetMetalForModel();
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;multiMeasureEnabled=false;
   cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;

@@ -67,13 +67,15 @@ function link(faces,id,neighbors){faces.find(f=>f.id===id).neighborFaceIds=neigh
   assert.ok(preserved.featureInstances.some(f=>f.type==='counterbore'));
 }
 
-// 5) ML blind-hole evidence can upgrade an otherwise clean plate.
+// 5) V8.21.1 safety policy: advisory ML can flag a possible blind hole, but cannot
+// upgrade a clean plate to machining without exact OCCT/topology proof.
 {
   const base={stock:{stockType:'plate-blank'},stockType:'plate-blank',capabilities:{directFlatDxf:true},processes:{cutting:true,machining:false},featureInstances:[],evidence:[],features:{},diagnostics:{needsMlReview:true},confidence:.9};
   const ml={ok:true,engine:'AAGNet',confidence:.94,features:[{name:'blind_hole',confidence:.94,faces:[2],faceIdDomain:'pythonocc-topology-order-advisory'}]};
   const enhanced=applyManufacturingMlPrediction(base,{sheetResult:flatResult(),mlPrediction:ml});
-  assert.equal(enhanced.processes.machining,true);
-  assert.ok(enhanced.featureInstances.some(f=>f.type==='blind-hole'));
+  assert.equal(enhanced.processes.machining,false);
+  assert.equal(enhanced.processes.possibleMachining,true);
+  assert.ok(enhanced.featureInstances.some(f=>f.type==='blind-hole'&&f.parameters?.advisoryOnly));
 }
 
 console.log('V8.20 manufacturing regression contract: PASS');

@@ -1,4 +1,4 @@
-/* NavoFlo V8.21.0 — Manufacturing Recognition Engine (MRE)
+/* NavoFlo V8.21.1 — Manufacturing Recognition Engine (MRE)
  *
  * Architecture:
  *   exact B-Rep/AAG -> stock hypothesis -> virtual delta/removal features
@@ -11,8 +11,8 @@
  */
 import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.20.0';
 import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.20.0';
-import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.21.0';
-import { detectFastenerComponent, FASTENER_RECOGNIZER_VERSION } from './fastener-recognition.js?v=8.21.0';
+import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.21.1';
+import { detectFastenerComponent, FASTENER_RECOGNIZER_VERSION } from './fastener-recognition.js?v=8.21.1';
 
 const EPS=1e-8;
 const V={
@@ -503,11 +503,16 @@ function compatibilityProjection(stock,legacy,processes,features,evidence){
 export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sheetResult=null,structuralProfile=null,mlPrediction=null,componentName=null}={}){
   const aag=buildAttributedAdjacencyGraph(faceInfo,edgeInfo);
   const fastener=detectFastenerComponent({name:componentName||geometry?.name||'',geometry,faceInfo,edgeInfo});
-  if(fastener?.recognized&&Number(fastener.confidence)>=0.92){
+  const fastenerConfidence=Number(fastener?.confidence)||0,fastenerNamed=String(fastener?.source||'').includes('name');
+  // Hardware exclusion is deliberately asymmetric: a false positive can hide a
+  // real fabricated gusset from DXF/analysis. Geometry-only hardware therefore
+  // needs near-canonical proof; explicit Inventor/Content Center names may use a
+  // slightly lower threshold because the B-Rep is still checked by the recognizer.
+  if(fastener?.recognized&&(fastenerNamed?fastenerConfidence>=0.94:fastenerConfidence>=0.965)){
     const processes={cutting:false,bending:false,rolling:false,turning:false,drilling:false,milling:false,machining:false,profile:false,fastener:true};
     const stock={stockType:'fastener',fastenerType:fastener.type,lengthMm:Number(fastener.lengthMm)||null,diameterMm:Number(fastener.diameterMm)||null,confidence:Number(fastener.confidence)||0.95,source:fastener.source||'deterministic-fastener',fastener};
     return{
-      kind:'manufacturing-knowledge',knowledgeVersion:5,classification:'fastener',stockType:'fastener',fastenerType:fastener.type,fastener,stock,
+      kind:'manufacturing-knowledge',knowledgeVersion:6,classification:'fastener',stockType:'fastener',fastenerType:fastener.type,fastener,stock,
       lengthMm:stock.lengthMm,diameterMm:stock.diameterMm,confidence:stock.confidence,machined:false,process:'fastener',processes,
       capabilities:{unfold:false,export2dDxf:false,directFlatDxf:false,structuralProfile:false,rolledPlate:false,fastener:true},
       featureInstances:[],features:{recognizedInstances:0,secondaryMachining:false,definiteMachiningInstances:0,throughCutInstances:0},
@@ -527,18 +532,21 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   features=dedupeFeatures(features);
   const processes=processSummary(features,{sheetResult,structuralProfile});
   const suppressFlatDxf=strongRoundShaft(stock,processes,features);
+  const structural=Boolean(structuralProfile);
   const capabilities={
-    unfold:Boolean(sheetResult?.ok&&Number(sheetResult?.bendCount)>0),
-    export2dDxf:Boolean(sheetResult?.ok&&(Number(sheetResult?.bendCount)>0||sheetResult?.flatPlate)&&!suppressFlatDxf),
-    directFlatDxf:Boolean(sheetResult?.ok&&sheetResult?.flatPlate&&!suppressFlatDxf),
-    structuralProfile:Boolean(structuralProfile),
+    // A proven structural profile has authority over local fillet cylinders that
+    // happen to look like press-brake bend pairs.  Never expose unfold/DXF for it.
+    unfold:Boolean(!structural&&sheetResult?.ok&&Number(sheetResult?.bendCount)>0),
+    export2dDxf:Boolean(!structural&&sheetResult?.ok&&(Number(sheetResult?.bendCount)>0||sheetResult?.flatPlate)&&!suppressFlatDxf),
+    directFlatDxf:Boolean(!structural&&sheetResult?.ok&&sheetResult?.flatPlate&&!suppressFlatDxf),
+    structuralProfile:structural,
     rolledPlate:Boolean(sheetResult?.rolledPlate||stock?.stockType==='rolled-plate')
   };
   const evidence=evidenceFromFeatures(features,legacy,{stock}),compat=compatibilityProjection(stock,legacy,processes,features,evidence);
   const machineConfidence=featureConfidence(features),stockConfidence=Number(stock?.confidence)||0;
   let classification='solid';
-  if(capabilities.unfold)classification='sheet-metal';
-  else if(structuralProfile)classification='structural-profile';
+  if(structuralProfile)classification='structural-profile';
+  else if(capabilities.unfold)classification='sheet-metal';
   else if(capabilities.directFlatDxf&&processes.machining)classification='cuttable-plate-machined';
   else if(capabilities.directFlatDxf)classification='cuttable-plate';
   else if(stock?.stockType==='rolled-plate')classification=processes.machining?'rolled-plate-machined':'rolled-plate';
@@ -555,7 +563,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   const localConfidence=clamp(Math.max(stockConfidence,machineConfidence*0.96));
   const base={
     ...compat,
-    kind:'manufacturing-knowledge',knowledgeVersion:5,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
+    kind:'manufacturing-knowledge',knowledgeVersion:6,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
     aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount},
     confidence:localConfidence,
     diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,surfaceSignals:signals,
@@ -564,8 +572,8 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   };
   base.diagnostics.needsMlReview=computeNeedsMlReview({classification,capabilities,processes,features,signals,stock,confidence:localConfidence});
   const finalKnowledge=arbitrateManufacturingKnowledge(base,{sheetResult,mlPrediction});
-  finalKnowledge.classification=finalKnowledge.capabilities?.unfold?'sheet-metal':
-    finalKnowledge.capabilities?.structuralProfile?'structural-profile':
+  finalKnowledge.classification=finalKnowledge.capabilities?.structuralProfile?'structural-profile':
+    finalKnowledge.capabilities?.unfold?'sheet-metal':
     finalKnowledge.capabilities?.directFlatDxf&&finalKnowledge.processes?.machining?'cuttable-plate-machined':
     finalKnowledge.capabilities?.directFlatDxf?'cuttable-plate':
     finalKnowledge.stock?.stockType==='rolled-plate'?(finalKnowledge.processes?.machining?'rolled-plate-machined':'rolled-plate'):
@@ -578,7 +586,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
 export function applyManufacturingMlPrediction(knowledge,{sheetResult=null,mlPrediction=null}={}){
   if(!knowledge||!mlPrediction?.ok)return knowledge;
   const out=arbitrateManufacturingKnowledge(knowledge,{sheetResult,mlPrediction});
-  out.classification=out.capabilities?.unfold?'sheet-metal':out.capabilities?.structuralProfile?'structural-profile':out.capabilities?.directFlatDxf&&out.processes?.machining?'cuttable-plate-machined':out.capabilities?.directFlatDxf?'cuttable-plate':out.stock?.stockType==='rolled-plate'?(out.processes?.machining?'rolled-plate-machined':'rolled-plate'):out.processes?.machining?'machined-part':out.stock?'stock-profile':'solid';
+  out.classification=out.capabilities?.structuralProfile?'structural-profile':out.capabilities?.unfold?'sheet-metal':out.capabilities?.directFlatDxf&&out.processes?.machining?'cuttable-plate-machined':out.capabilities?.directFlatDxf?'cuttable-plate':out.stock?.stockType==='rolled-plate'?(out.processes?.machining?'rolled-plate-machined':'rolled-plate'):out.processes?.machining?'machined-part':out.stock?'stock-profile':'solid';
   out.confidence=clamp(Math.max(Number(out.confidence)||0,Number(mlPrediction.confidence)||0));
   out.diagnostics={...(out.diagnostics||{}),needsMlReview:false,mlReviewed:true};
   return out;

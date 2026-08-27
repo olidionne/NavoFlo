@@ -1,4 +1,4 @@
-/* NavoFlo V8.21.0 — Critical Manufacturing Arbitrator
+/* NavoFlo V8.21.1 — Critical Manufacturing Arbitrator
  *
  * The recognizers produce geometric feature hypotheses.  This module answers a
  * different question: does a recognized feature actually REQUIRE secondary
@@ -91,12 +91,37 @@ export function mergeFeaturePredictions(deterministic=[],mlPrediction=null,{plat
   const seen=new Set();return out.filter(f=>{const k=`${normalizeType(f.type)}:${keyFaces(f.faceIds)}`;if(seen.has(k))return false;seen.add(k);return true;});
 }
 
+function hasHardMachiningProof(feature,{plateContext=false}={}){
+  const type=normalizeType(feature?.type),p=feature?.parameters||{};
+  if(!type||THROUGH_CUT_TYPES.has(type))return false;
+  if(!plateContext)return DEFINITE_MACHINING_TYPES.has(type)||['turning','drilling','milling'].includes(String(feature?.process||''));
+  // On plate/sheet stock, a machining label is high-impact: only exact OCCT
+  // descriptors or topology that proves a one-sided cavity may promote it.
+  // ML, surface-family guesses and area deltas remain advisory.
+  if(p.ml===true||p.analyticFloor===true)return false;
+  if(p.exactCompoundHole===true)return true;
+  if(p.exactHole===true){
+    if(type==='cross-hole')return true;
+    if(type==='blind-hole'||type==='blind-axial-bore')return p.through!==true;
+    if(type==='counterbore'||type==='countersink')return true;
+  }
+  if(p.topologyProven===true){
+    if(['pocket-floor','blind-pocket','blind-slot','one-sided-recess','annular-groove','groove-fillet','countersink-chamfer','edge-chamfer','oring-groove'].includes(type))return true;
+    if(['counterbore','countersink','blind-hole','cross-hole'].includes(type))return true;
+  }
+  // Backward-compatible deterministic escape hatch for legacy recognizers that
+  // already emitted a near-certain local feature before proof flags existed.
+  // Advisory ML can never use this path.
+  if(p.ml!==true&&Number(feature?.confidence)>=0.985&&['counterbore','countersink','blind-hole','blind-axial-bore','annular-groove'].includes(type))return true;
+  return false;
+}
+
 export function requiresSecondaryMachining(feature,{plateContext=false}={}){
   const type=normalizeType(feature?.type);if(!type)return false;
   if(THROUGH_CUT_TYPES.has(type))return false;
   if(type==='cross-hole'&&plateContext&&feature?.parameters?.throughCutEquivalent)return false;
   if(type==='pocket-floor'&&plateContext&&feature?.parameters?.throughCutEquivalent)return false;
-  return DEFINITE_MACHINING_TYPES.has(type)||['turning','drilling','milling'].includes(String(feature?.process||''));
+  return hasHardMachiningProof(feature,{plateContext});
 }
 
 export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPrediction=null}={}){
@@ -104,19 +129,13 @@ export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPr
   const out={...knowledge};
   const plateContext=Boolean(out?.capabilities?.directFlatDxf||sheetResult?.flatPlate||out?.stock?.stockType==='plate-blank'||(out?.stock?.stockType==='round-bar'&&Number(out?.stock?.aspect)<0.45));
   const localFeatures=[...(out.featureInstances||[])];
-  // Hard analytic floor. If the exact STEP worker reports surface families that
-  // cannot be produced by a normal 2D profile cut, do not allow higher-level
-  // component grouping to accidentally erase that evidence. These synthetic
-  // features carry no face IDs on purpose: they are a process proof, not a
-  // selection/highlight claim.
-  if(plateContext){
-    const sig=out?.diagnostics?.surfaceSignals||{};
-    const has=t=>localFeatures.some(f=>normalizeType(f.type)===t);
-    if(Number(sig.compoundHoles)>0&&!has('counterbore')&&!has('countersink'))localFeatures.push({type:'counterbore',process:'drilling',faceIds:[],confidence:.955,parameters:{analyticFloor:true,count:Number(sig.compoundHoles)}});
-    if(Number(sig.blindCylinders)>0&&!has('blind-hole'))localFeatures.push({type:'blind-hole',process:'drilling',faceIds:[],confidence:.985,parameters:{analyticFloor:true,exactHole:true,count:Number(sig.blindCylinders)}});
-  }
-  const features=mergeFeaturePredictions(localFeatures,mlPrediction,{plateContext});
-  const definite=features.filter(f=>requiresSecondaryMachining(f,{plateContext}));
+  const merged=mergeFeaturePredictions(localFeatures,mlPrediction,{plateContext});
+  const definite=merged.filter(f=>requiresSecondaryMachining(f,{plateContext}));
+  const definiteSet=new Set(definite);
+  const ambiguous=merged.filter(f=>!definiteSet.has(f)&&DEFINITE_MACHINING_TYPES.has(normalizeType(f.type)));
+  // Preserve hypotheses for diagnostics/ML review, but mark them advisory so the
+  // UI and manufacturing decision cannot present an unproven pocket as fact.
+  const features=merged.map(f=>definiteSet.has(f)||THROUGH_CUT_TYPES.has(normalizeType(f.type))?f:{...f,parameters:{...(f.parameters||{}),advisoryOnly:true}});
   const throughCuts=features.filter(f=>THROUGH_CUT_TYPES.has(normalizeType(f.type)));
   const turning=definite.some(f=>TURNING_TYPES.has(normalizeType(f.type))||f.process==='turning');
   const drilling=definite.some(f=>DRILLING_TYPES.has(normalizeType(f.type))||f.process==='drilling');
@@ -124,11 +143,11 @@ export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPr
   const machining=turning||drilling||milling;
   const cutting=Boolean(out?.processes?.cutting||out?.capabilities?.directFlatDxf||throughCuts.length);
   out.featureInstances=features;
-  out.processes={...(out.processes||{}),cutting,turning,drilling,milling,machining};
+  out.processes={...(out.processes||{}),cutting,turning,drilling,milling,machining,possibleMachining:!machining&&ambiguous.length>0};
   out.machined=machining;
   out.process=machining?'machining':'stock-profile';
-  out.features={...(out.features||{}),recognizedInstances:features.length,secondaryMachining:machining,definiteMachiningInstances:definite.length,throughCutInstances:throughCuts.length};
-  out.diagnostics={...(out.diagnostics||{}),criticalArbitrator:true,mlUsed:Boolean(mlPrediction?.ok),mlEngine:mlPrediction?.engine||null,definiteMachiningCount:definite.length,throughCutCount:throughCuts.length};
+  out.features={...(out.features||{}),recognizedInstances:features.length,secondaryMachining:machining,definiteMachiningInstances:definite.length,ambiguousMachiningInstances:ambiguous.length,throughCutInstances:throughCuts.length};
+  out.diagnostics={...(out.diagnostics||{}),criticalArbitrator:true,mlUsed:Boolean(mlPrediction?.ok),mlEngine:mlPrediction?.engine||null,definiteMachiningCount:definite.length,ambiguousMachiningCount:ambiguous.length,throughCutCount:throughCuts.length,proofPolicy:'hard-geometry-before-machining'};
 
   const evidence=new Set(out.evidence||[]);
   // Rebuild manufacturing evidence from the final feature set, otherwise stale
@@ -147,4 +166,4 @@ export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPr
   return out;
 }
 
-export const CRITICAL_ARBITRATOR_VERSION='8.21.0';
+export const CRITICAL_ARBITRATOR_VERSION='8.21.1';

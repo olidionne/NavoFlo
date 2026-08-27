@@ -1,4 +1,4 @@
-// NavoFlo V8.20.1 — local structural-shape matcher (AISC + geometric open-section guard).
+// NavoFlo V8.21.1 — local structural-shape matcher (AISC + Inventor metadata + geometric proof).
 //
 // The AISC table is loaded lazily only after Navo3D has already classified the
 // STEP body as a long constant-section structural profile/extrusion. Matching is
@@ -8,12 +8,29 @@
 // intact perpendicular section sampled from the real STEP mesh. This makes stock
 // identification resilient to drilled holes, copes, slots and angled end cuts.
 
-const DB_URL='/data/aisc-shapes-v16.json?v=16.0-nf8201';
+const DB_URL='/data/aisc-shapes-v16.json?v=16.0-nf8211';
 let dbPromise=null;
 
 function finite(v){if(v==null||v===''||v==='–')return null;const n=Number(v);return Number.isFinite(n)?n:null;}
 function clamp(v,a=0,b=1){return Math.max(a,Math.min(b,v));}
 function pairSorted(a,b){return [Number(a)||0,Number(b)||0].sort((x,y)=>y-x);}
+
+function normalizeAiscLabel(value){
+  return String(value||'').toUpperCase().replace(/×/g,'X').replace(/\s+/g,'').replace(/[–—]/g,'-');
+}
+export function aiscDesignationHint(name){
+  const raw=String(name||'').toUpperCase().replace(/×/g,'X').replace(/[–—]/g,'-');
+  // Structural designations exported by Inventor/Content Center commonly appear
+  // inside occurrence names, e.g. "105101P02_AISC - W 36x170".  We deliberately
+  // recognize only canonical families and require B-Rep agreement later.
+  const m=raw.match(/(?:^|[^A-Z0-9])(W|M|S|HP|C|MC|WT|MT|ST)\s*([0-9]+(?:\.[0-9]+)?)\s*X\s*([0-9]+(?:\.[0-9]+)?)(?=$|[^0-9.])/i);
+  if(m)return normalizeAiscLabel(`${m[1]}${m[2]}X${m[3]}`);
+  const hss=raw.match(/(?:^|[^A-Z0-9])(HSS)\s*([0-9]+(?:[- ][0-9]+\/[0-9]+|\.[0-9]+)?)[ X]([0-9]+(?:[- ][0-9]+\/[0-9]+|\.[0-9]+)?)\s*X\s*([0-9]+(?:\/[0-9]+|\.[0-9]+)?)/i);
+  if(hss)return normalizeAiscLabel(`${hss[1]}${hss[2]}X${hss[3]}X${hss[4]}`);
+  const pipe=raw.match(/(?:^|[^A-Z0-9])(PIPE)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:STD|XS|XXS)?/i);
+  if(pipe)return normalizeAiscLabel(`${pipe[1]}${pipe[2]}`);
+  return null;
+}
 
 function reliableSectionFingerprint(profile){
   return Number(profile?.sectionAreaSampleCount)>=3&&Number.isFinite(Number(profile?.stockSectionArea))&&Number.isFinite(Number(profile?.sectionHoleCount));
@@ -181,5 +198,39 @@ export function matchAiscProfileData(profile,db){
   const confidence=clamp(dimQuality*0.42+areaQuality*0.31+gapQuality*0.17+sampleQuality*0.10);
   return{...best,level,confidence,gap,profileLengthMm:finite(profile?.length),sectionComponentCount:finite(profile?.sectionComponentCount),sectionHoleCount:finite(profile?.sectionHoleCount),nextCandidates:candidates.slice(1,4).map(c=>({type:c.type,imperialLabel:c.imperialLabel,metricLabel:c.metricLabel,score:c.score}))};
 }
+
+
+function rowDesignation(row,db){
+  return [value(row,db,'imperial_edi'),value(row,db,'imperial_manual'),value(row,db,'AISC_Manual_Label'),value(row,db,'EDI_Std_Nomenclature')].map(normalizeAiscLabel).filter(Boolean);
+}
+export function matchAiscProfileWithNameData(profile,name,db){
+  const hint=aiscDesignationHint(name);if(!hint||!profile||!db?.rows?.length||!db?.index)return null;
+  const row=db.rows.find(r=>rowDesignation(r,db).includes(hint));if(!row)return null;
+  const type=String(value(row,db,'type')||'');if(!topologyCompatible(profile,type))return null;
+  const dims=candidateDimensions(row,db),actual=pairSorted(profile?.spanU,profile?.spanV);if(!dims||!(actual[0]>0&&actual[1]>0))return null;
+  const standard=pairSorted(...dims),absErr=[Math.abs(actual[0]-standard[0]),Math.abs(actual[1]-standard[1])],relErr=[absErr[0]/standard[0],absErr[1]/standard[1]],maxDim=Math.max(...relErr);
+  // Metadata is a prior, never a bypass.  The measured B-Rep envelope must still
+  // agree with the named AISC shape.  6.5% is intentionally looser than the pure
+  // geometry matcher because cope/end cuts and tessellation can reduce a sampled
+  // section, while still being tight enough to reject an unrelated part name.
+  if(maxDim>0.065&&Math.max(...absErr)>Math.max(8,Math.max(...standard)*0.055))return null;
+  const dbArea=finite(value(row,db,'A')),sampledArea=finite(profile?.stockSectionArea),averageArea=finite(profile?.averageSectionArea),measuredArea=sampledArea||averageArea;
+  const areaRatio=dbArea&&measuredArea?measuredArea/dbArea:null;if(Number.isFinite(areaRatio)&&(areaRatio<0.62||areaRatio>1.18))return null;
+  const samples=Number(profile?.sectionAreaSampleCount)||0,side=Number(profile?.sideAreaRatio)||0,aspect=Number(profile?.aspect)||0,traces=Number(profile?.traceCount)||0;
+  if(samples<3||side<0.48||aspect<1.35||traces<4)return null;
+  const base=candidateFromRow(row,db,profile)||{};
+  const dimQ=clamp(1-maxDim/0.065),areaQ=Number.isFinite(areaRatio)?clamp(1-Math.abs(areaRatio-1)/0.38):0.65,stable=clamp(Number(profile?.sectionStableFraction)||0.55);
+  const confidence=clamp(0.86+dimQ*0.06+areaQ*0.035+stable*0.025);
+  return{
+    ...base,type,sourceKind:'assembly-name+geometry',designationHint:hint,
+    imperialEdi:value(row,db,'imperial_edi')||base.imperialEdi||hint,imperialLabel:value(row,db,'imperial_manual')||value(row,db,'imperial_edi')||base.imperialLabel||hint,
+    metricEdi:value(row,db,'EDI_Std_Nomenclature')||base.metricEdi||null,metricLabel:value(row,db,'AISC_Manual_Label')||value(row,db,'EDI_Std_Nomenclature')||base.metricLabel||null,
+    standardDimensionsMm:standard,measuredDimensionsMm:actual,dimensionErrorsMm:absErr,maxDimensionErrorRatio:maxDim,
+    measuredAreaMm2:measuredArea,measuredStockAreaMm2:sampledArea,measuredAverageAreaMm2:averageArea,areaRatio,
+    level:confidence>=0.93?'high':'probable',confidence,gap:1,profileLengthMm:finite(profile?.length),sectionComponentCount:finite(profile?.sectionComponentCount),sectionHoleCount:finite(profile?.sectionHoleCount),
+    sourceVersion:`${db.version||'AISC Shapes Database v16.0'} + STEP hierarchy metadata`
+  };
+}
+export async function matchAiscProfileWithName(profile,name){const db=await loadAiscShapes();return matchAiscProfileWithNameData(profile,name,db);}
 
 export async function matchAiscProfile(profile){const db=await loadAiscShapes();return matchAiscProfileData(profile,db);}
