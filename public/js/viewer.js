@@ -6,7 +6,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
 import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.9';
-import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.18.0';
+import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.18.1';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.9';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
@@ -1240,12 +1240,14 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       if(!geometries.length){if(!quiet)setSheetMetalStatus(SMT.unfoldFailed+' · géométrie introuvable','warn');return null;}
 
       let best=null,bestScore=-Infinity,bestFailure=null,bestProfile=null,bestManufacturing=null;
+      const manufacturingByGeometry=new Map();
       for(const geometry of geometries){
         if(currentStepResult!==stepRef)return null;
         let exact;
         try{exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});}catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
-        const manufacturing=classifyManufacturingGeometry({geometry,faceInfo:exact?.faces||[],edgeInfo:exact?.edges||[]});
-        if(manufacturing&&(!bestManufacturing||(Number(manufacturing.confidence)||0)>(Number(bestManufacturing.confidence)||0)))bestManufacturing={...manufacturing,geometryId:String(geometry.id)};
+        let manufacturing=null;
+        try{manufacturing=classifyManufacturingGeometry({geometry,faceInfo:exact?.faces||[],edgeInfo:exact?.edges||[]});}
+        catch(error){console.warn('[NavoFlo manufacturing classifier]',error);}
         const result=analyzeAndUnfold({
           geometry,
           faceInfo:exact?.faces||[],
@@ -1258,14 +1260,27 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
         });
         if(!result?.ok){
           if(result?.code==='structural-profile'){
+            // Structural/extruded steel profile detection is authoritative.  A W/L/C/HSS
+            // envelope can also fit inside a rectangular/square raw-stock box, so the
+            // generic machining classifier must never steal it from the AISC matcher.
             const confidence=Number(result?.profile?.confidence)||0;
             if(!bestProfile||confidence>(Number(bestProfile?.profile?.confidence)||0))bestProfile={...result,geometryId:String(geometry.id)};
             continue;
+          }
+          if(manufacturing){
+            const tagged={...manufacturing,geometryId:String(geometry.id)};
+            manufacturingByGeometry.set(String(geometry.id),tagged);
+            if(!bestManufacturing||(Number(tagged.confidence)||0)>(Number(bestManufacturing.confidence)||0))bestManufacturing=tagged;
           }
           // Prefer a meaningful bend/thickness failure over a generic no-bends
           // result when an assembly contains several unrelated solids.
           if(!bestFailure||bestFailure.code==='no-bends')bestFailure=result;
           continue;
+        }
+        if(manufacturing){
+          const tagged={...manufacturing,geometryId:String(geometry.id)};
+          manufacturingByGeometry.set(String(geometry.id),tagged);
+          if(!bestManufacturing||(Number(tagged.confidence)||0)>(Number(bestManufacturing.confidence)||0))bestManufacturing=tagged;
         }
         const area=Math.max(Number(result.bounds?.width)||0,0)*Math.max(Number(result.bounds?.height)||0,0);
         const score=(Number(result.bendCount)||0)*1e12+(Number(result.panelCount)||0)*1e9+area;
@@ -1273,16 +1288,17 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       }
 
       if(currentStepResult!==stepRef)return null;
-      manufacturingCapability=bestManufacturing;
       if(!best){
         flatPatternResult=null;clearFlatPattern();
         if(bestProfile){
+          manufacturingCapability=null;
           sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
           syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateProfileStandardUI();updateManufacturingUI();
           void resolveProfileStandardMatch(sheetMetalCapability.profileData);
           if(!quiet)console.info('[NavoFlo profile detection]',bestProfile);
           return null;
         }
+        manufacturingCapability=bestManufacturing;
         syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateManufacturingUI();
         if(!quiet){
           console.warn('[NavoUnfold diagnostics]',bestFailure);
@@ -1297,6 +1313,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       const result=best.result;
       flatPatternResult=result;clearProfileStandardMatch();
       sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),profile:false,profileType:null,profileData:null};
+      manufacturingCapability=manufacturingByGeometry.get(String(best.geometry.id))||null;
       if((Number(result.bendCount)||0)>0)manufacturingCapability=null;
       sheetMetalState.fixedFace={geometryId:String(best.geometry.id),elementId:Number(result.fixedFaceId)};
       if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
@@ -3432,12 +3449,16 @@ function sectionPointKey(p,tol){return `${Math.round(p.x/tol)},${Math.round(p.y/
 function sectionTriangleSegment(a,b,c,plane,tol){
   const pts=[a,b,c],d=pts.map(p=>plane.distanceToPoint(p));
   if(d.every(x=>x>tol)||d.every(x=>x<-tol))return null;
-  if(d.every(x=>Math.abs(x)<=tol))return null; // coplanar face: neighbouring faces define the section boundary
+  if(d.every(x=>Math.abs(x)<=tol))return null; // coplanar source face is not itself a section boundary
   const hits=[];
-  const add=p=>{if(!hits.some(q=>q.distanceToSquared(p)<=tol*tol))hits.push(p);};
+  // V8.18.1: every cap point is projected back onto the mathematical clipping
+  // plane.  This prevents a vertex from a chamfer/angled end face that merely
+  // falls inside the welding tolerance from pulling the visual cap onto that
+  // angled face.
+  const add=p=>{const snapped=plane.projectPoint(p,new THREE.Vector3());if(!hits.some(q=>q.distanceToSquared(snapped)<=tol*tol))hits.push(snapped);};
   for(let i=0;i<3;i++){
     const j=(i+1)%3,p=pts[i],q=pts[j],dp=d[i],dq=d[j];
-    if(Math.abs(dp)<=tol)add(p.clone());
+    if(Math.abs(dp)<=tol)add(p);
     if((dp>tol&&dq<-tol)||(dp<-tol&&dq>tol))add(p.clone().lerp(q,dp/(dp-dq)));
   }
   if(hits.length<2)return null;
@@ -3455,7 +3476,10 @@ function sectionIntersectionSegments(){
       const ia=idx?idx.getX(t*3):t*3,ib=idx?idx.getX(t*3+1):t*3+1,ic=idx?idx.getX(t*3+2):t*3+2;
       a.fromBufferAttribute(pos,ia).applyMatrix4(source.matrixWorld);b.fromBufferAttribute(pos,ib).applyMatrix4(source.matrixWorld);c.fromBufferAttribute(pos,ic).applyMatrix4(source.matrixWorld);
       const seg=sectionTriangleSegment(a,b,c,clipPlane,tol);if(!seg)continue;
-      const ka=sectionPointKey(seg[0],tol),kb=sectionPointKey(seg[1],tol),key=ka<kb?`${ka}|${kb}`:`${kb}|${ka}`;if(dedupe.has(key))continue;dedupe.add(key);segments.push({a:seg[0].clone(),b:seg[1].clone(),ka,kb});
+      // Defensive exact-plane snap after world transforms as well.  The cap is a
+      // true section of the active clip plane, never a reuse of an angled end skin.
+      const sa=clipPlane.projectPoint(seg[0],new THREE.Vector3()),sb=clipPlane.projectPoint(seg[1],new THREE.Vector3());
+      const ka=sectionPointKey(sa,tol),kb=sectionPointKey(sb,tol),key=ka<kb?`${ka}|${kb}`:`${kb}|${ka}`;if(dedupe.has(key))continue;dedupe.add(key);segments.push({a:sa,b:sb,ka,kb});
     }
   }
   return{segments,tol};
@@ -3488,7 +3512,10 @@ function buildSectionCaps(){
   clearSectionCaps();if(!clipEnabled||flatPatternActive||!currentModel||!surfaceMeshes.length)return;
   const {segments,tol}=sectionIntersectionSegments();if(!segments.length)return;const loops3=sectionLoopsFromSegments(segments,tol);if(!loops3.length)return;
   const basis=sectionPlaneBasis(clipPlane.normal),origin=new THREE.Vector3();clipPlane.coplanarPoint(origin);
-  const loops=loops3.map(points3=>({points3,points2:points3.map(p=>{const d=p.clone().sub(origin);return new THREE.Vector2(d.dot(basis.u),d.dot(basis.v));})})).filter(l=>Math.abs(polygonArea2D(l.points2))>tol*tol);
+  const loops=loops3.map(points3=>{
+    const snapped=points3.map(p=>clipPlane.projectPoint(p,new THREE.Vector3()));
+    return{points3:snapped,points2:snapped.map(p=>{const d=p.clone().sub(origin);return new THREE.Vector2(d.dot(basis.u),d.dot(basis.v));})};
+  }).filter(l=>Math.abs(polygonArea2D(l.points2))>tol*tol);
   loops.sort((a,b)=>Math.abs(polygonArea2D(b.points2))-Math.abs(polygonArea2D(a.points2)));
   for(let i=0;i<loops.length;i++){let depth=0,parent=-1;for(let j=0;j<i;j++)if(pointInPoly2D(loops[i].points2[0],loops[j].points2)){depth++;if(parent<0)parent=j;}loops[i].depth=depth;loops[i].parent=parent;}
   const positions=[];
@@ -3496,10 +3523,18 @@ function buildSectionCaps(){
     const outer=loops[i];if(outer.depth%2)continue;let contour=outer.points2.slice();if(polygonArea2D(contour)<0)contour.reverse();
     const holes=[];for(let j=0;j<loops.length;j++)if(loops[j].depth===outer.depth+1&&loops[j].parent===i){let h=loops[j].points2.slice();if(polygonArea2D(h)>0)h.reverse();holes.push(h);}
     const faces=THREE.ShapeUtils.triangulateShape(contour,holes),all=[...contour,...holes.flat()];
-    for(const tri of faces)for(const vi of tri){const q=all[vi],p=origin.clone().addScaledVector(basis.u,q.x).addScaledVector(basis.v,q.y);positions.push(p.x,p.y,p.z);}
+    for(const tri of faces)for(const vi of tri){
+      const q=all[vi],p=origin.clone().addScaledVector(basis.u,q.x).addScaledVector(basis.v,q.y);
+      clipPlane.projectPoint(p,p);positions.push(p.x,p.y,p.z);
+    }
   }
   if(!positions.length)return;
-  const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));geometry.computeVertexNormals();
+  const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
+  // Keep one mathematically exact normal for the whole section cap.  Computing
+  // normals from triangulation can visually suggest an angled surface near a
+  // sharp/sloped end even though the section points are coplanar.
+  const normals=[];for(let i=0;i<positions.length/3;i++)normals.push(basis.n.x,basis.n.y,basis.n.z);
+  geometry.setAttribute('normal',new THREE.Float32BufferAttribute(normals,3));
   const material=new THREE.MeshStandardMaterial({color:0x93a0a5,metalness:0.04,roughness:0.68,side:THREE.DoubleSide,depthWrite:true,depthTest:true,polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1});
   const cap=new THREE.Mesh(geometry,material);cap.name='NavoFlo exact section cap';cap.renderOrder=20;cap.userData.sectionCapPlane=true;
   const root=new THREE.Group();root.name='NavoFlo Solid Section Cap';root.add(cap);sectionCapRoot=root;sectionCapPlaneMesh=cap;scene.add(root);
@@ -3611,8 +3646,7 @@ function profileThicknessText(m){
 }
 function updateProfileStandardUI(){
   const section=ensureProfileStandardSection();if(!section)return;
-  const genericStock=Boolean(manufacturingCapability&&['round-bar','square-bar','flat-bar','rectangular-bar','hex-bar'].includes(manufacturingCapability.stockType));
-  const active=Boolean(currentStepResult&&sheetMetalCapability.profile&&(!genericStock||currentProfileMatch));section.hidden=!active;if(!active)return;
+  const active=Boolean(currentStepResult&&sheetMetalCapability.profile);section.hidden=!active;if(!active)return;
   const m=currentProfileMatch,fields=[E.profileAiscLabel,E.profileMetricLabel,E.profileFamily,E.profileDimensions,E.profileThickness,E.profileArea,E.profileWeight,E.profileLength,E.profileTotalWeight,E.profileConfidence];
   if(!m){fields.forEach(e=>{if(e)e.textContent='—';});if(E.profileAiscLabel)E.profileAiscLabel.textContent=FR?'Analyse locale…':'Local analysis…';if(E.profileSource)E.profileSource.textContent='AISC Shapes Database v16.0 · LOCAL';return;}
   if(E.profileAiscLabel)E.profileAiscLabel.textContent=m.imperialLabel||m.imperialEdi||'—';
@@ -3630,7 +3664,6 @@ function updateProfileStandardUI(){
 async function resolveProfileStandardMatch(profile){
   const epoch=++profileMatchEpoch;currentProfileMatch=null;updateProfileStandardUI();
   if(!profile)return;
-  if(manufacturingCapability&&['round-bar','square-bar','flat-bar','rectangular-bar','hex-bar'].includes(manufacturingCapability.stockType)){updateGeometryTypeIndicator();updateManufacturingUI();return;}
   try{
     const match=await matchAiscProfile(profile);
     if(epoch!==profileMatchEpoch||!sheetMetalCapability.profile||sheetMetalCapability.profileData!==profile)return;
@@ -3666,7 +3699,6 @@ function updateGeometryTypeIndicator(){
   if(sheetMetalCapability.profile){
     const match=currentProfileMatch,label=match&&(match.level==='high'||match.level==='probable')?(match.imperialLabel||match.metricLabel):null;
     if(label){E.propType.textContent=`${FR?'Profilé AISC':'AISC profile'} · ${label}`;return;}
-    if(manufacturingCapability){E.propType.textContent=`${FR?'Profilé':'Profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
     const aspect=Number(sheetMetalCapability.profileData?.aspect),suffix=Number.isFinite(aspect)?` · L/C ${aspect.toFixed(1)}`:'';
     E.propType.textContent=(FR?'Profilé / extrusion':'Profile / extrusion')+suffix;return;
   }
