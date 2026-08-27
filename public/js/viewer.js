@@ -6,7 +6,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
 import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.9';
-import { buildManufacturingKnowledge } from './manufacturing-recognition-engine.js?v=8.19.0';
+import { buildManufacturingKnowledge } from './manufacturing-recognition-engine.js?v=8.19.1';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.9';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
@@ -80,7 +80,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.19.0';
+const WORKER_URL = '/js/step-worker.js?v=8.19.1';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -199,7 +199,7 @@ let baseMaterials = new Set();
 // File objects and per-document camera/unit state stay local in the browser.
 const modelDocuments=new Map();
 let activeModelDocumentId=null,modelDocumentSeq=0,modelDocumentBusy=false,pendingModelDocumentId=null;
-const MODEL_ANALYSIS_CACHE_VERSION=3;
+const MODEL_ANALYSIS_CACHE_VERSION=4;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -3828,11 +3828,11 @@ function manufacturingFeatureText(c){
   const labels=FR?{
     'turned-step':'diamètre tourné','turned-groove':'gorge tournée','turned-groove-fillet':'gorge/rayon tourné','turned-chamfer-taper':'chanfrein/conicité tournée','turned-shoulder':'épaulement tourné',
     'axial-bore':'alésage axial','blind-axial-bore':'alésage axial borgne','blind-hole':'trou borgne','through-hole':'trou traversant','cross-hole':'perçage transversal','offset-bore':'alésage décentré',
-    'counterbore':'lamage','countersink':'fraisure','annular-groove':'rainure annulaire','groove-fillet':'rainure/rayon','pocket-floor':'poche','countersink-chamfer':'fraisure/chanfrein'
+    'counterbore':'lamage','countersink':'fraisure','annular-groove':'rainure annulaire','groove-fillet':'rainure/rayon','pocket-floor':'poche','countersink-chamfer':'fraisure/chanfrein','one-sided-recess':'usinage sur une face / poche'
   }:{
     'turned-step':'turned diameter','turned-groove':'turned groove','turned-groove-fillet':'turned groove/fillet','turned-chamfer-taper':'turned chamfer/taper','turned-shoulder':'turned shoulder',
     'axial-bore':'axial bore','blind-axial-bore':'blind axial bore','blind-hole':'blind hole','through-hole':'through hole','cross-hole':'cross drilling','offset-bore':'offset bore',
-    'counterbore':'counterbore','countersink':'countersink','annular-groove':'annular groove','groove-fillet':'groove/fillet','pocket-floor':'pocket','countersink-chamfer':'countersink/chamfer'
+    'counterbore':'counterbore','countersink':'countersink','annular-groove':'annular groove','groove-fillet':'groove/fillet','pocket-floor':'pocket','countersink-chamfer':'countersink/chamfer','one-sided-recess':'one-sided recess / pocket'
   };
   const counts=new Map();for(const f of c?.featureInstances||[]){const key=labels[f.type]||f.type;counts.set(key,(counts.get(key)||0)+1);}return [...counts].map(([k,n])=>n>1?`${k} ×${n}`:k).join(' · ')||'—';
 }

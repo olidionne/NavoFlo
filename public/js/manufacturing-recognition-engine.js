@@ -1,4 +1,4 @@
-/* NavoFlo V8.19.0 — Manufacturing Recognition Engine (MRE)
+/* NavoFlo V8.19.1 — Manufacturing Recognition Engine (MRE)
  *
  * Architecture:
  *   exact B-Rep/AAG -> stock hypothesis -> virtual delta/removal features
@@ -9,7 +9,7 @@
  * contain a counterbore/groove; a shaft may be round stock AND heavily turned.
  * This module deliberately does not collapse those facts into one enum.
  */
-import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.19.0';
+import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.19.1';
 
 const EPS=1e-8;
 const V={
@@ -149,49 +149,99 @@ function plateContext(stock,sheetResult,faceInfo){
   if(!normal||!(t>EPS))return null;return{normal,thickness:t};
 }
 
-function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
-  const ctx=plateContext(stock,sheetResult,faceInfo);if(!ctx)return[];const {normal,thickness}=ctx,scale=Math.max(thickness,1),cyls=cylinderRecords(faceInfo),groups=groupCylinders(cyls,scale),features=[];
+function plateMachiningContext(faceInfo,aag,normal,thickness){
   const faceById=new Map((faceInfo||[]).map(f=>[Number(f.id),f]));
-  for(const g of groups){
-    const align=Math.abs(V.dot(g.axis,normal));
-    const neighbor=neighborFamilies(aag,g.faceIds),coneNeighbors=neighbor.neighborIds.filter(id=>fam(faceById.get(id)?.family)==='cone'),torusNeighbors=neighbor.neighborIds.filter(id=>fam(faceById.get(id)?.family)==='torus');
-    if(align>=0.985){
-      const spans=g.members.map(m=>m.span).filter(Number.isFinite),maxSpan=spans.length?Math.max(...spans):g.span,explicitThrough=g.members.some(m=>m.hole?.isThrough===true),explicitBlind=g.members.some(m=>m.hole&&m.hole.isThrough===false);
-      const spanRatio=Number.isFinite(maxSpan)?maxSpan/Math.max(thickness,EPS):null,full=explicitThrough||(Number.isFinite(spanRatio)&&spanRatio>=0.92),partial=explicitBlind||(Number.isFinite(spanRatio)&&spanRatio<0.90);
+  const planes=(faceInfo||[]).filter(f=>fam(f.family)==='plane').map(f=>({f,id:Number(f.id),n:canonicalAxis(f.localNormal),c:vec(f.localCentroid)||vec(f.localCenter),area:Number(f.area)||0})).filter(x=>x.n&&x.c);
+  const parallel=planes.filter(p=>Math.abs(V.dot(p.n,normal))>0.995);
+  if(parallel.length<2)return{faceById,planes,parallel,skinIds:new Set(),interiorPlanes:[],components:[],skinAreaRatio:null};
+  const values=parallel.map(p=>V.dot(p.c,normal)),lo=Math.min(...values),hi=Math.max(...values),tol=Math.max(thickness*0.035,1e-4);
+  const lowSkin=parallel.filter(p=>Math.abs(V.dot(p.c,normal)-lo)<=tol),highSkin=parallel.filter(p=>Math.abs(V.dot(p.c,normal)-hi)<=tol);
+  const skinIds=new Set([...lowSkin,...highSkin].map(p=>p.id));
+  const interiorPlanes=parallel.filter(p=>{const d=V.dot(p.c,normal);return d>lo+tol&&d<hi-tol;});
+
+  // V8.19.1: treat the AAG as the source of truth for STEP split/seam faces.
+  // Removing the two physical skins leaves independent side-wall/cavity
+  // components. A periodic cylinder/torus split into two B-Rep faces stays in
+  // the same component instead of becoming two unrelated "features".
+  const eligible=new Set([...aag.nodes.keys()].filter(id=>!skinIds.has(Number(id))));
+  const seen=new Set(),components=[];
+  for(const seed of eligible){
+    if(seen.has(seed))continue;const queue=[seed],ids=[];seen.add(seed);
+    while(queue.length){const id=queue.shift();ids.push(id);for(const n of aag.nodes.get(id)?.neighbors||[]){if(eligible.has(n)&&!seen.has(n)){seen.add(n);queue.push(n);}}}
+    if(ids.length)components.push(ids);
+  }
+  const lowArea=lowSkin.reduce((sum,p)=>sum+p.area,0),highArea=highSkin.reduce((sum,p)=>sum+p.area,0),skinAreaRatio=Math.min(lowArea,highArea)/Math.max(lowArea,highArea,EPS);
+  return{faceById,planes,parallel,skinIds,interiorPlanes,components,lowArea,highArea,skinAreaRatio,lo,hi,tol};
+}
+function plateComponentCylinderGroups(ids,ctx,normal,thickness){
+  const records=[];for(const id of ids){const f=ctx.faceById.get(Number(id));if(!f||!['cylinder','cylindrical'].includes(fam(f.family)))continue;const axis=canonicalAxis(f.axisDirection),center=vec(f.localCenter),radius=Number(f.radius);if(!axis||!center||!(radius>EPS))continue;records.push({face:f,id:Number(id),axis,center,radius,area:Number(f.area)||0,min:Number.isFinite(Number(f.axisMin))?Number(f.axisMin):null,max:Number.isFinite(Number(f.axisMax))?Number(f.axisMax):null,span:Number.isFinite(Number(f.axisSpan))?Number(f.axisSpan):null,hole:f.hole||null});}
+  if(!records.length)return[];
+  // Components already encode topology. Axis grouping inside one component now
+  // heals periodic seam faces while keeping unrelated coaxial cavities apart.
+  return groupCylinders(records,Math.max(thickness,1));
+}
+function componentIsPureStockBoundary(ids,ctx,stock,normal,thickness){
+  if(stock?.stockType!=='round-bar'||!(Number(stock.diameterMm)>EPS))return false;
+  const axis=canonicalAxis(stock.axis),center=vec(stock.axisCenter),R=Number(stock.diameterMm)/2;if(!axis||!center)return false;
+  let radial=false,otherMachining=false;
+  for(const id of ids){const f=ctx.faceById.get(Number(id)),family=fam(f?.family);if(['cone','conical','torus','toroidal'].includes(family))otherMachining=true;
+    if(['cylinder','cylindrical'].includes(family)){const a=canonicalAxis(f?.axisDirection),c=vec(f?.localCenter),r=Number(f?.radius);if(a&&c&&Number.isFinite(r)&&Math.abs(V.dot(a,axis))>0.998&&axisLineDistance(center,axis,c)<Math.max(R*0.01,0.03)&&Math.abs(r-R)<Math.max(R*0.01,0.03))radial=true;else otherMachining=true;}
+    if(family==='plane'){const n=canonicalAxis(f?.localNormal);if(n&&Math.abs(V.dot(n,normal))>0.995){const d=V.dot(vec(f.localCentroid)||vec(f.localCenter)||[0,0,0],normal);if(d>ctx.lo+ctx.tol&&d<ctx.hi-ctx.tol)otherMachining=true;}}
+  }
+  return radial&&!otherMachining;
+}
+function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
+  const ctx0=plateContext(stock,sheetResult,faceInfo);if(!ctx0)return[];const {normal,thickness}=ctx0,ctx=plateMachiningContext(faceInfo,aag,normal,thickness),features=[];
+  const used=new Set();
+  for(const ids of ctx.components){
+    if(componentIsPureStockBoundary(ids,ctx,stock,normal,thickness))continue;
+    const families=ids.map(id=>fam(ctx.faceById.get(Number(id))?.family));
+    const coneIds=ids.filter(id=>['cone','conical'].includes(fam(ctx.faceById.get(Number(id))?.family)));
+    const torusIds=ids.filter(id=>['torus','toroidal'].includes(fam(ctx.faceById.get(Number(id))?.family)));
+    const interiorPlaneIds=ids.filter(id=>ctx.interiorPlanes.some(p=>p.id===Number(id)));
+    const groups=plateComponentCylinderGroups(ids,ctx,normal,thickness);
+    let componentMachining=false;
+    for(const g of groups){
+      const align=Math.abs(V.dot(g.axis,normal));if(align<0.985){features.push(feature('cross-hole','drilling',g.faceIds,0.95,{diameterMm:g.radii[0]*2,axis:g.axis}));componentMachining=true;continue;}
+      const spans=g.members.map(m=>m.span).filter(Number.isFinite),maxSpan=spans.length?Math.max(...spans):g.span,spanRatio=Number.isFinite(maxSpan)?maxSpan/Math.max(thickness,EPS):null;
+      const explicitThrough=g.members.some(m=>m.hole?.isThrough===true),explicitBlind=g.members.some(m=>m.hole&&m.hole.isThrough===false);
+      const full=explicitThrough||(Number.isFinite(spanRatio)&&spanRatio>=0.92),partial=explicitBlind||(Number.isFinite(spanRatio)&&spanRatio<0.90);
       const compound=g.members.map(m=>m.face?.compoundHole).find(x=>x&&['counterbore','countersink'].includes(fam(x.family)));
       if(compound&&fam(compound.family)==='counterbore'){
-        features.push(feature('counterbore','drilling',g.faceIds.concat(coneNeighbors),0.995,{holeDiameterMm:Number(compound.holeDiameter),counterboreDiameterMm:Number(compound.counterboreDiameter),counterboreDepthMm:Number(compound.counterboreDepth),through:compound.isThrough===true?true:compound.isThrough===false?false:null}));
+        features.push(feature('counterbore','drilling',ids,0.995,{holeDiameterMm:Number(compound.holeDiameter),counterboreDiameterMm:Number(compound.counterboreDiameter),counterboreDepthMm:Number(compound.counterboreDepth),through:compound.isThrough===true?true:compound.isThrough===false?false:null}));componentMachining=true;
       }else if(compound&&fam(compound.family)==='countersink'){
-        features.push(feature('countersink','drilling',g.faceIds.concat(coneNeighbors),0.995,{holeDiameterMm:Number(compound.holeDiameter),countersinkDiameterMm:Number(compound.countersinkDiameter),countersinkAngleRad:Number(compound.countersinkAngle),through:compound.isThrough===true?true:compound.isThrough===false?false:null}));
-      }else if(g.radii.length>=2){
-        features.push(feature('counterbore','drilling',g.faceIds.concat(coneNeighbors),0.96,{radiiMm:g.radii,spanRatio}));
-      }else if(partial){
-        features.push(feature('blind-hole','drilling',g.faceIds,0.95,{diameterMm:g.radii[0]*2,spanRatio}));
-      }else if(coneNeighbors.length){
-        features.push(feature('countersink','drilling',g.faceIds.concat(coneNeighbors),0.94,{diameterMm:g.radii[0]*2,spanRatio}));
-      }else if(full){
-        // A plain through contour is compatible with laser/plasma/waterjet and
-        // therefore does not, by itself, prove machining on a cuttable plate.
-        features.push(feature('through-hole','cutting',g.faceIds,0.90,{diameterMm:g.radii[0]*2,spanRatio}));
-      }
-      if(torusNeighbors.length)features.push(feature('annular-groove','milling',g.faceIds.concat(torusNeighbors),0.95,{radiiMm:g.radii}));
-    }else{
-      features.push(feature('cross-hole','drilling',g.faceIds,0.95,{diameterMm:g.radii[0]*2,axis:g.axis}));
+        features.push(feature('countersink','drilling',ids,0.995,{holeDiameterMm:Number(compound.holeDiameter),countersinkDiameterMm:Number(compound.countersinkDiameter),countersinkAngleRad:Number(compound.countersinkAngle),through:compound.isThrough===true?true:compound.isThrough===false?false:null}));componentMachining=true;
+      }else if(g.radii.length>=2&&(partial||coneIds.length||torusIds.length||interiorPlaneIds.length)){
+        features.push(feature('counterbore','drilling',ids,0.97,{radiiMm:g.radii,spanRatio}));componentMachining=true;
+      }else if(partial){features.push(feature('blind-hole','drilling',g.faceIds,0.96,{diameterMm:g.radii[0]*2,spanRatio}));componentMachining=true;
+      }else if(coneIds.length){features.push(feature('countersink','drilling',ids,0.95,{diameterMm:g.radii[0]*2,spanRatio}));componentMachining=true;
+      }else if(full){features.push(feature('through-hole','cutting',g.faceIds,0.91,{diameterMm:g.radii[0]*2,spanRatio}));}
     }
+    if(torusIds.length){features.push(feature('annular-groove','milling',ids,0.97,{splitFaceCount:torusIds.length}));componentMachining=true;}
+    for(const id of interiorPlaneIds){features.push(feature('pocket-floor','milling',[id],0.94,{}));componentMachining=true;}
+    // A cone/toroid cannot be produced by a pure normal 2D profile cut. This
+    // fallback intentionally survives missing/fragmented cylinder metadata.
+    if(!groups.length&&coneIds.length){features.push(feature('countersink-chamfer','drilling',ids,0.90,{}));componentMachining=true;}
+    if(!groups.length&&torusIds.length){features.push(feature('groove-fillet','milling',ids,0.92,{}));componentMachining=true;}
+    if(componentMachining)for(const id of ids)used.add(Number(id));
   }
 
-  // Interior planes parallel to the plate skins are pocket floors / recesses.
-  const planes=(faceInfo||[]).filter(f=>fam(f.family)==='plane').map(f=>({f,n:canonicalAxis(f.localNormal),c:vec(f.localCentroid)||vec(f.localCenter)})).filter(x=>x.n&&x.c);
-  const parallel=planes.filter(p=>Math.abs(V.dot(p.n,normal))>0.995),vals=parallel.map(p=>V.dot(p.c,normal));if(vals.length>=2){
-    const lo=Math.min(...vals),hi=Math.max(...vals),tol=Math.max(thickness*0.04,1e-4);
-    for(const p of parallel){const d=V.dot(p.c,normal);if(d>lo+tol&&d<hi-tol)features.push(feature('pocket-floor','milling',[Number(p.f.id)],0.92,{depthPosition:d}));}
+  // Strong fallback based on BOTH plate skins. Pure 2D cutting preserves the
+  // same material footprint on both skins (through holes included). A sizeable
+  // top/bottom material-area mismatch proves a one-sided recess, pocket,
+  // counterbore or similar secondary operation even when STEP exporters split
+  // the radial wall into several periodic faces.
+  if(Number.isFinite(ctx.skinAreaRatio)&&ctx.skinAreaRatio<0.985){
+    const faceIds=[...ctx.skinIds];features.push(feature('one-sided-recess','milling',faceIds,clamp(0.88+(1-ctx.skinAreaRatio)*0.6),{skinAreaRatio:ctx.skinAreaRatio,lowAreaMm2:ctx.lowArea,highAreaMm2:ctx.highArea}));
   }
-  // Tori are never created by a pure 2D profile cut.  Treat them as strong
-  // secondary-machining evidence unless already attached to a recognized groove.
-  const used=new Set(features.flatMap(f=>f.faceIds));for(const f of faceInfo||[]){if(fam(f.family)==='torus'&&!used.has(Number(f.id)))features.push(feature('groove-fillet','milling',[Number(f.id)],0.88,{}));}
+
+  // Global analytic fallback: periodic STEP seams may make one physical groove
+  // appear as several disconnected faces. Presence of a torus or a cone in a
+  // cuttable slab is still direct evidence of secondary machining.
+  const already=new Set(features.flatMap(f=>f.faceIds));
+  for(const f of faceInfo||[]){const family=fam(f.family),id=Number(f.id);if(already.has(id))continue;if(['torus','toroidal'].includes(family))features.push(feature('groove-fillet','milling',[id],0.91,{splitFallback:true}));else if(['cone','conical'].includes(family))features.push(feature('countersink-chamfer','drilling',[id],0.87,{splitFallback:true}));}
   return dedupeFeatures(features);
 }
-
 function recognizeRoundFeatures({geometry,faceInfo,aag,stock}){
   if(stock?.stockType!=='round-bar')return[];const points=pointsOf(geometry),axis=canonicalAxis(stock.axis),center=vec(stock.axisCenter),R=Number(stock.diameterMm)/2,L=Number(stock.lengthMm);if(!axis||!center||!(R>EPS&&L>EPS))return[];
   const cyls=cylinderRecords(faceInfo),groups=groupCylinders(cyls,2*R),features=[],tolR=Math.max(R*0.015,0.02);
@@ -234,7 +284,7 @@ function processSummary(features,{sheetResult,structuralProfile}={}){
   p.machining=p.turning||p.drilling||p.milling;return p;
 }
 function evidenceFromFeatures(features,legacy){
-  const map={'turned-step':'turning','turned-groove':'groove','turned-groove-fillet':'groove','turned-chamfer-taper':'chamfering','turned-shoulder':'turning','axial-bore':'drilling','blind-axial-bore':'blind-hole','blind-hole':'blind-hole','counterbore':'counterbore','countersink':'counterbore','cross-hole':'drilling','offset-bore':'drilling','pocket-floor':'pocket','annular-groove':'groove','groove-fillet':'groove','countersink-chamfer':'chamfering','through-hole':'through-hole'};
+  const map={'turned-step':'turning','turned-groove':'groove','turned-groove-fillet':'groove','turned-chamfer-taper':'chamfering','turned-shoulder':'turning','axial-bore':'drilling','blind-axial-bore':'blind-hole','blind-hole':'blind-hole','counterbore':'counterbore','countersink':'counterbore','cross-hole':'drilling','offset-bore':'drilling','pocket-floor':'pocket','annular-groove':'groove','groove-fillet':'groove','countersink-chamfer':'chamfering','one-sided-recess':'pocket','through-hole':'through-hole'};
   const out=[];for(const f of features){const e=map[f.type];if(e)out.push(e);}if(Number.isFinite(legacy?.materialRemoval)&&legacy.materialRemoval>0.003)out.push('material-removal');return[...new Set(out)];
 }
 function featureConfidence(features){if(!features.length)return 0;const machining=features.filter(f=>f.process!=='cutting');if(!machining.length)return 0;return machining.reduce((s,f)=>s+f.confidence,0)/machining.length;}
@@ -280,7 +330,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   };
   return{
     ...compat,
-    kind:'manufacturing-knowledge',knowledgeVersion:1,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
+    kind:'manufacturing-knowledge',knowledgeVersion:2,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
     aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount},
     confidence:clamp(Math.max(stockConfidence,machineConfidence*0.96)),
     diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,analysisPipeline:['brep-aag','stock-hypothesis','removal-feature-decomposition','capability-process-arbitration']}
