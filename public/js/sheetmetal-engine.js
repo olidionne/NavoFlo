@@ -1,7 +1,7 @@
 import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.7';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.17.7
+ * NavoFlo Sheet Metal Engine — V8.20.1
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -497,6 +497,7 @@ function profilePointInPoly2D(p,poly){let inside=false;for(let i=0,j=poly.length
   const a=poly[i],b=poly[j],hit=((a[1]>p[1])!==(b[1]>p[1]))&&(p[0]<(b[0]-a[0])*(p[1]-a[1])/(b[1]-a[1]||1e-30)+a[0]);if(hit)inside=!inside;
 }return inside;}
 function profilePolyArea2D(poly){let a=0;for(let i=0,j=poly.length-1;i<poly.length;j=i++)a+=poly[j][0]*poly[i][1]-poly[i][0]*poly[j][1];return a/2;}
+function profilePolyCentroid2D(poly){let crossSum=0,cx=0,cy=0;for(let i=0,j=poly.length-1;i<poly.length;j=i++){const cross=poly[j][0]*poly[i][1]-poly[i][0]*poly[j][1];crossSum+=cross;cx+=(poly[j][0]+poly[i][0])*cross;cy+=(poly[j][1]+poly[i][1])*cross;}if(Math.abs(crossSum)<EPS)return null;return[cx/(3*crossSum),cy/(3*crossSum)];}
 function profileSectionSlice(geometry,basis,station,tol){
   const pos=geometry?.positions||[],idx=geometry?.indices||[];if(pos.length<9||idx.length<3)return null;
   const n=basis.n,u=basis.u,v=basis.v,segments=[],dedupe=new Set();
@@ -537,15 +538,23 @@ function profileSectionSlice(geometry,basis,station,tol){
   const infos=loops.map(points=>({points,signedArea:profilePolyArea2D(points)})).filter(l=>Math.abs(l.signedArea)>tol*tol*4);
   if(!infos.length)return null;infos.sort((a,b)=>Math.abs(b.signedArea)-Math.abs(a.signedArea));
   for(let i=0;i<infos.length;i++){let depth=0,parent=-1;for(let j=0;j<i;j++)if(profilePointInPoly2D(infos[i].points[0],infos[j].points)){depth++;if(parent<0)parent=j;}infos[i].depth=depth;infos[i].parent=parent;}
-  let area=0,outerCount=0,holeCount=0;for(const l of infos){const a=Math.abs(l.signedArea);if(l.depth%2){area-=a;holeCount++;}else{area+=a;outerCount++;}}
-  return area>tol*tol?{area,outerCount,holeCount,loopCount:infos.length,segmentCount:segments.length}:null;
+  let area=0,outerCount=0,holeCount=0,cx=0,cy=0;const allPoints=[];
+  for(const l of infos){
+    const a=Math.abs(l.signedArea),sign=l.depth%2?-1:1,c=profilePolyCentroid2D(l.points);allPoints.push(...l.points);
+    area+=sign*a;if(sign<0)holeCount++;else outerCount++;
+    if(c){cx+=sign*a*c[0];cy+=sign*a*c[1];}
+  }
+  if(!(area>tol*tol))return null;
+  const us=allPoints.map(p=>p[0]),vs=allPoints.map(p=>p[1]),minU=Math.min(...us),maxU=Math.max(...us),minV=Math.min(...vs),maxV=Math.max(...vs),spanU=maxU-minU,spanV=maxV-minV;
+  const centroid=[cx/area,cy/area],offsetU=spanU>tol?Math.abs(centroid[0]-(minU+maxU)/2)/spanU:null,offsetV=spanV>tol?Math.abs(centroid[1]-(minV+maxV)/2)/spanV:null;
+  return{area,outerCount,holeCount,loopCount:infos.length,segmentCount:segments.length,sectionCentroid2D:centroid,sectionCentroidOffsetU:offsetU,sectionCentroidOffsetV:offsetV,sectionSpanU:spanU,sectionSpanV:spanV};
 }
 function profileStockSectionFingerprint(geometry,basis,lo,hi,crossSpan){
   const length=hi-lo;if(!(length>EPS&&crossSpan>EPS))return null;
   const fracs=[0.083,0.137,0.211,0.293,0.379,0.467,0.557,0.647,0.733,0.821,0.893,0.941],tol=Math.max(crossSpan*2e-5,length*2e-8,1e-5),samples=[];
   for(const fraction of fracs){const slice=profileSectionSlice(geometry,basis,lo+length*fraction,tol);if(slice)samples.push({...slice,fraction});}
   if(!samples.length)return null;samples.sort((a,b)=>b.area-a.area);const best=samples[0],areas=samples.map(s=>s.area).sort((a,b)=>a-b),med=areas[Math.floor(areas.length/2)]||best.area;
-  return{stockSectionArea:best.area,sectionComponentCount:best.outerCount,sectionHoleCount:best.holeCount,sectionLoopCount:best.loopCount,sectionSampleFraction:best.fraction,sectionAreaMedian:med,sectionAreaSampleCount:samples.length};
+  return{stockSectionArea:best.area,sectionComponentCount:best.outerCount,sectionHoleCount:best.holeCount,sectionLoopCount:best.loopCount,sectionSampleFraction:best.fraction,sectionAreaMedian:med,sectionAreaSampleCount:samples.length,sectionCentroid2D:best.sectionCentroid2D||null,sectionCentroidOffsetU:Number.isFinite(best.sectionCentroidOffsetU)?best.sectionCentroidOffsetU:null,sectionCentroidOffsetV:Number.isFinite(best.sectionCentroidOffsetV)?best.sectionCentroidOffsetV:null,sectionSpanU:Number.isFinite(best.sectionSpanU)?best.sectionSpanU:null,sectionSpanV:Number.isFinite(best.sectionSpanV)?best.sectionSpanV:null};
 }
 
 function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){

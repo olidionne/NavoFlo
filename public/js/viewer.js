@@ -5,10 +5,10 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.9';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.20.1';
 import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.20.0';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
-import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.9';
+import { matchAiscProfile } from './profile-standard-matcher.js?v=8.20.1';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -3750,7 +3750,7 @@ function ensureProfileStandardSection(){
   if(section&&$('profile-family')&&$('profile-total-weight'))return section;
   if(!section){section=document.createElement('div');section.id='profile-standard-section';section.className='drawer-section';section.hidden=true;anchor.after(section);}
   section.innerHTML=`<div class="drawer-section-title">${FR?'PROFILÉ STRUCTURAL':'STRUCTURAL PROFILE'}</div><dl class="drawer-stats compact-stats">
-    <div><dt>${FR?'AISC / impérial':'AISC / imperial'}</dt><dd id="profile-aisc-label">—</dd></div>
+    <div><dt>${FR?'Standard / impérial':'Standard / imperial'}</dt><dd id="profile-aisc-label">—</dd></div>
     <div><dt>${FR?'Métrique':'Metric'}</dt><dd id="profile-metric-label">—</dd></div>
     <div><dt>${FR?'Famille':'Family'}</dt><dd id="profile-family">—</dd></div>
     <div><dt>${FR?'Dimensions':'Dimensions'}</dt><dd id="profile-dimensions">—</dd></div>
@@ -3770,6 +3770,7 @@ function profileAreaMm2(v){const n=Number(v);if(!Number.isFinite(n))return null;
 function profileDimensionsText(m){
   const type=String(m?.type||''),len=profileLengthMm;
   if(['W','M','S','HP','C','MC','WT','MT','ST'].includes(type)&&Number.isFinite(m.dMm)&&Number.isFinite(m.bfMm))return `d ${len(m.dMm)} × bf ${len(m.bfMm)}`;
+  if(type==='U'&&Number.isFinite(m.dMm)&&Number.isFinite(m.bfMm))return `${len(m.dMm)} × ${len(m.bfMm)}`;
   if(['L','2L'].includes(type)&&Number.isFinite(m.leg1Mm)&&Number.isFinite(m.leg2Mm))return `${len(m.leg1Mm)} × ${len(m.leg2Mm)}`;
   if(type==='HSS'){
     if(Number.isFinite(m.heightMm)&&Number.isFinite(m.widthMm))return `${len(m.heightMm)} × ${len(m.widthMm)}`;
@@ -3781,7 +3782,7 @@ function profileDimensionsText(m){
 function profileThicknessText(m){
   const type=String(m?.type||''),len=profileLengthMm;
   if(['W','M','S','HP','C','MC','WT','MT','ST'].includes(type)){const a=Number.isFinite(m.twMm)?`tw ${len(m.twMm)}`:null,b=Number.isFinite(m.tfMm)?`tf ${len(m.tfMm)}`:null;return [a,b].filter(Boolean).join(' · ')||'—';}
-  if(['L','2L'].includes(type)&&Number.isFinite(m.tMm))return `t ${len(m.tMm)}`;
+  if(['L','2L','U'].includes(type)&&Number.isFinite(m.tMm))return `t ${len(m.tMm)}`;
   if(type==='HSS'||type==='PIPE'){const nom=Number.isFinite(m.tNomMm)?`tnom ${len(m.tNomMm)}`:null,des=Number.isFinite(m.tDesMm)?`tdes ${len(m.tDesMm)}`:null,t=Number.isFinite(m.tMm)?`t ${len(m.tMm)}`:null;return [nom,des,t].filter(Boolean).slice(0,2).join(' · ')||'—';}
   return '—';
 }
@@ -3880,7 +3881,7 @@ function updateGeometryTypeIndicator(){
   if(!currentStepResult){E.propType.textContent=currentModel?(FR?'Maillage':'Mesh'):'—';return;}
   if(sheetMetalCapability.profile){
     const match=currentProfileMatch,label=match&&(match.level==='high'||match.level==='probable')?(match.imperialLabel||match.metricLabel):null;
-    if(label){E.propType.textContent=`${FR?'Profilé AISC':'AISC profile'} · ${label}`;return;}
+    if(label){const prefix=match?.sourceKind==='geometry'?(FR?'Profilé':'Profile'):(FR?'Profilé AISC':'AISC profile');E.propType.textContent=`${prefix} · ${label}`;return;}
     const aspect=Number(sheetMetalCapability.profileData?.aspect),suffix=Number.isFinite(aspect)?` · L/C ${aspect.toFixed(1)}`:'';
     E.propType.textContent=(FR?'Profilé / extrusion':'Profile / extrusion')+suffix;return;
   }

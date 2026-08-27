@@ -1,4 +1,4 @@
-// NavoFlo V8.17.9 — local AISC structural-shape matcher.
+// NavoFlo V8.20.1 — local structural-shape matcher (AISC + geometric open-section guard).
 //
 // The AISC table is loaded lazily only after Navo3D has already classified the
 // STEP body as a long constant-section structural profile/extrusion. Matching is
@@ -8,12 +8,71 @@
 // intact perpendicular section sampled from the real STEP mesh. This makes stock
 // identification resilient to drilled holes, copes, slots and angled end cuts.
 
-const DB_URL='/data/aisc-shapes-v16.json?v=16.0-nf8179';
+const DB_URL='/data/aisc-shapes-v16.json?v=16.0-nf8201';
 let dbPromise=null;
 
 function finite(v){if(v==null||v===''||v==='–')return null;const n=Number(v);return Number.isFinite(n)?n:null;}
 function clamp(v,a=0,b=1){return Math.max(a,Math.min(b,v));}
 function pairSorted(a,b){return [Number(a)||0,Number(b)||0].sort((x,y)=>y-x);}
+
+function reliableSectionFingerprint(profile){
+  return Number(profile?.sectionAreaSampleCount)>=3&&Number.isFinite(Number(profile?.stockSectionArea))&&Number.isFinite(Number(profile?.sectionHoleCount));
+}
+function topologyCompatible(profile,type){
+  if(!reliableSectionFingerprint(profile))return true;
+  const holes=Number(profile.sectionHoleCount),components=Number(profile.sectionComponentCount);
+  // A hollow HSS/PIPE section has a persistent internal void at every intact
+  // transverse station.  A clean, single-loop solid section can therefore never
+  // be HSS/PIPE even if its outside envelope happens to match the database exactly.
+  if((type==='HSS'||type==='PIPE')&&holes<1)return false;
+  // Built-up 2L requires two distinct material islands on an intact section.
+  if(type==='2L'&&Number.isFinite(components)&&components<2)return false;
+  return true;
+}
+function gcd(a,b){a=Math.abs(Math.round(a));b=Math.abs(Math.round(b));while(b){const t=a%b;a=b;b=t;}return a||1;}
+function fracText(value,maxDen=16){
+  const n=Number(value);if(!Number.isFinite(n))return null;const whole=Math.floor(n+1e-9),frac=n-whole,num=Math.round(frac*maxDen);
+  if(num===0)return String(whole);if(num===maxDen)return String(whole+1);const g=gcd(num,maxDen),a=num/g,b=maxDen/g;return whole?`${whole}-${a}/${b}`:`${a}/${b}`;
+}
+function imperialDimText(mm){
+  const inch=Number(mm)/25.4;if(!Number.isFinite(inch)||inch<=0)return null;const rounded=Math.round(inch*16)/16;
+  return Math.abs(inch-rounded)<=0.025?fracText(rounded,16):inch.toFixed(inch<10?3:2).replace(/0+$/,'').replace(/\.$/,'');
+}
+function nearestChannelThicknessInch(raw){
+  if(!(raw>0))return null;const allowed=[1/16,3/32,1/8,5/32,3/16,7/32,1/4,5/16,3/8,1/2,5/8,3/4];
+  let best=null;for(const t of allowed){const err=Math.abs(raw-t);if(!best||err<best.err)best={value:t,err};}return best&&best.err<=Math.max(0.035,raw*0.18)?best.value:null;
+}
+function solveOpenChannelThickness(majorIn,minorIn,areaIn2){
+  // Idealized U section: A = t*H + 2*t*(B-t). Rolled corner radii add a small
+  // positive area, so the inferred t is only used to choose a nearby stock fraction.
+  const c=majorIn+2*minorIn,disc=c*c-8*areaIn2;if(!(disc>=0))return null;const t=(c-Math.sqrt(disc))/4;return t>0&&t<Math.min(majorIn,minorIn)*0.48?t:null;
+}
+function localOpenChannelMatch(profile){
+  if(!reliableSectionFingerprint(profile))return null;
+  if(Number(profile.sectionComponentCount)!==1||Number(profile.sectionHoleCount)!==0)return null;
+  const offsets=[Number(profile.sectionCentroidOffsetU),Number(profile.sectionCentroidOffsetV)];if(!offsets.every(Number.isFinite))return null;
+  const centered=Math.min(...offsets),eccentric=Math.max(...offsets);
+  // U/C channel: symmetric about one section axis but materially offset toward
+  // the web on the other. This separates it from centered W/HSS/PIPE and from L,
+  // which is eccentric about both axes.
+  if(centered>0.055||eccentric<0.105)return null;
+  const cylinders=Number(profile.longitudinalCylinderCount)||0,planes=Number(profile.longitudinalPlaneCount)||0,traces=Number(profile.traceCount)||0;
+  if(cylinders<2||planes<4||traces<6)return null;
+  const dims=pairSorted(profile.spanU,profile.spanV),majorMm=dims[0],minorMm=dims[1],areaMm2=finite(profile.stockSectionArea);if(!(majorMm>0&&minorMm>0&&areaMm2>0))return null;
+  const majorIn=majorMm/25.4,minorIn=minorMm/25.4,areaIn2=areaMm2/(25.4*25.4),rawT=solveOpenChannelThickness(majorIn,minorIn,areaIn2),tIn=nearestChannelThicknessInch(rawT);if(!(tIn>0))return null;
+  const idealArea=tIn*(majorIn+2*minorIn-2*tIn),areaRatio=areaIn2/idealArea;if(!(areaRatio>=0.86&&areaRatio<=1.18))return null;
+  const d1=imperialDimText(majorMm),d2=imperialDimText(minorMm),tt=fracText(tIn,16);if(!d1||!d2||!tt)return null;
+  const weightKgM=areaMm2*0.00785,confidence=clamp(0.82+(0.055-centered)*1.4+Math.min(eccentric-0.105,0.12)*0.45-Math.min(Math.abs(areaRatio-1),0.18)*0.45);
+  return{
+    score:0,type:'U',sourceKind:'geometry',imperialEdi:`U${d1}X${d2}X${tt}`,imperialLabel:`U${d1}X${d2}X${tt}`,
+    metricEdi:`U${majorMm.toFixed(1).replace(/\.0$/,'')}X${minorMm.toFixed(1).replace(/\.0$/,'')}X${(tIn*25.4).toFixed(1)}`,
+    metricLabel:`U${majorMm.toFixed(1).replace(/\.0$/,'')}X${minorMm.toFixed(1).replace(/\.0$/,'')}X${(tIn*25.4).toFixed(1)}`,
+    weightKgM,weightLbFt:weightKgM*0.6719689751,areaMm2,standardDimensionsMm:[majorMm,minorMm],measuredDimensionsMm:[majorMm,minorMm],dimensionErrorsMm:[0,0],maxDimensionErrorRatio:0,
+    measuredAreaMm2:areaMm2,measuredStockAreaMm2:areaMm2,measuredAverageAreaMm2:finite(profile.averageSectionArea),areaRatio:1,
+    dMm:majorMm,bfMm:minorMm,twMm:tIn*25.4,tfMm:tIn*25.4,tMm:tIn*25.4,tNomMm:tIn*25.4,tDesMm:null,
+    sourceVersion:'NavoFlo geometric open-section matcher V8.20.1',level:confidence>=0.90?'high':'probable',confidence,gap:1,profileLengthMm:finite(profile.length),sectionComponentCount:1,sectionHoleCount:0,nextCandidates:[]
+  };
+}
 
 export async function loadAiscShapes(){
   if(!dbPromise){
@@ -61,6 +120,7 @@ function sectionFamilyPenalty(profile,type,dims){
 }
 
 function candidateFromRow(row,db,profile){
+  const type=String(value(row,db,'type')||'');if(!topologyCompatible(profile,type))return null;
   const dims=candidateDimensions(row,db);if(!dims)return null;
   const actual=pairSorted(profile?.spanU,profile?.spanV),standard=pairSorted(...dims);
   if(!(actual[0]>0&&actual[1]>0&&standard[0]>0&&standard[1]>0))return null;
@@ -83,7 +143,7 @@ function candidateFromRow(row,db,profile){
     else areaPenalty=areaRatio<=1?(1-areaRatio)*0.60:(areaRatio-1)*2.0;
   }
 
-  const type=String(value(row,db,'type')||''),dimensionPenalty=(relErr[0]+relErr[1])*6;
+  const dimensionPenalty=(relErr[0]+relErr[1])*6;
   const score=dimensionPenalty+areaPenalty+sectionFamilyPenalty(profile,type,dims);
   const weightKgM=finite(value(row,db,'W'));
   return{
@@ -108,6 +168,7 @@ function candidateFromRow(row,db,profile){
 
 export function matchAiscProfileData(profile,db){
   if(!profile||!db?.rows?.length||!db?.index)return null;
+  const local=localOpenChannelMatch(profile);if(local)return local;
   const candidates=[];for(const row of db.rows){const c=candidateFromRow(row,db,profile);if(c)candidates.push(c);}candidates.sort((a,b)=>a.score-b.score);
   const best=candidates[0];if(!best)return null;const second=candidates[1]||null,gap=second?second.score-best.score:1;
   const dim=best.maxDimensionErrorRatio,area=best.areaRatio,sampled=Number.isFinite(best.measuredStockAreaMm2);let level='tentative';
