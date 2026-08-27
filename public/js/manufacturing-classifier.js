@@ -1,4 +1,4 @@
-/* NavoFlo V8.19.1 — manufacturing / stock-shape classifier.
+/* NavoFlo V8.19.2 — manufacturing / stock-shape classifier.
  *
  * Geometry-only inference from exact STEP analytic faces/edges + the retained
  * tessellated solid.  V8.18.2 keeps analytic-envelope recognition, but
@@ -12,6 +12,8 @@
  * priority in viewer.js.  This module is for generic stock (round/square/flat/
  * rectangular/hex) and probable secondary machining.
  */
+import { applyRawStockKnowledge } from './raw-stock-knowledge.js?v=8.19.2';
+
 const EPS=1e-9;
 const V={
   dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
@@ -260,10 +262,10 @@ export function classifyManufacturingGeometry({geometry,faceInfo=[],edgeInfo=[]}
   // primitive has not been proven.
   const plate=(!round&&!hex&&!rect)?plateBlankCandidate(geometry,faceInfo,edgeInfo,points,volume):null;
   const candidates=[round,hex,rect,plate].filter(Boolean);
-  if(!candidates.length)return null;candidates.sort((a,b)=>score(b)-score(a));const best=candidates[0];
+  if(!candidates.length)return null;candidates.sort((a,b)=>score(b)-score(a));const best=applyRawStockKnowledge(candidates[0]);
   const partialBores=partialBoreEvidence(best,faceInfo,points);
   if(best.features){best.features.partialAxialCylinders=partialBores;if(partialBores>0)best.features.secondaryMachining=true;}
   if(partialBores>0)best.machined=true;
-  const evidence=[];if(best.features?.hints?.length)evidence.push(...best.features.hints);if(partialBores>0)evidence.push('recess');if(Number.isFinite(best.materialRemoval)&&best.materialRemoval>0.003)evidence.push('material-removal');
+  const evidence=[];if(best.features?.hints?.length)evidence.push(...best.features.hints);if(partialBores>0)evidence.push('recess');if(Number.isFinite(best.materialRemoval)&&best.materialRemoval>0.003)evidence.push('material-removal');if(best.commercialStockReclassified)evidence.push('commercial-stock-plate');
   return{...best,kind:'stock-shape',process:best.machined?'machining':'stock-profile',evidence:[...new Set(evidence)],volumeMm3:volume,diagnostics:{candidateCount:candidates.length,volumeReliable:Boolean(best.volumeReliable),stockSurfaceCoverage:Number.isFinite(best.stockSurfaceCoverage)?best.stockSurfaceCoverage:null,envelopeError:Number.isFinite(best.envelopeError)?best.envelopeError:null,partialAxialCylinders:partialBores}};
 }

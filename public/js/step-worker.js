@@ -1,7 +1,7 @@
 import OcctJS from 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.mjs';
 
 const WASM_URL = 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.wasm';
-const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.19.1';
+const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.19.2';
 
 let occtPromise = null;
 let exactModelId = null;
@@ -206,6 +206,29 @@ function allLogicalFaceGroups(occt){
   return groups;
 }
 
+
+function faceNormalUnit(face){const n=vec3(face?.localNormal);if(!n)return null;const l=Math.hypot(...n);return l>1e-12?n.map(v=>v/l):null;}
+function samePlanarDomain(a,b){
+  if(String(a?.family||'').toLowerCase()!=='plane'||String(b?.family||'').toLowerCase()!=='plane')return false;
+  const na=faceNormalUnit(a),nb=faceNormalUnit(b),ca=vec3(a?.localCentroid)||vec3(a?.localCenter),cb=vec3(b?.localCentroid)||vec3(b?.localCenter);if(!na||!nb||!ca||!cb)return false;
+  const dot=Math.abs(na[0]*nb[0]+na[1]*nb[1]+na[2]*nb[2]);if(dot<0.999999)return false;
+  const d=[cb[0]-ca[0],cb[1]-ca[1],cb[2]-ca[2]],offset=Math.abs(d[0]*na[0]+d[1]*na[1]+d[2]*na[2]);
+  return offset<=Math.max(1e-4,Math.sqrt(Math.max(Number(a.area)||0,Number(b.area)||0,1))*1e-7);
+}
+function sameAnalyticDomain(a,b){
+  const fa=String(a?.family||'').toLowerCase(),fb=String(b?.family||'').toLowerCase();if(fa!==fb)return false;
+  if(fa==='plane')return samePlanarDomain(a,b);
+  if(['cylinder','cylindrical'].includes(fa))return sameCylinder(a,b);
+  return false;
+}
+function assignVirtualSameDomainGroups(faces){
+  const byId=new Map(faces.map(f=>[Number(f.id),f])),seen=new Set();let domainId=0;
+  for(const seed of faces){const sid=Number(seed.id);if(seen.has(sid))continue;const group=[],queue=[sid];seen.add(sid);
+    while(queue.length){const id=queue.shift(),face=byId.get(id);if(!face)continue;group.push(id);for(const nId of face.neighborFaceIds||[]){const n=Number(nId);if(seen.has(n))continue;const nf=byId.get(n);if(nf&&sameAnalyticDomain(seed,nf)){seen.add(n);queue.push(n);}}}
+    domainId++;for(const id of group){const f=byId.get(id);if(f){f.sameDomainId=domainId;f.sameDomainFaceIds=[...group].sort((a,b)=>a-b);}}
+  }
+}
+
 function sheetMetalFaceInfo(occt,geometryId){
   const gid=String(geometryId),topo=topologyByGeometry.get(gid);
   if(!topo)throw new Error(`No STEP topology for geometry ${gid}.`);
@@ -271,6 +294,17 @@ function sheetMetalFaceInfo(occt,geometryId){
         };
       }catch{}
     }
+    // V8.19.2 — use the exact OCCT chamfer helper when available.  This is a
+    // stronger manufacturing signal than merely seeing an extra planar face.
+    if(allowCompoundRecognition&&analyticFamily==='plane'){
+      try{
+        const chamfer=occt.DescribeExactChamfer(exactModelId,shapeHandle(gid),'face',id);
+        if(chamfer?.ok)out.chamfer={
+          profile:String(chamfer.profile||''),variant:String(chamfer.variant||''),
+          distanceA:Number(chamfer.distanceA),distanceB:Number(chamfer.distanceB),supportAngle:Number(chamfer.supportAngle)
+        };
+      }catch{}
+    }
     faces.push(out);
   }
   const edges=[];
@@ -311,6 +345,11 @@ function sheetMetalFaceInfo(occt,geometryId){
     }
   }
   for(const face of faces)face.neighborFaceIds=[...(neighbors.get(Number(face.id))||[])].sort((a,b)=>a-b);
+  // Virtual equivalent of OCCT ShapeUpgrade_UnifySameDomain for analysis: keep
+  // the original B-Rep IDs for selection, but annotate adjacent coincident
+  // planes/cylinders as one physical domain so exporter seam lines cannot be
+  // mistaken for pockets or independent machining features.
+  assignVirtualSameDomainGroups(faces);
   const logicalGroups=allLogicalFaceGroups(occt).filter(group=>String(group.geometryId)===gid);
   return{geometryId:gid,faces,edges,logicalGroups};
 }

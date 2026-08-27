@@ -1,4 +1,4 @@
-/* NavoFlo V8.19.1 — Manufacturing Recognition Engine (MRE)
+/* NavoFlo V8.19.2 — Manufacturing Recognition Engine (MRE)
  *
  * Architecture:
  *   exact B-Rep/AAG -> stock hypothesis -> virtual delta/removal features
@@ -9,7 +9,8 @@
  * contain a counterbore/groove; a shaft may be round stock AND heavily turned.
  * This module deliberately does not collapse those facts into one enum.
  */
-import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.19.1';
+import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.19.2';
+import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.19.2';
 
 const EPS=1e-8;
 const V={
@@ -38,7 +39,7 @@ export function buildAttributedAdjacencyGraph(faceInfo=[],edgeInfo=[]){
     id:Number(f.id),family:fam(f.family),area:Number(f.area)||0,center:vec(f.localCentroid)||vec(f.localCenter),
     normal:canonicalAxis(f.localNormal),axis:canonicalAxis(f.axisDirection),radius:Number.isFinite(Number(f.radius))?Number(f.radius):null,
     axisMin:Number.isFinite(Number(f.axisMin))?Number(f.axisMin):null,axisMax:Number.isFinite(Number(f.axisMax))?Number(f.axisMax):null,
-    axisSpan:Number.isFinite(Number(f.axisSpan))?Number(f.axisSpan):null,hole:f.hole||null,neighbors:new Set((f.neighborFaceIds||[]).map(Number))
+    axisSpan:Number.isFinite(Number(f.axisSpan))?Number(f.axisSpan):null,hole:f.hole||null,chamfer:f.chamfer||null,sameDomainFaceIds:(f.sameDomainFaceIds||[]).map(Number),neighbors:new Set((f.neighborFaceIds||[]).map(Number))
   });
   const arcs=[];
   for(const e of edgeInfo||[]){
@@ -137,9 +138,13 @@ function normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile}
   if(round&&(!legacy||legacy.stockType==='plate-blank'||round.confidence>(Number(legacy.confidence)||0)-0.02)){
     const merged={...legacy,...round};return merged;
   }
-  if(legacy)return{...legacy};
+  if(legacy?.commercialStockReclassified&&sheetResult?.flatPlate){
+    const plate=derivePlateStock(geometry,faceInfo,sheetResult,null);
+    if(plate)return{...legacy,...plate,stockType:'plate-blank',stockKnowledge:legacy.stockKnowledge,commercialStockReclassified:true,originalStockType:legacy.originalStockType||'flat-bar',source:'raw-stock-knowledge+plate-slab'};
+  }
+  if(legacy)return applyRawStockKnowledge({...legacy});
   if(sheetResult?.flatPlate)return derivePlateStock(geometry,faceInfo,sheetResult,null);
-  return round||null;
+  return applyRawStockKnowledge(round||null);
 }
 
 function plateContext(stock,sheetResult,faceInfo){
@@ -156,8 +161,15 @@ function plateMachiningContext(faceInfo,aag,normal,thickness){
   if(parallel.length<2)return{faceById,planes,parallel,skinIds:new Set(),interiorPlanes:[],components:[],skinAreaRatio:null};
   const values=parallel.map(p=>V.dot(p.c,normal)),lo=Math.min(...values),hi=Math.max(...values),tol=Math.max(thickness*0.035,1e-4);
   const lowSkin=parallel.filter(p=>Math.abs(V.dot(p.c,normal)-lo)<=tol),highSkin=parallel.filter(p=>Math.abs(V.dot(p.c,normal)-hi)<=tol);
-  const skinIds=new Set([...lowSkin,...highSkin].map(p=>p.id));
-  const interiorPlanes=parallel.filter(p=>{const d=V.dot(p.c,normal);return d>lo+tol&&d<hi-tol;});
+  const lowSkinIds=new Set(lowSkin.map(p=>p.id)),highSkinIds=new Set(highSkin.map(p=>p.id));
+  // Expand skins through worker-provided virtual same-domain groups. This is the
+  // analysis equivalent of OCCT ShapeUpgrade_UnifySameDomain: a SolidWorks seam
+  // can split one physical plane into multiple adjacent B-Rep faces, but all of
+  // them still belong to the same skin and must not become a fake pocket floor.
+  const expandDomain=set=>{for(const id of [...set])for(const d of aag.nodes.get(Number(id))?.sameDomainFaceIds||[])set.add(Number(d));};
+  expandDomain(lowSkinIds);expandDomain(highSkinIds);
+  const skinIds=new Set([...lowSkinIds,...highSkinIds]);
+  const interiorPlanes=parallel.filter(p=>!skinIds.has(Number(p.id))).filter(p=>{const d=V.dot(p.c,normal);return d>lo+tol&&d<hi-tol;});
 
   // V8.19.1: treat the AAG as the source of truth for STEP split/seam faces.
   // Removing the two physical skins leaves independent side-wall/cavity
@@ -170,8 +182,8 @@ function plateMachiningContext(faceInfo,aag,normal,thickness){
     while(queue.length){const id=queue.shift();ids.push(id);for(const n of aag.nodes.get(id)?.neighbors||[]){if(eligible.has(n)&&!seen.has(n)){seen.add(n);queue.push(n);}}}
     if(ids.length)components.push(ids);
   }
-  const lowArea=lowSkin.reduce((sum,p)=>sum+p.area,0),highArea=highSkin.reduce((sum,p)=>sum+p.area,0),skinAreaRatio=Math.min(lowArea,highArea)/Math.max(lowArea,highArea,EPS);
-  return{faceById,planes,parallel,skinIds,interiorPlanes,components,lowArea,highArea,skinAreaRatio,lo,hi,tol};
+  const lowArea=[...lowSkinIds].reduce((sum,id)=>sum+(Number(faceById.get(Number(id))?.area)||0),0),highArea=[...highSkinIds].reduce((sum,id)=>sum+(Number(faceById.get(Number(id))?.area)||0),0),skinAreaRatio=Math.min(lowArea,highArea)/Math.max(lowArea,highArea,EPS);
+  return{faceById,planes,parallel,skinIds,lowSkinIds,highSkinIds,interiorPlanes,components,lowArea,highArea,skinAreaRatio,lo,hi,tol};
 }
 function plateComponentCylinderGroups(ids,ctx,normal,thickness){
   const records=[];for(const id of ids){const f=ctx.faceById.get(Number(id));if(!f||!['cylinder','cylindrical'].includes(fam(f.family)))continue;const axis=canonicalAxis(f.axisDirection),center=vec(f.localCenter),radius=Number(f.radius);if(!axis||!center||!(radius>EPS))continue;records.push({face:f,id:Number(id),axis,center,radius,area:Number(f.area)||0,min:Number.isFinite(Number(f.axisMin))?Number(f.axisMin):null,max:Number.isFinite(Number(f.axisMax))?Number(f.axisMax):null,span:Number.isFinite(Number(f.axisSpan))?Number(f.axisSpan):null,hole:f.hole||null});}
@@ -190,6 +202,44 @@ function componentIsPureStockBoundary(ids,ctx,stock,normal,thickness){
   }
   return radial&&!otherMachining;
 }
+
+function isSupportedPocketFloor(id,ctx,aag,normal){
+  const node=aag.nodes.get(Number(id)),f=ctx.faceById.get(Number(id));if(!node||!f)return false;
+  const floorN=canonicalAxis(f.localNormal);if(!floorN||Math.abs(V.dot(floorN,normal))<0.995)return false;
+  const wallIds=[];for(const nId of node.neighbors||[]){const nf=ctx.faceById.get(Number(nId));if(!nf)continue;const family=fam(nf.family);if(family==='plane'){const nn=canonicalAxis(nf.localNormal);if(nn&&Math.abs(V.dot(nn,normal))>0.995)continue;}wallIds.push(Number(nId));}
+  if(!wallIds.length)return false;
+  let touchesLow=false,touchesHigh=false;
+  for(const wallId of wallIds){for(const n of aag.nodes.get(wallId)?.neighbors||[]){if(ctx.lowSkinIds?.has(Number(n)))touchesLow=true;if(ctx.highSkinIds?.has(Number(n)))touchesHigh=true;}}
+  // A true pocket floor is bounded by walls that terminate at at least one
+  // physical skin. A same-domain split/seam on a skin has no offset floor and
+  // cannot satisfy this topology after skin removal.
+  return touchesLow||touchesHigh;
+}
+function globalPlateAnalyticFeatures({faceInfo,ctx,normal,thickness,stock,excludeFaceIds=null}){
+  const out=[],excluded=excludeFaceIds instanceof Set?excludeFaceIds:new Set(excludeFaceIds||[]);const stockAxis=canonicalAxis(stock?.axis),stockCenter=vec(stock?.axisCenter),stockR=Number(stock?.diameterMm)/2;
+  for(const f of faceInfo||[]){
+    const family=fam(f.family),id=Number(f.id);if(ctx.skinIds.has(id)||excluded.has(id))continue;
+    if(['torus','toroidal'].includes(family)){
+      const a=canonicalAxis(f.axisDirection),aligned=!a||Math.abs(V.dot(a,normal))>0.96;
+      if(aligned)out.push(feature('annular-groove','milling',[id],0.97,{analyticFallback:true}));
+      else out.push(feature('groove-fillet','milling',[id],0.90,{analyticFallback:true}));
+      continue;
+    }
+    if(['cone','conical'].includes(family)){
+      out.push(feature('countersink-chamfer','drilling',[id],0.90,{analyticFallback:true}));continue;
+    }
+    if(f.chamfer){out.push(feature('edge-chamfer','milling',[id],0.94,{exactChamfer:true,variant:f.chamfer.variant||null,distanceA:Number(f.chamfer.distanceA),distanceB:Number(f.chamfer.distanceB)}));continue;}
+    if(!['cylinder','cylindrical'].includes(family))continue;
+    const a=canonicalAxis(f.axisDirection),c=vec(f.localCenter),r=Number(f.radius),span=Number(f.axisSpan);if(!a||!(r>EPS))continue;
+    // Do not turn the outside wall of a round plate into a machining feature.
+    if(stock?.stockType==='round-bar'&&stockAxis&&stockCenter&&Number.isFinite(stockR)&&Math.abs(V.dot(a,stockAxis))>0.998&&c&&axisLineDistance(stockCenter,stockAxis,c)<Math.max(stockR*0.01,0.03)&&Math.abs(r-stockR)<Math.max(stockR*0.01,0.03))continue;
+    const align=Math.abs(V.dot(a,normal));
+    if(align<0.985){out.push(feature('cross-hole','drilling',[id],0.94,{analyticFallback:true}));continue;}
+    if(f.hole?.isThrough===false){out.push(feature('blind-hole','drilling',[id],0.985,{diameterMm:r*2,depthMm:Number(f.hole.depth)||span,analyticFallback:true}));continue;}
+    if(Number.isFinite(span)&&span<thickness*0.90){out.push(feature('blind-hole','drilling',[id],0.95,{diameterMm:r*2,spanRatio:span/Math.max(thickness,EPS),analyticFallback:true}));continue;}
+  }
+  return dedupeFeatures(out);
+}
 function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
   const ctx0=plateContext(stock,sheetResult,faceInfo);if(!ctx0)return[];const {normal,thickness}=ctx0,ctx=plateMachiningContext(faceInfo,aag,normal,thickness),features=[];
   const used=new Set();
@@ -198,7 +248,8 @@ function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
     const families=ids.map(id=>fam(ctx.faceById.get(Number(id))?.family));
     const coneIds=ids.filter(id=>['cone','conical'].includes(fam(ctx.faceById.get(Number(id))?.family)));
     const torusIds=ids.filter(id=>['torus','toroidal'].includes(fam(ctx.faceById.get(Number(id))?.family)));
-    const interiorPlaneIds=ids.filter(id=>ctx.interiorPlanes.some(p=>p.id===Number(id)));
+    const rawInteriorPlaneIds=ids.filter(id=>ctx.interiorPlanes.some(p=>p.id===Number(id)));
+    const interiorPlaneIds=rawInteriorPlaneIds.filter(id=>isSupportedPocketFloor(id,ctx,aag,normal));
     const groups=plateComponentCylinderGroups(ids,ctx,normal,thickness);
     let componentMachining=false;
     for(const g of groups){
@@ -231,15 +282,19 @@ function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
   // top/bottom material-area mismatch proves a one-sided recess, pocket,
   // counterbore or similar secondary operation even when STEP exporters split
   // the radial wall into several periodic faces.
-  if(Number.isFinite(ctx.skinAreaRatio)&&ctx.skinAreaRatio<0.985){
-    const faceIds=[...ctx.skinIds];features.push(feature('one-sided-recess','milling',faceIds,clamp(0.88+(1-ctx.skinAreaRatio)*0.6),{skinAreaRatio:ctx.skinAreaRatio,lowAreaMm2:ctx.lowArea,highAreaMm2:ctx.highArea}));
+  // Skin-area mismatch is supporting evidence only.  A STEP exporter can split
+  // one physical skin into several same-domain faces (the visible SolidWorks
+  // "separation line").  Never call that machining by area alone.  Require a
+  // real offset floor, blind radial surface, cone or torus as corroboration.
+  const analyticSupport=features.some(f=>['pocket-floor','blind-hole','counterbore','countersink','annular-groove','groove-fillet','countersink-chamfer'].includes(f.type));
+  if(Number.isFinite(ctx.skinAreaRatio)&&ctx.skinAreaRatio<0.985&&analyticSupport){
+    const faceIds=[...ctx.skinIds];features.push(feature('one-sided-recess','milling',faceIds,clamp(0.82+(1-ctx.skinAreaRatio)*0.5),{skinAreaRatio:ctx.skinAreaRatio,lowAreaMm2:ctx.lowArea,highAreaMm2:ctx.highArea,corroborated:true}));
   }
 
-  // Global analytic fallback: periodic STEP seams may make one physical groove
-  // appear as several disconnected faces. Presence of a torus or a cone in a
-  // cuttable slab is still direct evidence of secondary machining.
-  const already=new Set(features.flatMap(f=>f.faceIds));
-  for(const f of faceInfo||[]){const family=fam(f.family),id=Number(f.id);if(already.has(id))continue;if(['torus','toroidal'].includes(family))features.push(feature('groove-fillet','milling',[id],0.91,{splitFallback:true}));else if(['cone','conical'].includes(family))features.push(feature('countersink-chamfer','drilling',[id],0.87,{splitFallback:true}));}
+  // Global analytic pass: this is independent of AAG component splitting and is
+  // deliberately redundant.  It catches grooves/blind bores even when a STEP
+  // periodic seam fragments the physical feature into unexpected components.
+  features.push(...globalPlateAnalyticFeatures({faceInfo,ctx,normal,thickness,stock,excludeFaceIds:new Set(features.flatMap(f=>f.faceIds))}));
   return dedupeFeatures(features);
 }
 function recognizeRoundFeatures({geometry,faceInfo,aag,stock}){
@@ -284,7 +339,7 @@ function processSummary(features,{sheetResult,structuralProfile}={}){
   p.machining=p.turning||p.drilling||p.milling;return p;
 }
 function evidenceFromFeatures(features,legacy){
-  const map={'turned-step':'turning','turned-groove':'groove','turned-groove-fillet':'groove','turned-chamfer-taper':'chamfering','turned-shoulder':'turning','axial-bore':'drilling','blind-axial-bore':'blind-hole','blind-hole':'blind-hole','counterbore':'counterbore','countersink':'counterbore','cross-hole':'drilling','offset-bore':'drilling','pocket-floor':'pocket','annular-groove':'groove','groove-fillet':'groove','countersink-chamfer':'chamfering','one-sided-recess':'pocket','through-hole':'through-hole'};
+  const map={'turned-step':'turning','turned-groove':'groove','turned-groove-fillet':'groove','turned-chamfer-taper':'chamfering','turned-shoulder':'turning','axial-bore':'drilling','blind-axial-bore':'blind-hole','blind-hole':'blind-hole','counterbore':'counterbore','countersink':'counterbore','cross-hole':'drilling','offset-bore':'drilling','pocket-floor':'pocket','annular-groove':'groove','groove-fillet':'groove','countersink-chamfer':'chamfering','one-sided-recess':'pocket','edge-chamfer':'chamfering','through-hole':'through-hole'};
   const out=[];for(const f of features){const e=map[f.type];if(e)out.push(e);}if(Number.isFinite(legacy?.materialRemoval)&&legacy.materialRemoval>0.003)out.push('material-removal');return[...new Set(out)];
 }
 function featureConfidence(features){if(!features.length)return 0;const machining=features.filter(f=>f.process!=='cutting');if(!machining.length)return 0;return machining.reduce((s,f)=>s+f.confidence,0)/machining.length;}
@@ -330,9 +385,9 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   };
   return{
     ...compat,
-    kind:'manufacturing-knowledge',knowledgeVersion:2,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
+    kind:'manufacturing-knowledge',knowledgeVersion:3,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
     aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount},
     confidence:clamp(Math.max(stockConfidence,machineConfidence*0.96)),
-    diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,analysisPipeline:['brep-aag','stock-hypothesis','removal-feature-decomposition','capability-process-arbitration']}
+    diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,analysisPipeline:['brep-aag','same-domain-healing','commercial-stock-prior','stock-hypothesis','removal-feature-decomposition','capability-process-arbitration'],rawStockKnowledgeVersion:RAW_STOCK_KNOWLEDGE_VERSION}
   };
 }
