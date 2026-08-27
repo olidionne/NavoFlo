@@ -199,11 +199,60 @@ let baseMaterials = new Set();
 // File objects and per-document camera/unit state stay local in the browser.
 const modelDocuments=new Map();
 let activeModelDocumentId=null,modelDocumentSeq=0,modelDocumentBusy=false,pendingModelDocumentId=null;
+const MODEL_ANALYSIS_CACHE_VERSION=1;
+let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
 const logicalHiddenEdgeKeys=new Set();
 function nextModelDocumentId(){return`n3doc-${++modelDocumentSeq}`;}
 function modelMainCandidates(files){return [...files].filter(file=>['step','stp','glb','gltf','stl','obj'].includes(ext(file.name)));}
+function modelFileSignature(file){
+  if(!file)return '';
+  return `${String(file.name||'')}|${Number(file.size)||0}|${Number(file.lastModified)||0}`;
+}
+function cloneModelAnalysisValue(value){
+  if(value==null)return value;
+  try{return typeof structuredClone==='function'?structuredClone(value):JSON.parse(JSON.stringify(value));}
+  catch{return null;}
+}
+function currentModelAnalysisSnapshot(){
+  if(!currentStepResult||!currentFile||!modelAnalysisReady)return null;
+  return {
+    version:MODEL_ANALYSIS_CACHE_VERSION,
+    sourceSignature:modelFileSignature(currentFile),
+    sheetMetalCapability:cloneModelAnalysisValue(sheetMetalCapability),
+    manufacturingCapability:cloneModelAnalysisValue(manufacturingCapability),
+    currentProfileMatch:cloneModelAnalysisValue(currentProfileMatch),
+    flatPatternResult:cloneModelAnalysisValue(flatPatternResult)
+  };
+}
+function restoreModelDocumentAnalysis(snapshot,main){
+  if(!currentStepResult||!snapshot||Number(snapshot.version)!==MODEL_ANALYSIS_CACHE_VERSION)return false;
+  if(snapshot.sourceSignature!==modelFileSignature(main))return false;
+  const restoredCapability=cloneModelAnalysisValue(snapshot.sheetMetalCapability);
+  if(!restoredCapability)return false;
+  sheetMetalCapability=restoredCapability;
+  manufacturingCapability=cloneModelAnalysisValue(snapshot.manufacturingCapability);
+  currentProfileMatch=cloneModelAnalysisValue(snapshot.currentProfileMatch);
+  flatPatternResult=cloneModelAnalysisValue(snapshot.flatPatternResult);
+  modelAnalysisReady=true;
+  if(flatPatternResult?.ok){
+    sheetMetalState.fixedFace={
+      geometryId:String(flatPatternResult.geometryId),
+      elementId:Number(flatPatternResult.fixedFaceId)
+    };
+    if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(flatPatternResult.thickness))sheetMetalState.thickness=flatPatternResult.thickness;
+    const firstR=flatPatternResult.bendLines?.find(b=>Number.isFinite(b.insideRadius))?.insideRadius;
+    if((!Number.isFinite(sheetMetalState.radius)||sheetMetalState.radius<0)&&Number.isFinite(firstR))sheetMetalState.radius=firstR;
+    buildFlatPatternScene(flatPatternResult);
+  }
+  syncSheetMetalInputs();
+  syncSheetMetalUnfoldUI();
+  updateGeometryTypeIndicator();
+  updateProfileStandardUI();
+  updateManufacturingUI();
+  return true;
+}
 function captureActiveModelDocumentState(){
   if(!activeModelDocumentId)return;
   const doc=modelDocuments.get(activeModelDocumentId);if(!doc)return;
@@ -212,6 +261,8 @@ function captureActiveModelDocumentState(){
   }
   doc.lastFormat=currentFormat||doc.lastFormat||'';
   doc.sheetMetal={thickness:sheetMetalState.thickness,radius:sheetMetalState.radius,bendAngleDeg:sheetMetalState.bendAngleDeg,manualKEnabled:sheetMetalState.manualKEnabled,manualK:sheetMetalState.manualK,fixedFace:sheetMetalState.fixedFace?{...sheetMetalState.fixedFace}:null};
+  const analysis=currentModelAnalysisSnapshot();
+  if(analysis)doc.analysis=analysis;
 }
 function renderModelDocumentTabs(){
   if(!E.docTabs||!E.docTabList)return;
@@ -240,7 +291,7 @@ async function openModelDocuments(files,handleByName=null){
   for(const set of sets){
     if(set.files.some(file=>file.size>MAX_FILE)){showError(T.tooLarge);continue;}
     if(set.files.reduce((sum,file)=>sum+file.size,0)>MAX_TOTAL){showError(T.totalTooLarge);continue;}
-    const id=nextModelDocumentId();modelDocuments.set(id,{id,name:set.main.name,main:set.main,mainHandle:set.mainHandle||null,files:set.files,view:null,lastFormat:ext(set.main.name).toUpperCase()});newIds.push(id);
+    const id=nextModelDocumentId();modelDocuments.set(id,{id,name:set.main.name,main:set.main,mainHandle:set.mainHandle||null,files:set.files,view:null,lastFormat:ext(set.main.name).toUpperCase(),analysis:null});newIds.push(id);
   }
   renderModelDocumentTabs();
   if(newIds.length)await activateModelDocument(newIds[0]);
@@ -258,7 +309,7 @@ async function saveCurrentModel(forceSaveAs=false){
   try{
     let handle=!forceSaveAs?doc.mainHandle:null;
     if(!handle&&FSA3_SAVE_SUPPORTED){const extension='.'+ext(doc.main.name);handle=await window.showSaveFilePicker({suggestedName:doc.main.name,types:[{description:`${extension.toUpperCase()} CAD`,accept:{'application/octet-stream':[extension]}}]});}
-    if(handle){const oldMain=doc.main;const writable=await handle.createWritable();await writable.write(await oldMain.arrayBuffer());await writable.close();const saved=await handle.getFile();doc.main=saved;doc.mainHandle=handle;doc.name=saved.name;doc.files=[saved,...doc.files.filter(f=>f!==oldMain&&f.name!==saved.name)];currentFile=saved;E.statusFile.textContent=saved.name;renderModelDocumentTabs();}
+    if(handle){const oldMain=doc.main;const writable=await handle.createWritable();await writable.write(await oldMain.arrayBuffer());await writable.close();const saved=await handle.getFile();doc.main=saved;doc.mainHandle=handle;doc.name=saved.name;doc.files=[saved,...doc.files.filter(f=>f!==oldMain&&f.name!==saved.name)];currentFile=saved;if(doc.analysis)doc.analysis.sourceSignature=modelFileSignature(saved);E.statusFile.textContent=saved.name;renderModelDocumentTabs();}
     else{const url=URL.createObjectURL(doc.main);const a=document.createElement('a');a.href=url;a.download=doc.main.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   }catch(error){if(error?.name!=='AbortError'){console.error('Navo3D save',error);showError(FR?'Impossible de sauvegarder ce modèle.':'Unable to save this model.');}}
 }
@@ -271,7 +322,7 @@ function modelSessionSnapshot(){
     modelDocumentSeq,
     documents:[...modelDocuments.values()].map(doc=>({
       id:doc.id,name:doc.name,main:doc.main,mainHandle:doc.mainHandle||null,files:doc.files,
-      view:doc.view||null,lastFormat:doc.lastFormat||'',sheetMetal:doc.sheetMetal||null
+      view:doc.view||null,lastFormat:doc.lastFormat||'',sheetMetal:doc.sheetMetal||null,analysis:doc.analysis||null
     }))
   };
 }
@@ -322,7 +373,7 @@ async function activateModelDocument(id){
   if(id===activeModelDocumentId&&currentModel)return;
   captureActiveModelDocumentState();activeModelDocumentId=id;renderModelDocumentTabs();
   const doc=modelDocuments.get(id);modelDocumentBusy=true;renderModelDocumentTabs();
-  try{await loadFileSet(doc.files,{restoreView:doc.view,restoreSheetMetal:doc.sheetMetal});}
+  try{await loadFileSet(doc.files,{restoreView:doc.view,restoreSheetMetal:doc.sheetMetal,restoreAnalysis:doc.analysis});}
   finally{
     modelDocumentBusy=false;renderModelDocumentTabs();
     const pending=pendingModelDocumentId;pendingModelDocumentId=null;
@@ -853,6 +904,7 @@ function resetSheetMetalForModel() {
   sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:false,profileType:null,profileData:null};
   manufacturingCapability=null;
   currentProfileMatch=null;profileMatchEpoch++;
+  modelAnalysisReady=false;
 
   if(E.smAngle)E.smAngle.value='90';
   if(E.smManualToggle)E.smManualToggle.checked=false;
@@ -1293,13 +1345,15 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
         if(bestProfile){
           manufacturingCapability=null;
           sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
-          syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateProfileStandardUI();updateManufacturingUI();
+          modelAnalysisReady=true;
+          syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateProfileStandardUI();updateManufacturingUI();captureActiveModelDocumentState();
           void resolveProfileStandardMatch(sheetMetalCapability.profileData);
           if(!quiet)console.info('[NavoFlo profile detection]',bestProfile);
           return null;
         }
         manufacturingCapability=bestManufacturing;
-        syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateManufacturingUI();
+        modelAnalysisReady=true;
+        syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateManufacturingUI();captureActiveModelDocumentState();
         if(!quiet){
           console.warn('[NavoUnfold diagnostics]',bestFailure);
           const reason=describeUnfoldFailure(bestFailure||{});
@@ -1312,6 +1366,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
 
       const result=best.result;
       flatPatternResult=result;clearProfileStandardMatch();
+      modelAnalysisReady=true;
       sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),cuttablePlate:Boolean(result.cuttablePlate),profile:false,profileType:null,profileData:null};
       manufacturingCapability=manufacturingByGeometry.get(String(best.geometry.id))||null;
       if((Number(result.bendCount)||0)>0)manufacturingCapability=null;
@@ -1698,7 +1753,7 @@ function render() {
   updateMultiMeasureLabels();
 }
 
-async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
+async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restoreAnalysis=null}={}) {
   if (files.some(f=>f.size>MAX_FILE)) return showError(T.tooLarge);
   if (files.reduce((s,f)=>s+f.size,0)>MAX_TOTAL) return showError(T.totalTooLarge);
 
@@ -1741,16 +1796,6 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
     }
 
     finalizeLoadedModel();
-    E.propsDrawer.hidden=!navo3dPreferences.propertiesOpen;
-    syncPropertiesState(false);
-    fillProperties();
-    E.empty.classList.add('hidden');
-    enableTools(true);
-    E.statusFile.textContent=main.name;
-    E.statusFormat.textContent=currentFormat;
-    E.statusUnits.textContent=unitLabel(displayUnit);
-    fitCamera('iso');
-    if(restoreView&&!restoreModelDocumentView({view:restoreView}))fitCamera('iso');
     if(currentStepResult&&restoreSheetMetal){
       sheetMetalState.thickness=Number.isFinite(restoreSheetMetal.thickness)?restoreSheetMetal.thickness:null;
       sheetMetalState.radius=Number.isFinite(restoreSheetMetal.radius)?restoreSheetMetal.radius:null;
@@ -1763,11 +1808,27 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null}={}) {
       syncSheetMetalInputs();
       syncSheetMetalUnfoldUI();
     }
-    // V8.17.0: prepare the flat pattern quietly after opening a STEP. The user
-    // stays in folded view, but DÉPLIÉE can become an instant one-click action.
+    const restoredAnalysis=Boolean(currentStepResult&&restoreModelDocumentAnalysis(restoreAnalysis,main));
+    E.propsDrawer.hidden=!navo3dPreferences.propertiesOpen;
+    syncPropertiesState(false);
+    fillProperties();
+    E.empty.classList.add('hidden');
+    enableTools(true);
+    E.statusFile.textContent=main.name;
+    E.statusFormat.textContent=currentFormat;
+    E.statusUnits.textContent=unitLabel(displayUnit);
+    fitCamera('iso');
+    if(restoreView&&!restoreModelDocumentView({view:restoreView}))fitCamera('iso');
+
+    // V8.18.4: each tab owns its completed geometric-analysis snapshot. Switching
+    // or closing another tab restores the cached classification immediately.
+    // Only re-run the expensive OCCT preflight when this file has no valid cache,
+    // or when a sheet/plate cache intentionally has no reusable flat result.
     if(currentStepResult){
       const autoDetectRef=currentStepResult;
-      setTimeout(()=>{if(currentStepResult===autoDetectRef&&!flatPatternResult&&!sheetMetalUnfoldPromise)runSheetMetalUnfold({activate:false,quiet:true}).catch(()=>{});},120);
+      const needsPreflight=!restoredAnalysis||(sheetMetalCapability.recognized&&!flatPatternResult);
+      if(needsPreflight)setTimeout(()=>{if(currentStepResult===autoDetectRef&&!flatPatternResult&&!sheetMetalUnfoldPromise)runSheetMetalUnfold({activate:false,quiet:true}).catch(()=>{});},120);
+      else if(sheetMetalCapability.profile&&!currentProfileMatch&&sheetMetalCapability.profileData)void resolveProfileStandardMatch(sheetMetalCapability.profileData);
     }
   } catch (error) {
     console.error('[NavoFlo CAD Viewer]',error);
@@ -3694,7 +3755,7 @@ async function resolveProfileStandardMatch(profile){
   try{
     const match=await matchAiscProfile(profile);
     if(epoch!==profileMatchEpoch||!sheetMetalCapability.profile||sheetMetalCapability.profileData!==profile)return;
-    currentProfileMatch=match||null;updateProfileStandardUI();updateGeometryTypeIndicator();
+    currentProfileMatch=match||null;updateProfileStandardUI();updateGeometryTypeIndicator();captureActiveModelDocumentState();
   }catch(error){
     if(epoch!==profileMatchEpoch)return;
     console.warn('[NavoFlo AISC profile matcher]',error);currentProfileMatch=null;updateProfileStandardUI();
