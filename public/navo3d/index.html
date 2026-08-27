@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#080d12">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/viewer.css?v=8.17.9">
+  <link rel="stylesheet" href="/css/viewer.css?v=8.20.4">
   <link rel="stylesheet" href="/css/cad-tabs.css?v=8.15.3">
   <script type="importmap">
   {
@@ -134,6 +134,31 @@
       <button id="n3-doc-tab-add" class="cad-doc-tab-add" type="button" title="Ouvrir un autre modèle" aria-label="Ouvrir un autre modèle">＋</button>
     </div>
 
+    <aside id="assembly-tree-panel" class="assembly-tree-panel" hidden aria-label="Arbre d’assemblage">
+      <div class="assembly-tree-toolbar">
+        <strong>STRUCTURE</strong>
+        <div class="assembly-tree-actions">
+          <button id="assembly-tree-show-all" type="button" title="Afficher toutes les pièces">◉</button>
+          <button id="assembly-tree-spread" type="button" title="Ouvrir chaque pièce dans un onglet">↗ Onglets</button>
+          <button id="assembly-tree-batch-dxf" type="button" title="Exporter en lot les DXF des pièces admissibles">DXF lot</button>
+        </div>
+      </div>
+      <div id="assembly-tree-status" class="assembly-tree-status" hidden></div>
+      <div id="assembly-tree-list" class="assembly-tree-list" role="tree"></div>
+    </aside>
+
+    <div id="assembly-context-menu" class="assembly-context-menu" hidden role="menu">
+      <button type="button" data-assembly-action="open">Ouvrir dans un onglet</button>
+      <button type="button" data-assembly-action="spread">Ouvrir les pièces en onglets</button>
+      <button type="button" data-assembly-action="batch-dxf">Exporter les DXF de cette branche</button>
+      <i></i>
+      <button type="button" data-assembly-action="hide">Cacher</button>
+      <button type="button" data-assembly-action="show">Montrer</button>
+      <button type="button" data-assembly-action="isolate">Cacher tous les autres</button>
+      <button type="button" data-assembly-action="show-others">Montrer tous les autres</button>
+      <button type="button" data-assembly-action="show-all">Montrer tout</button>
+    </div>
+
     <div id="empty-drop" class="empty-drop">
       <label for="file-input" class="empty-drop-inner" data-n3-open-picker>
         <span class="drop-cube">N</span>
@@ -195,8 +220,8 @@
           <div><dt>Organization</dt><dd id="step-org">—</dd></div>
           <div><dt>Origin</dt><dd id="step-origin">—</dd></div>
         </dl>
-        <div class="drawer-section-title tree-title">STRUCTURE / PIÈCES</div>
-        <div id="step-tree" class="step-tree">—</div>
+        <div class="drawer-section-title tree-title legacy-step-tree" hidden>STRUCTURE / PIÈCES</div>
+        <div id="step-tree" class="step-tree legacy-step-tree" hidden>—</div>
 
         <div id="step-custom-section" class="step-custom-section" hidden>
           <div class="drawer-section-title tree-title">PROPRIÉTÉS PERSONNALISÉES / CONFIGURATION</div>
@@ -267,6 +292,6 @@
 </section>
 </main>
 
-<script type="module" src="/js/viewer.js?v=8.20.3"></script>
+<script type="module" src="/js/viewer.js?v=8.20.4"></script>
 </body>
 </html>

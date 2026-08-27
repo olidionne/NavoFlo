@@ -1199,3 +1199,53 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
 /* V8.17.9 — make the identified structural designation immediately visible. */
 #profile-aisc-label{color:#35d39a;font-weight:850;letter-spacing:.01em}
 #profile-metric-label{color:#d8e2e6;font-weight:750}
+
+/* V8.20.4 — interactive Inventor/STEP assembly tree.
+   Deliberately floats over the viewport with no panel background. */
+.assembly-tree-panel{
+  position:absolute;z-index:24;top:112px;left:12px;bottom:44px;width:min(360px,34vw);
+  display:flex;flex-direction:column;min-width:220px;pointer-events:none;background:transparent;
+  color:#aab7bf;font:650 10px/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  text-shadow:0 1px 3px #071016,0 0 7px #071016;
+}
+.assembly-tree-panel[hidden]{display:none}
+.assembly-tree-toolbar{display:flex;align-items:center;gap:8px;min-height:28px;margin-bottom:4px;pointer-events:auto}
+.assembly-tree-toolbar>strong{color:#40dda5;font-size:9px;letter-spacing:.14em;white-space:nowrap}
+.assembly-tree-actions{display:flex;align-items:center;gap:3px;min-width:0}
+.assembly-tree-actions button{
+  height:25px;padding:0 7px;border:1px solid rgba(129,164,177,.16);border-radius:6px;background:rgba(8,14,19,.16);
+  color:#a9bac3;font:700 8.5px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;cursor:pointer;
+  text-shadow:0 1px 3px #071016;backdrop-filter:none;
+}
+.assembly-tree-actions button:hover{border-color:rgba(53,211,154,.48);color:#dce8ec;background:rgba(8,14,19,.32)}
+.assembly-tree-actions button:disabled{opacity:.42;cursor:wait}
+.assembly-tree-status{align-self:flex-start;max-width:100%;margin:0 0 5px;padding:3px 6px;border-radius:5px;background:rgba(8,14,19,.42);color:#78cdb0;font-size:8.5px;pointer-events:none}
+.assembly-tree-list{overflow:auto;min-height:0;max-height:100%;padding:1px 0 10px;pointer-events:auto;scrollbar-width:thin;scrollbar-color:rgba(113,139,150,.35) transparent}
+.assembly-tree-list::-webkit-scrollbar{width:7px;height:7px}.assembly-tree-list::-webkit-scrollbar-track{background:transparent}.assembly-tree-list::-webkit-scrollbar-thumb{background:rgba(113,139,150,.34);border-radius:10px}
+.assembly-tree-row{display:flex;align-items:center;height:24px;min-width:max-content;max-width:100%;border-radius:5px;user-select:none;cursor:default;outline:none}
+.assembly-tree-row:hover{background:rgba(19,31,40,.42)}
+.assembly-tree-row.selected{background:rgba(39,133,211,.22);color:#e1f0ff}
+.assembly-tree-row.is-hidden{opacity:.46}
+.assembly-tree-row .tree-caret,.assembly-tree-row .tree-eye{flex:0 0 20px;width:20px;height:22px;border:0;background:transparent;color:#748994;font:700 11px/1 monospace;cursor:pointer;padding:0;text-shadow:0 1px 3px #071016}
+.assembly-tree-row .tree-caret.placeholder{visibility:hidden;cursor:default}
+.assembly-tree-row .tree-eye{color:#8196a0;font-size:10px}.assembly-tree-row.is-hidden .tree-eye{color:#4d626d}
+.assembly-tree-row .tree-icon{flex:0 0 17px;width:17px;color:#43d8a2;font-size:10px;text-align:center}
+.assembly-tree-row.part .tree-icon{color:#91a6af}
+.assembly-tree-row .tree-name{display:block;min-width:0;max-width:285px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px;cursor:pointer}
+.assembly-tree-row.selected .tree-name{color:#8bc7ff}
+.assembly-tree-row .tree-name:hover{color:#e7f2f5}
+
+.assembly-context-menu{
+  position:fixed;z-index:10020;min-width:220px;padding:5px;border:1px solid rgba(132,156,168,.25);border-radius:8px;
+  background:rgba(7,13,18,.97);box-shadow:0 14px 45px rgba(0,0,0,.48);font:650 10px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+.assembly-context-menu[hidden]{display:none}
+.assembly-context-menu button{display:block;width:100%;height:29px;padding:0 9px;border:0;border-radius:5px;background:transparent;color:#b7c4ca;text-align:left;cursor:pointer}
+.assembly-context-menu button:hover{background:rgba(53,211,154,.11);color:#e9f4f0}
+.assembly-context-menu button[hidden]{display:none}
+.assembly-context-menu i{display:block;height:1px;margin:4px 5px;background:rgba(255,255,255,.08)}
+
+.cad-workspace.is-fullscreen .assembly-tree-panel{top:112px;left:14px;bottom:48px;width:min(390px,32vw);font-size:10.5px}
+@media(max-width:900px){.assembly-tree-panel{width:min(310px,46vw)}.assembly-tree-actions button{padding:0 5px}.assembly-tree-row .tree-name{max-width:225px}}
+@media(max-width:600px){.assembly-tree-panel{top:110px;left:8px;width:min(270px,62vw);font-size:9px}.assembly-tree-actions button{font-size:0;width:26px;padding:0}.assembly-tree-actions button::first-letter{font-size:10px}.assembly-tree-row .tree-name{max-width:190px}}
+.assembly-tree-status[data-tone="ok"]{color:#66dfaa}.assembly-tree-status[data-tone="warn"]{color:#e8ba74}

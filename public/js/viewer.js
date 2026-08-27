@@ -5,8 +5,8 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.20.3';
-import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.20.3';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.20.4';
+import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.20.4';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.20.1';
 
@@ -77,18 +77,39 @@ const E = {
   smSectionTitle:$('sm-section-title'), smEngineNote:$('sm-engine-note'), smAdvanced:$('sm-advanced'), smKRow:$('sm-k-row'), smBendsRow:$('sm-bends-row'),
   smDetectedThickness:$('sm-detected-thickness'), smDetectedBends:$('sm-detected-bends'), smFlatSize:$('sm-flat-size'),
   statusFile:$('status-file'), statusFormat:$('status-format'), statusUnits:$('status-units'),
-  docTabs:$('n3-doc-tabs'), docTabList:$('n3-doc-tab-list'), docTabAdd:$('n3-doc-tab-add')
+  docTabs:$('n3-doc-tabs'), docTabList:$('n3-doc-tab-list'), docTabAdd:$('n3-doc-tab-add'),
+  assemblyTreePanel:$('assembly-tree-panel'), assemblyTreeList:$('assembly-tree-list'), assemblyTreeStatus:$('assembly-tree-status'),
+  assemblyTreeShowAll:$('assembly-tree-show-all'), assemblyTreeSpread:$('assembly-tree-spread'), assemblyTreeBatchDxf:$('assembly-tree-batch-dxf'),
+  assemblyContextMenu:$('assembly-context-menu')
 };
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.20.3';
+const WORKER_URL = '/js/step-worker.js?v=8.20.4';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
   medium:Object.freeze({toThickness:0.38,to3Thickness:0.43,over3Thickness:0.50}),
   hard:Object.freeze({toThickness:0.40,to3Thickness:0.45,over3Thickness:0.50})
 });
+
+const ASMT = FR ? {
+  assembly:'Assemblage STEP', subassembly:'Sous-assemblage STEP', part:'Pièce STEP',
+  openPart:'Ouvrir la pièce', openSubassembly:'Ouvrir le sous-assemblage',
+  batchWorking:'Analyse DXF en lot…', batchDone:'Export DXF terminé', batchNone:'Aucun DXF admissible dans cette branche.',
+  batchCancelled:'Export DXF annulé.', spreadConfirm:n=>`Ouvrir ${n} pièces dans des onglets Navo3D ?`,
+  spreadLimit:n=>`La branche contient ${n} pièces. Navo3D ouvrira au maximum 60 onglets à la fois.`,
+  dxfExported:n=>`${n} DXF exporté(s)`, dxfSkipped:n=>`${n} ignoré(s)`,
+  directoryPrompt:'Choisissez le dossier de destination des DXF.'
+} : {
+  assembly:'STEP assembly', subassembly:'STEP sub-assembly', part:'STEP part',
+  openPart:'Open part', openSubassembly:'Open sub-assembly',
+  batchWorking:'Batch DXF analysis…', batchDone:'DXF batch export complete', batchNone:'No eligible DXF in this branch.',
+  batchCancelled:'DXF batch export cancelled.', spreadConfirm:n=>`Open ${n} parts in Navo3D tabs?`,
+  spreadLimit:n=>`This branch contains ${n} parts. Navo3D will open at most 60 tabs at a time.`,
+  dxfExported:n=>`${n} DXF exported`, dxfSkipped:n=>`${n} skipped`,
+  directoryPrompt:'Choose the DXF destination folder.'
+};
 
 const SMT = FR ? {
   needStep:'Chargez un STEP pour utiliser les paramètres de tôlerie.',
@@ -201,7 +222,19 @@ let baseMaterials = new Set();
 // File objects and per-document camera/unit state stay local in the browser.
 const modelDocuments=new Map();
 let activeModelDocumentId=null,modelDocumentSeq=0,modelDocumentBusy=false,pendingModelDocumentId=null;
-const MODEL_ANALYSIS_CACHE_VERSION=8;
+
+// V8.20.4 — assembly hierarchy is a first-class viewport tool. The STEP file
+// remains the single source object; part/sub-assembly tabs are lightweight
+// virtual views that reload the same local STEP and restrict scene + analysis
+// to one hierarchy branch instead of manufacturing fake temporary STEP files.
+let currentAssemblyFocus=null,currentAssemblyMode=false,currentAssemblyHierarchyAvailable=false;
+let currentHierarchyRootSpecs=[];
+let currentActiveGeometryIds=new Set();
+let assemblyTreeRecords=new Map(),assemblyOccurrenceRecords=[];
+let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
+const assemblyExpandedKeys=new Set();
+
+const MODEL_ANALYSIS_CACHE_VERSION=9;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -256,6 +289,20 @@ function restoreModelDocumentAnalysis(snapshot,main){
   updateManufacturingUI();
   return true;
 }
+function currentAssemblyTreeState(){
+  if(!currentAssemblyHierarchyAvailable||!assemblyTreeRecords.size)return null;
+  return {
+    hiddenKeys:[...new Set(assemblyOccurrenceRecords.filter(occ=>occ.group.visible===false).map(occ=>occ.treeKey))],
+    expandedKeys:[...assemblyExpandedKeys],
+    selectedKey:assemblySelectedKey||null
+  };
+}
+function restoreAssemblyTreeState(state){
+  if(!state||!assemblyTreeRecords.size)return;
+  if(Array.isArray(state.expandedKeys)){assemblyExpandedKeys.clear();for(const key of state.expandedKeys)if(assemblyTreeRecords.has(key))assemblyExpandedKeys.add(key);}
+  const hidden=new Set(Array.isArray(state.hiddenKeys)?state.hiddenKeys:[]);for(const occ of assemblyOccurrenceRecords)occ.group.visible=!hidden.has(occ.treeKey);
+  if(state.selectedKey&&assemblyTreeRecords.has(state.selectedKey))selectAssemblyTreeNode(state.selectedKey);
+}
 function captureActiveModelDocumentState(){
   if(!activeModelDocumentId)return;
   const doc=modelDocuments.get(activeModelDocumentId);if(!doc)return;
@@ -263,6 +310,7 @@ function captureActiveModelDocumentState(){
     doc.view={position:camera.position.toArray(),quaternion:camera.quaternion.toArray(),up:camera.up.toArray(),target:controls.target.toArray(),displayUnit,projectionMode:cameraProjectionMode,zoom:camera.isOrthographicCamera?camera.zoom:1};
   }
   doc.lastFormat=currentFormat||doc.lastFormat||'';
+  doc.assembly=currentAssemblyTreeState();
   doc.sheetMetal={thickness:sheetMetalState.thickness,radius:sheetMetalState.radius,bendAngleDeg:sheetMetalState.bendAngleDeg,manualKEnabled:sheetMetalState.manualKEnabled,manualK:sheetMetalState.manualK,fixedFace:sheetMetalState.fixedFace?{...sheetMetalState.fixedFace}:null};
   const analysis=currentModelAnalysisSnapshot();
   if(analysis)doc.analysis=analysis;
@@ -294,7 +342,7 @@ async function openModelDocuments(files,handleByName=null){
   for(const set of sets){
     if(set.files.some(file=>file.size>MAX_FILE)){showError(T.tooLarge);continue;}
     if(set.files.reduce((sum,file)=>sum+file.size,0)>MAX_TOTAL){showError(T.totalTooLarge);continue;}
-    const id=nextModelDocumentId();modelDocuments.set(id,{id,name:set.main.name,main:set.main,mainHandle:set.mainHandle||null,files:set.files,view:null,lastFormat:ext(set.main.name).toUpperCase(),analysis:null});newIds.push(id);
+    const id=nextModelDocumentId();modelDocuments.set(id,{id,name:set.main.name,main:set.main,mainHandle:set.mainHandle||null,files:set.files,view:null,lastFormat:ext(set.main.name).toUpperCase(),analysis:null,focus:null,assembly:null});newIds.push(id);
   }
   renderModelDocumentTabs();
   if(newIds.length)await activateModelDocument(newIds[0]);
@@ -309,6 +357,7 @@ async function pickModelFiles(){
 }
 async function saveCurrentModel(forceSaveAs=false){
   const doc=activeModelDocumentId?modelDocuments.get(activeModelDocumentId):null;if(!doc?.main)return;
+  if(doc.focus){showError(FR?'Cet onglet est une vue virtuelle de l’assemblage. Le STEP source reste l’assemblage complet; utilisez Exporter DXF pour la pièce.':'This tab is a virtual assembly view. The source STEP remains the full assembly; use Export DXF for the part.');return;}
   try{
     let handle=!forceSaveAs?doc.mainHandle:null;
     if(!handle&&FSA3_SAVE_SUPPORTED){const extension='.'+ext(doc.main.name);handle=await window.showSaveFilePicker({suggestedName:doc.main.name,types:[{description:`${extension.toUpperCase()} CAD`,accept:{'application/octet-stream':[extension]}}]});}
@@ -325,7 +374,7 @@ function modelSessionSnapshot(){
     modelDocumentSeq,
     documents:[...modelDocuments.values()].map(doc=>({
       id:doc.id,name:doc.name,main:doc.main,mainHandle:doc.mainHandle||null,files:doc.files,
-      view:doc.view||null,lastFormat:doc.lastFormat||'',sheetMetal:doc.sheetMetal||null,analysis:doc.analysis||null
+      view:doc.view||null,lastFormat:doc.lastFormat||'',sheetMetal:doc.sheetMetal||null,analysis:doc.analysis||null,focus:doc.focus||null,assembly:doc.assembly||null
     }))
   };
 }
@@ -376,7 +425,7 @@ async function activateModelDocument(id){
   if(id===activeModelDocumentId&&currentModel)return;
   captureActiveModelDocumentState();activeModelDocumentId=id;renderModelDocumentTabs();
   const doc=modelDocuments.get(id);modelDocumentBusy=true;renderModelDocumentTabs();
-  try{await loadFileSet(doc.files,{restoreView:doc.view,restoreSheetMetal:doc.sheetMetal,restoreAnalysis:doc.analysis});}
+  try{await loadFileSet(doc.files,{restoreView:doc.view,restoreSheetMetal:doc.sheetMetal,restoreAnalysis:doc.analysis,restoreFocus:doc.focus||null,restoreAssembly:doc.assembly||null});}
   finally{
     modelDocumentBusy=false;renderModelDocumentTabs();
     const pending=pendingModelDocumentId;pendingModelDocumentId=null;
@@ -393,6 +442,222 @@ async function closeModelDocument(id=activeModelDocumentId){
   const ids=[...modelDocuments.keys()],index=ids.indexOf(id),next=ids[index+1]||ids[index-1]||null;
   modelDocuments.delete(id);activeModelDocumentId=null;await clearModel(true);renderModelDocumentTabs();
   if(next&&modelDocuments.has(next))await activateModelDocument(next);
+}
+
+
+// ---------------------------------------------------------------------------
+// V8.20.4 — functional assembly hierarchy
+// ---------------------------------------------------------------------------
+function assemblyNodeAtKey(roots,key){
+  if(!Array.isArray(roots)||key==null)return null;
+  const path=String(key).split('/').map(Number);
+  let nodes=roots,node=null;
+  for(const index of path){
+    if(!Number.isInteger(index)||index<0||index>=nodes.length)return null;
+    node=nodes[index];nodes=Array.isArray(node?.children)?node.children:[];
+  }
+  return node;
+}
+function assemblyNodeIsAssembly(node){return Boolean(node?.isAssembly||(Array.isArray(node?.children)&&node.children.length));}
+function assemblyRecordIsAssembly(record){return Boolean(record?.isAssembly||record?.childrenKeys?.length);}
+function assemblyCurrentScopeKey(){return currentHierarchyRootSpecs.length===1?currentHierarchyRootSpecs[0].key:null;}
+function assemblyDescendantRecord(record,key){return Boolean(record&&(key==null||record.key===key||record.key.startsWith(String(key)+'/')));}
+function assemblyRecordsForKey(key=null){return [...assemblyTreeRecords.values()].filter(record=>assemblyDescendantRecord(record,key));}
+function assemblyOccurrencesForKey(key=null){return assemblyOccurrenceRecords.filter(occ=>key==null||occ.treeKey===key||occ.treeKey.startsWith(String(key)+'/'));}
+function assemblyLeafRecordsForKey(key=null){
+  return assemblyRecordsForKey(key).filter(record=>record.occurrences.length&&!record.childrenKeys.length);
+}
+function assemblyRecordVisibility(record){
+  const occs=assemblyOccurrencesForKey(record?.key);if(!occs.length)return 'visible';
+  const shown=occs.filter(occ=>occ.group.visible!==false).length;
+  return shown===0?'hidden':shown===occs.length?'visible':'mixed';
+}
+function sanitizeAssemblyFilename(value,fallback='part'){
+  const clean=String(value||fallback).replace(/\.[^.]+$/,'').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').replace(/\s+/g,' ').trim();
+  return (clean||fallback).slice(0,120);
+}
+function setAssemblyTreeStatus(text='',tone='info'){
+  if(!E.assemblyTreeStatus)return;
+  E.assemblyTreeStatus.hidden=!text;E.assemblyTreeStatus.textContent=text||'';E.assemblyTreeStatus.dataset.tone=tone;
+}
+function setAssemblyBatchBusy(busy){
+  assemblyBatchBusy=Boolean(busy);
+  [E.assemblyTreeBatchDxf,E.assemblyTreeSpread].filter(Boolean).forEach(button=>button.disabled=assemblyBatchBusy);
+}
+function closeAssemblyContextMenu(){if(E.assemblyContextMenu)E.assemblyContextMenu.hidden=true;assemblyContextKey=null;}
+function openAssemblyContextMenu(event,key){
+  const record=assemblyTreeRecords.get(key);if(!record||!E.assemblyContextMenu)return;
+  event.preventDefault();event.stopPropagation();selectAssemblyTreeNode(key);assemblyContextKey=key;
+  const menu=E.assemblyContextMenu,isAssembly=assemblyRecordIsAssembly(record);
+  const open=menu.querySelector('[data-assembly-action="open"]'),spread=menu.querySelector('[data-assembly-action="spread"]');
+  if(open)open.textContent=isAssembly?ASMT.openSubassembly:ASMT.openPart;
+  if(spread)spread.hidden=!isAssembly;
+  menu.hidden=false;menu.style.left=`${event.clientX}px`;menu.style.top=`${event.clientY}px`;
+  requestAnimationFrame(()=>{
+    const r=menu.getBoundingClientRect(),pad=8;
+    menu.style.left=`${Math.max(pad,Math.min(event.clientX,innerWidth-r.width-pad))}px`;
+    menu.style.top=`${Math.max(pad,Math.min(event.clientY,innerHeight-r.height-pad))}px`;
+  });
+}
+function clearAssemblyTreeSelection({rerender=true}={}){
+  for(const occ of assemblyOccurrenceRecords){
+    for(const mesh of occ.surfaceMeshes||[]){
+      const original=mesh.userData?.assemblyTreeOriginalMaterial;if(!original)continue;
+      const current=Array.isArray(mesh.material)?mesh.material:[mesh.material];
+      current.forEach(material=>{if(material&&material!==original&&!Array.isArray(original))material.dispose?.();});
+      if(Array.isArray(original)){
+        current.forEach((material,index)=>{if(material&&material!==original[index])material.dispose?.();});
+      }
+      mesh.material=original;delete mesh.userData.assemblyTreeOriginalMaterial;
+    }
+  }
+  assemblySelectedKey=null;if(rerender)renderAssemblyTree();
+}
+function assemblyHighlightClone(material){
+  if(!material?.clone)return material;
+  const clone=material.clone();clone.color?.set?.(0x2d8cff);clone.emissive?.set?.(0x0a355a);if('emissiveIntensity'in clone)clone.emissiveIntensity=.95;clone.needsUpdate=true;return clone;
+}
+function selectAssemblyTreeNode(key,{fit=false}={}){
+  const record=assemblyTreeRecords.get(key);if(!record)return;
+  clearAssemblyTreeSelection({rerender:false});assemblySelectedKey=key;
+  for(const occ of assemblyOccurrencesForKey(key))for(const mesh of occ.surfaceMeshes||[]){
+    mesh.userData.assemblyTreeOriginalMaterial=mesh.material;
+    mesh.material=Array.isArray(mesh.material)?mesh.material.map(assemblyHighlightClone):assemblyHighlightClone(mesh.material);
+  }
+  renderAssemblyTree();if(fit)fitAssemblyTreeNode(key);
+}
+function setAssemblyNodeVisibility(key,visible){
+  for(const occ of assemblyOccurrencesForKey(key))occ.group.visible=Boolean(visible);
+  renderAssemblyTree();
+}
+function isolateAssemblyTreeNode(key){
+  const prefix=String(key)+'/';
+  for(const occ of assemblyOccurrenceRecords)occ.group.visible=occ.treeKey===key||occ.treeKey.startsWith(prefix);
+  renderAssemblyTree();
+}
+function showAssemblyTreeOthers(key){
+  const prefix=String(key)+'/';
+  for(const occ of assemblyOccurrenceRecords)if(!(occ.treeKey===key||occ.treeKey.startsWith(prefix)))occ.group.visible=true;
+  renderAssemblyTree();
+}
+function showAllAssemblyTreeNodes(){for(const occ of assemblyOccurrenceRecords)occ.group.visible=true;renderAssemblyTree();}
+function fitAssemblyTreeNode(key){
+  const objects=assemblyOccurrencesForKey(key).filter(occ=>occ.group.visible!==false).map(occ=>occ.group);if(!objects.length)return;
+  const box=new THREE.Box3();for(const object of objects)box.expandByObject(object);if(box.isEmpty())return;
+  const previous=modelBounds;modelBounds=box;fitCurrentView();modelBounds=previous;updateZoomClipping();
+}
+function toggleAssemblyExpanded(key){if(assemblyExpandedKeys.has(key))assemblyExpandedKeys.delete(key);else assemblyExpandedKeys.add(key);renderAssemblyTree();}
+
+function renderAssemblyTree(){
+  if(!E.assemblyTreePanel||!E.assemblyTreeList)return;
+  const show=Boolean(currentStepResult&&currentAssemblyHierarchyAvailable&&currentAssemblyMode&&assemblyTreeRecords.size);
+  E.assemblyTreePanel.hidden=!show;if(!show){E.assemblyTreeList.replaceChildren();closeAssemblyContextMenu();return;}
+  E.assemblyTreeList.replaceChildren();
+  const appendRecord=(record)=>{
+    if(!record)return;
+    const row=document.createElement('div');row.className=`assembly-tree-row ${assemblyRecordIsAssembly(record)?'assembly':'part'}`;row.dataset.treeKey=record.key;row.setAttribute('role','treeitem');row.style.paddingLeft=`${Math.min(record.depth,14)*13}px`;row.title=record.name;
+    const visibility=assemblyRecordVisibility(record);row.classList.toggle('is-hidden',visibility==='hidden');row.classList.toggle('selected',assemblySelectedKey===record.key);
+    const hasChildren=record.childrenKeys.length>0,expanded=assemblyExpandedKeys.has(record.key);if(hasChildren)row.setAttribute('aria-expanded',expanded?'true':'false');
+    const caret=document.createElement('button');caret.type='button';caret.className='tree-caret'+(hasChildren?'':' placeholder');caret.textContent=hasChildren?(expanded?'▾':'▸'):'·';caret.tabIndex=-1;if(hasChildren)caret.addEventListener('click',event=>{event.stopPropagation();toggleAssemblyExpanded(record.key);});
+    const eye=document.createElement('button');eye.type='button';eye.className='tree-eye';eye.textContent=visibility==='hidden'?'○':visibility==='mixed'?'◐':'●';eye.title=visibility==='hidden'?(FR?'Montrer':'Show'):(FR?'Cacher':'Hide');eye.tabIndex=-1;eye.addEventListener('click',event=>{event.stopPropagation();setAssemblyNodeVisibility(record.key,visibility==='hidden');});
+    const icon=document.createElement('span');icon.className='tree-icon';icon.textContent=assemblyRecordIsAssembly(record)?'▦':'◇';
+    const name=document.createElement('span');name.className='tree-name';name.textContent=record.name||'(unnamed)';
+    row.append(caret,eye,icon,name);
+    row.addEventListener('click',event=>{if(event.target.closest('button'))return;selectAssemblyTreeNode(record.key);});
+    row.addEventListener('dblclick',event=>{event.preventDefault();selectAssemblyTreeNode(record.key,{fit:true});});
+    row.addEventListener('contextmenu',event=>openAssemblyContextMenu(event,record.key));
+    E.assemblyTreeList.append(row);
+    if(hasChildren&&expanded)for(const childKey of record.childrenKeys)appendRecord(assemblyTreeRecords.get(childKey));
+  };
+  for(const spec of currentHierarchyRootSpecs)appendRecord(assemblyTreeRecords.get(spec.key));
+}
+
+function assemblyGeometryFingerprint(record){return [...new Set(assemblyOccurrencesForKey(record.key).map(occ=>occ.geometryId))].sort().join('|');}
+async function openAssemblyNodeInTab(key){
+  const record=assemblyTreeRecords.get(key),sourceDoc=activeModelDocumentId?modelDocuments.get(activeModelDocumentId):null;if(!record||!sourceDoc?.main)return;
+  const signature=modelFileSignature(sourceDoc.main);
+  const existing=[...modelDocuments.values()].find(doc=>doc.focus?.key===key&&modelFileSignature(doc.main)===signature);
+  if(existing){await activateModelDocument(existing.id);return;}
+  const id=nextModelDocumentId(),name=record.name||sourceDoc.name;
+  modelDocuments.set(id,{id,name,main:sourceDoc.main,mainHandle:sourceDoc.mainHandle||null,files:sourceDoc.files,view:null,lastFormat:sourceDoc.lastFormat||'STEP',analysis:null,sheetMetal:null,focus:{key,name,isAssembly:assemblyRecordIsAssembly(record)},assembly:null});
+  renderModelDocumentTabs();await activateModelDocument(id);
+}
+async function spreadAssemblyNodeToTabs(key=null){
+  if(assemblyBatchBusy)return;
+  const sourceDoc=activeModelDocumentId?modelDocuments.get(activeModelDocumentId):null;if(!sourceDoc?.main)return;
+  const candidates=assemblyLeafRecordsForKey(key),unique=[],seen=new Set();
+  for(const record of candidates){const fingerprint=assemblyGeometryFingerprint(record)||record.key;if(seen.has(fingerprint))continue;seen.add(fingerprint);unique.push(record);}
+  if(!unique.length)return;
+  if(unique.length>60)alert(ASMT.spreadLimit(unique.length));
+  const selected=unique.slice(0,60);if(selected.length>10&&!confirm(ASMT.spreadConfirm(selected.length)))return;
+  const signature=modelFileSignature(sourceDoc.main),newIds=[];
+  for(const record of selected){
+    const existing=[...modelDocuments.values()].find(doc=>doc.focus?.key===record.key&&modelFileSignature(doc.main)===signature);if(existing)continue;
+    const id=nextModelDocumentId(),name=record.name||sourceDoc.name;
+    modelDocuments.set(id,{id,name,main:sourceDoc.main,mainHandle:sourceDoc.mainHandle||null,files:sourceDoc.files,view:null,lastFormat:sourceDoc.lastFormat||'STEP',analysis:null,sheetMetal:null,focus:{key:record.key,name,isAssembly:false},assembly:null});newIds.push(id);
+  }
+  renderModelDocumentTabs();if(newIds.length)await activateModelDocument(newIds[0]);
+}
+
+function assemblyBatchTargets(key=null){
+  const targets=new Map();
+  for(const occ of assemblyOccurrencesForKey(key)){
+    if(targets.has(occ.geometryId))continue;
+    const record=assemblyTreeRecords.get(occ.treeKey),geometry=currentStepResult?.geometries?.[occ.meshIndex]||occ.geometry;
+    if(!geometry)continue;
+    targets.set(occ.geometryId,{geometry,geometryId:occ.geometryId,name:record?.name||geometry.name||`part-${occ.meshIndex+1}`,treeKey:occ.treeKey});
+  }
+  return [...targets.values()];
+}
+async function analyzeAssemblyGeometryForDxf(target){
+  const geometry=target?.geometry;if(!geometry)return{ok:false,reason:'geometry'};
+  const analyzeWith=info=>analyzeAndUnfold({geometry,faceInfo:info?.faces||[],edgeInfo:info?.edges||[],logicalGroups:info?.logicalGroups||[],fixedFaceId:null,thickness:null,fallbackInsideRadius:null,kResolver:resolveUnfoldK});
+  let exact,result;
+  try{exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});result=analyzeWith(exact);}catch(error){return{ok:false,reason:error?.message||'sheet-info'};}
+  if(!(result?.ok&&(Number(result.bendCount)||0)>0)){
+    try{exact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});result=analyzeWith(exact);}catch(error){if(!result?.ok)return{ok:false,reason:error?.message||'manufacturing-info'};}
+  }
+  if(!result?.ok)return{ok:false,reason:result?.code||'not-flat'};
+  if(result.flatPlate&&exact){
+    try{
+      const manufacturing=buildManufacturingKnowledge({geometry,faceInfo:exact.faces||[],edgeInfo:exact.edges||[],sheetResult:result});
+      if(manufacturing?.capabilities?.export2dDxf===false&&manufacturingLooksLikeRoundShaft(manufacturing))return{ok:false,reason:'round-stock'};
+    }catch{}
+  }
+  return{ok:true,result};
+}
+function batchDxfFilename(target,result,used){
+  const base=sanitizeAssemblyFilename(target.name,`part-${target.geometryId}`),suffix=(Number(result?.bendCount)||0)>0?'_FLAT':'',stem=`${base}${suffix}`;
+  let index=(used.get(stem)||0)+1;used.set(stem,index);return`${stem}${index>1?`_${index}`:''}.dxf`;
+}
+async function writeAssemblyBatchDxf(handle,name,text){
+  if(handle){const fileHandle=await handle.getFileHandle(name,{create:true}),writable=await fileHandle.createWritable();await writable.write(text);await writable.close();return;}
+  const blob=new Blob([text],{type:'application/dxf'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1800);
+}
+async function batchExportAssemblyDxfs(key=null){
+  if(assemblyBatchBusy||!currentStepResult)return;
+  const stepRef=currentStepResult,docRef=activeModelDocumentId;
+  const targets=assemblyBatchTargets(key);if(!targets.length){setAssemblyTreeStatus(ASMT.batchNone,'warn');return;}
+  let directory=null;
+  if(typeof window.showDirectoryPicker==='function'){
+    try{directory=await window.showDirectoryPicker({mode:'readwrite'});}catch(error){if(error?.name==='AbortError'){setAssemblyTreeStatus(ASMT.batchCancelled,'warn');return;}console.warn('[NavoFlo batch DXF directory]',error);}
+  }
+  setAssemblyBatchBusy(true);setAssemblyTreeStatus(`${ASMT.batchWorking} 0/${targets.length}`);
+  const used=new Map();let exported=0,skipped=0;
+  try{
+    for(let index=0;index<targets.length;index++){
+      if(currentStepResult!==stepRef||activeModelDocumentId!==docRef)return;
+      const target=targets[index];setAssemblyTreeStatus(`${ASMT.batchWorking} ${index+1}/${targets.length} · ${target.name}`);
+      const analyzed=await analyzeAssemblyGeometryForDxf(target);
+      if(currentStepResult!==stepRef||activeModelDocumentId!==docRef)return;
+      if(!analyzed.ok){skipped++;continue;}
+      const result=analyzed.result,name=batchDxfFilename(target,result,used),partName=sanitizeAssemblyFilename(target.name),text=flatPatternToDxf(result,{partName,units:'in'});
+      await writeAssemblyBatchDxf(directory,name,text);exported++;
+      await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+    }
+    if(currentStepResult===stepRef&&activeModelDocumentId===docRef)setAssemblyTreeStatus(exported?`${ASMT.batchDone} · ${ASMT.dxfExported(exported)}${skipped?` · ${ASMT.dxfSkipped(skipped)}`:''}`:ASMT.batchNone,exported?'ok':'warn');
+  }catch(error){console.error('[NavoFlo batch DXF]',error);setAssemblyTreeStatus(`${FR?'Erreur DXF':'DXF error'} · ${error?.message||error}`,'warn');}
+  finally{setAssemblyBatchBusy(false);}
 }
 
 
@@ -580,6 +845,22 @@ function bindUI() {
   E.save?.addEventListener('click',()=>saveCurrentModel(false));
   E.saveAs?.addEventListener('click',()=>saveCurrentModel(true));
   E.docTabAdd?.addEventListener('click',pickModelFiles);
+  E.assemblyTreeShowAll?.addEventListener('click',showAllAssemblyTreeNodes);
+  E.assemblyTreeSpread?.addEventListener('click',()=>spreadAssemblyNodeToTabs(assemblyCurrentScopeKey()));
+  E.assemblyTreeBatchDxf?.addEventListener('click',()=>batchExportAssemblyDxfs(assemblyCurrentScopeKey()));
+  E.assemblyContextMenu?.addEventListener('click',async event=>{
+    const button=event.target.closest('button[data-assembly-action]');if(!button||!assemblyContextKey)return;
+    const key=assemblyContextKey,action=button.dataset.assemblyAction;closeAssemblyContextMenu();
+    if(action==='open')await openAssemblyNodeInTab(key);
+    else if(action==='spread')await spreadAssemblyNodeToTabs(key);
+    else if(action==='batch-dxf')await batchExportAssemblyDxfs(key);
+    else if(action==='hide')setAssemblyNodeVisibility(key,false);
+    else if(action==='show')setAssemblyNodeVisibility(key,true);
+    else if(action==='isolate')isolateAssemblyTreeNode(key);
+    else if(action==='show-others')showAssemblyTreeOthers(key);
+    else if(action==='show-all')showAllAssemblyTreeNodes();
+  });
+  addEventListener('pointerdown',event=>{if(E.assemblyContextMenu&&!E.assemblyContextMenu.hidden&&!E.assemblyContextMenu.contains(event.target))closeAssemblyContextMenu();},true);
   E.fit.addEventListener('click', () => flatPatternActive?fitFlatPatternView():fitCurrentView());
   E.edges.addEventListener('click', toggleEdges);
   E.gridToggle.addEventListener('click', toggleGrid);
@@ -831,7 +1112,9 @@ function bindUI() {
 
     if (event.key === 'Escape') {
       closeSelectOther();
+      closeAssemblyContextMenu();
       clearSelections();
+      clearAssemblyTreeSelection();
       clearPreselection();
       return;
     }
@@ -1320,8 +1603,9 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
     syncSheetMetalUnfoldUI();
     try{
       const allGeometries=Array.isArray(stepRef.geometries)?stepRef.geometries:[];
+      const scopedGeometries=currentActiveGeometryIds.size?allGeometries.filter(g=>currentActiveGeometryIds.has(String(g.id))):allGeometries;
       const fixed=sheetMetalState.fixedFace?{...sheetMetalState.fixedFace}:null;
-      const geometries=fixed?allGeometries.filter(g=>String(g.id)===String(fixed.geometryId)):allGeometries;
+      const geometries=fixed?scopedGeometries.filter(g=>String(g.id)===String(fixed.geometryId)):scopedGeometries;
       if(!geometries.length){if(!quiet)setSheetMetalStatus(SMT.unfoldFailed+' · géométrie introuvable','warn');return null;}
 
       let best=null,bestScore=-Infinity,bestFailure=null,bestProfile=null,bestRolled=null,bestManufacturing=null;
@@ -1841,7 +2125,7 @@ function render() {
   updateMultiMeasureLabels();
 }
 
-async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restoreAnalysis=null}={}) {
+async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restoreAnalysis=null,restoreFocus=null,restoreAssembly=null}={}) {
   if (files.some(f=>f.size>MAX_FILE)) return showError(T.tooLarge);
   if (files.reduce((s,f)=>s+f.size,0)>MAX_TOTAL) return showError(T.totalTooLarge);
 
@@ -1849,6 +2133,7 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restor
   if (!main) return showError(T.unsupported);
 
   await clearModel(false);
+  currentAssemblyFocus=restoreFocus||null;
   busy(true,T.loading,ext(main.name)==='step'||ext(main.name)==='stp'?T.stepEngine:T.meshOpen);
 
   try {
@@ -1872,9 +2157,11 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restor
         renderStepCustomProperties();
       }).catch(error=>console.warn('[NavoFlo STEP metadata]',error));
       buildExactStepScene(result);
+      restoreAssemblyTreeState(restoreAssembly);
       const loadedStepRef=result;
       workerRequest('logical-face-groups',{}).then(info=>{if(currentStepResult===loadedStepRef)applyLogicalFaceCleanup(info?.groups||[]);}).catch(()=>{});
     } else {
+      currentAssemblyFocus=null;currentAssemblyMode=false;currentAssemblyHierarchyAvailable=false;
       currentStepResult=null;
       currentUnit='u';
       displayUnit='u';
@@ -1896,13 +2183,13 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restor
       syncSheetMetalInputs();
       syncSheetMetalUnfoldUI();
     }
-    const restoredAnalysis=Boolean(currentStepResult&&restoreModelDocumentAnalysis(restoreAnalysis,main));
+    const restoredAnalysis=Boolean(currentStepResult&&!currentAssemblyMode&&restoreModelDocumentAnalysis(restoreAnalysis,main));
     E.propsDrawer.hidden=!navo3dPreferences.propertiesOpen;
     syncPropertiesState(false);
     fillProperties();
     E.empty.classList.add('hidden');
     enableTools(true);
-    E.statusFile.textContent=main.name;
+    E.statusFile.textContent=currentAssemblyFocus?.name||main.name;
     E.statusFormat.textContent=currentFormat;
     E.statusUnits.textContent=unitLabel(displayUnit);
     fitCamera('iso');
@@ -1913,10 +2200,18 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restor
     // Only re-run the expensive OCCT preflight when this file has no valid cache,
     // or when a sheet/plate cache intentionally has no reusable flat result.
     if(currentStepResult){
-      const autoDetectRef=currentStepResult;
-      const needsPreflight=!restoredAnalysis||(sheetMetalCapability.recognized&&!flatPatternResult);
-      if(needsPreflight)setTimeout(()=>{if(currentStepResult===autoDetectRef&&!flatPatternResult&&!sheetMetalUnfoldPromise)runSheetMetalUnfold({activate:false,quiet:true}).catch(()=>{});},120);
-      else if(sheetMetalCapability.profile&&!currentProfileMatch&&sheetMetalCapability.profileData)void resolveProfileStandardMatch(sheetMetalCapability.profileData);
+      if(currentAssemblyMode){
+        // An assembly has no single manufacturing process or flat pattern. Do
+        // not let the part recognizer pick an arbitrary child as the assembly
+        // classification. Analysis happens per virtual part tab or via batch DXF.
+        modelAnalysisReady=true;manufacturingCapability=null;sheetMetalCapability=emptySheetMetalCapability();clearFlatPattern();
+        syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateSheetMetalDimensionsUI();updateManufacturingUI();captureActiveModelDocumentState();
+      }else{
+        const autoDetectRef=currentStepResult;
+        const needsPreflight=!restoredAnalysis||(sheetMetalCapability.recognized&&!flatPatternResult);
+        if(needsPreflight)setTimeout(()=>{if(currentStepResult===autoDetectRef&&!flatPatternResult&&!sheetMetalUnfoldPromise)runSheetMetalUnfold({activate:false,quiet:true}).catch(()=>{});},120);
+        else if(sheetMetalCapability.profile&&!currentProfileMatch&&sheetMetalCapability.profileData)void resolveProfileStandardMatch(sheetMetalCapability.profileData);
+      }
     }
   } catch (error) {
     console.error('[NavoFlo CAD Viewer]',error);
@@ -1966,33 +2261,58 @@ function getWorker() {
 }
 
 function buildExactStepScene(result) {
-  const defs=(result.geometries||[]).map(makeCadDefinition);
-  const roots=result.rootNodes||[];
+  const defs=(result.geometries||[]).map(makeCadDefinition),roots=result.rootNodes||[];
+  assemblyTreeRecords=new Map();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblySelectedKey=null;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();
 
-  if (roots.length) {
-    for (const node of roots) modelRoot.add(buildNode(node,defs));
+  currentAssemblyHierarchyAvailable=Boolean(roots.some(node=>assemblyNodeIsAssembly(node))||(roots.length>1&&Number(result?.stats?.partCount)>1));
+  let rootSpecs=[];
+  if(currentAssemblyFocus?.key){
+    const focusNode=assemblyNodeAtKey(roots,currentAssemblyFocus.key);
+    if(focusNode)rootSpecs=[{node:focusNode,key:String(currentAssemblyFocus.key)}];
+    else currentAssemblyFocus=null;
+  }
+  if(!rootSpecs.length)rootSpecs=roots.map((node,index)=>({node,key:String(index)}));
+  currentHierarchyRootSpecs=rootSpecs;
+  currentAssemblyMode=Boolean(currentAssemblyHierarchyAvailable&&(rootSpecs.length>1||rootSpecs.some(spec=>assemblyNodeIsAssembly(spec.node))));
+
+  if (rootSpecs.length) {
+    for (const spec of rootSpecs) modelRoot.add(buildNode(spec.node,defs,spec.key,null,0));
   } else {
-    defs.forEach((def,index)=>modelRoot.add(makeOccurrence(def,index)));
+    defs.forEach((def,index)=>{
+      const occurrence=makeOccurrence(def,index,null);modelRoot.add(occurrence);
+      currentActiveGeometryIds.add(String(def.source.id));
+    });
   }
 
-  currentStats = result.stats || {
-    partCount:roots.length,
-    geometryCount:defs.length,
-    triangleCount:defs.reduce((s,d)=>s+d.triangleCount,0)
-  };
+  if(assemblyOccurrenceRecords.length){
+    currentActiveGeometryIds=new Set(assemblyOccurrenceRecords.map(occ=>occ.geometryId));
+    const leafCount=[...assemblyTreeRecords.values()].filter(record=>record.occurrences.length&&!record.childrenKeys.length).length;
+    currentStats={
+      partCount:Math.max(leafCount,1),
+      geometryCount:currentActiveGeometryIds.size,
+      triangleCount:assemblyOccurrenceRecords.reduce((sum,occ)=>sum+(Number(occ.triangleCount)||0),0)
+    };
+  }else{
+    currentStats = result.stats || {partCount:roots.length||defs.length,geometryCount:defs.length,triangleCount:defs.reduce((s,d)=>s+d.triangleCount,0)};
+  }
 
-  function buildNode(node,defs) {
-    const group=new THREE.Group();
-    group.name=node.name||'';
-    if (Array.isArray(node.transform) && node.transform.length===16) {
-      group.matrix.fromArray(node.transform);
-      group.matrixAutoUpdate=false;
-    }
+  function buildNode(node,defs,key,parentKey,depth) {
+    const fallbackName=(node.meshes||[]).map(index=>defs[index]?.source?.name).find(Boolean)||'';
+    const displayName=String(node.name||fallbackName||'(unnamed)');
+    const group=new THREE.Group();group.name=displayName;group.userData={assemblyTreeKey:key,assemblyNode:true};
+    if (Array.isArray(node.transform) && node.transform.length===16) {group.matrix.fromArray(node.transform);group.matrixAutoUpdate=false;}
+    const record={key,parentKey,node,group,name:displayName,isAssembly:assemblyNodeIsAssembly(node),depth,childrenKeys:[],occurrences:[],meshIndices:[...(node.meshes||[])]};
+    assemblyTreeRecords.set(key,record);
+    if(parentKey&&assemblyTreeRecords.has(parentKey))assemblyTreeRecords.get(parentKey).childrenKeys.push(key);
+    if(record.isAssembly&&depth<3)assemblyExpandedKeys.add(key);
+
     for (const meshIndex of node.meshes||[]) {
-      const def=defs[meshIndex];
-      if (def) group.add(makeOccurrence(def,meshIndex));
+      const def=defs[meshIndex];if(!def)continue;
+      const occurrence=makeOccurrence(def,meshIndex,key);group.add(occurrence);
+      const occRecord={treeKey:key,group:occurrence,geometryId:String(def.source.id),meshIndex,geometry:def.source,triangleCount:def.triangleCount,surfaceMeshes:occurrence.userData.surfaceMeshes||[]};
+      record.occurrences.push(occRecord);assemblyOccurrenceRecords.push(occRecord);
     }
-    for (const child of node.children||[]) group.add(buildNode(child,defs));
+    (node.children||[]).forEach((child,index)=>{const childKey=`${key}/${index}`;group.add(buildNode(child,defs,childKey,key,depth+1));});
     return group;
   }
 }
@@ -2022,12 +2342,12 @@ function makeCadDefinition(source) {
   return {source,geometry,material,facesById,triangleToFaceMap,triangleCount};
 }
 
-function makeOccurrence(def,index) {
-  const group=new THREE.Group();
+function makeOccurrence(def,index,treeKey=null) {
+  const group=new THREE.Group(),occurrenceSurfaces=[];
 
   const mesh=new THREE.Mesh(def.geometry,def.material);
-  mesh.userData={cadSurface:true,geometryId:def.source.id,def};
-  surfaceMeshes.push(mesh);
+  mesh.userData={cadSurface:true,geometryId:def.source.id,def,assemblyTreeKey:treeKey};
+  surfaceMeshes.push(mesh);occurrenceSurfaces.push(mesh);
   group.add(mesh);
 
   for (const edge of def.source.edges||[]) {
@@ -2035,7 +2355,7 @@ function makeOccurrence(def,index) {
     const eg=new THREE.BufferGeometry();
     eg.setAttribute('position',new THREE.BufferAttribute(edge.points,3));
     const line=new THREE.Line(eg,blackEdgeMaterial);
-    line.userData={cadEdge:true,geometryId:def.source.id,elementId:Number(edge.id),def,edge};
+    line.userData={cadEdge:true,geometryId:def.source.id,elementId:Number(edge.id),def,edge,assemblyTreeKey:treeKey};
     line.visible=edgesVisible;
     edgeObjects.push(line); visualEdges.push(line); group.add(line);
   }
@@ -2050,9 +2370,10 @@ function makeOccurrence(def,index) {
     vg.setAttribute('position',new THREE.BufferAttribute(positions,3));
     const vm=new THREE.PointsMaterial({color:0x35d39a,size:1,sizeAttenuation:true,transparent:true,opacity:0,depthWrite:false});
     const points=new THREE.Points(vg,vm);
-    points.userData={cadVertices:true,geometryId:def.source.id,vertexIds:ids,def};
+    points.userData={cadVertices:true,geometryId:def.source.id,vertexIds:ids,def,assemblyTreeKey:treeKey};
     vertexObjects.push(points); group.add(points);
   }
+  group.userData={cadOccurrence:true,assemblyTreeKey:treeKey,geometryId:String(def.source.id),meshIndex:index,surfaceMeshes:occurrenceSurfaces};
   return group;
 }
 
@@ -2274,6 +2595,7 @@ function selectAt(event) {
     // In Measure mode this immediately prepares the next measurement.
     if (!event.ctrlKey && !event.metaKey) {
       clearSelections();
+      if(currentAssemblyMode)clearAssemblyTreeSelection();
       clearGroup(measureOverlayRoot);clearDimensionLabel();
       clearPreselection();
     }
@@ -2281,6 +2603,7 @@ function selectAt(event) {
   }
 
   acceptSelection(selection, event);
+  const treeKey=selection?.object?.userData?.assemblyTreeKey;if(currentAssemblyMode&&treeKey&&assemblyTreeRecords.has(treeKey))selectAssemblyTreeNode(treeKey);
 }
 
 function setRayFromClient(clientX,clientY) {
@@ -3727,6 +4050,9 @@ function updateClipping() {
     if (E.clipInvert.checked) clipPlane.constant*=-1;
   }
   baseMaterials.forEach(m=>{m.clippingPlanes=clipEnabled?[clipPlane]:null;m.needsUpdate=true});
+  // Assembly-tree blue highlight uses per-occurrence material clones. Keep
+  // those clones synchronized with the section plane too.
+  for(const mesh of surfaceMeshes){const materials=Array.isArray(mesh.material)?mesh.material:[mesh.material];materials.forEach(m=>{if(!m)return;m.clippingPlanes=clipEnabled?[clipPlane]:null;m.needsUpdate=true;});}
 
   selectionRoot?.traverse?.(object=>{
     if(!object.material)return;
@@ -3935,6 +4261,7 @@ function updateSheetMetalDimensionsUI(){
 function updateGeometryTypeIndicator(){
   if(!E.propType)return;
   if(!currentStepResult){E.propType.textContent=currentModel?(FR?'Maillage':'Mesh'):'—';return;}
+  if(currentAssemblyMode){E.propType.textContent=currentAssemblyFocus?ASMT.subassembly:ASMT.assembly;return;}
   if(sheetMetalCapability.rolledPlate){const drilled=Boolean(manufacturingCapability?.processes?.drilling);E.propType.textContent=drilled?(FR?'Plaque roulée · perçage':'Rolled plate · drilling'):(FR?'Plaque roulée':'Rolled plate');return;}
   if(sheetMetalCapability.profile){
     const match=currentProfileMatch,label=match&&(match.level==='high'||match.level==='probable')?(match.imperialLabel||match.metricLabel):null;
@@ -3960,7 +4287,7 @@ function updateGeometryTypeIndicator(){
 }
 
 function fillProperties() {
-  E.propFile.textContent=currentFile?.name||'—';
+  E.propFile.textContent=currentAssemblyFocus?.name||currentFile?.name||'—';
   E.propFormat.textContent=currentFormat||'—';
   updateGeometryTypeIndicator();
   updateProfileStandardUI();
@@ -3990,20 +4317,12 @@ function fillProperties() {
   updateSheetMetalCalculation({preserveInputs:true});
 }
 function renderTree(roots) {
-  E.stepTree.replaceChildren();
-  if (!roots.length) {E.stepTree.textContent='—';return}
-  let count=0;
-  const walk=(node,depth)=>{
-    if (count++>600) return;
-    const row=document.createElement('div');
-    row.className=`tree-row${node.isAssembly?' assembly':''}`;
-    row.style.paddingLeft=`${Math.min(depth,14)*10}px`;
-    row.textContent=`${depth?'↳ ':'• '}${node.name||'(unnamed)'}`;
-    E.stepTree.append(row);
-    (node.children||[]).forEach(c=>walk(c,depth+1));
-  };
-  roots.forEach(r=>walk(r,0));
+  // V8.20.4: hierarchy lives in the viewport. Keep the legacy drawer node only
+  // as a compatibility anchor for older CSS/DOM references.
+  renderAssemblyTree();
+  if(E.stepTree){E.stepTree.replaceChildren();E.stepTree.textContent='—';}
 }
+
 
 
 async function scanStepProperties(file) {
@@ -4162,6 +4481,8 @@ async function parseStepHeader(file) {
 
 async function clearModel(showMessage=true) {
   closeSelectOther();
+  closeAssemblyContextMenu();
+  clearAssemblyTreeSelection({rerender:false});
   clearSelections();
   clearMultiMeasurements();
   clearPreselection();
@@ -4177,12 +4498,14 @@ async function clearModel(showMessage=true) {
   modelRoot.position.set(0,0,0);
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();logicalEdgeGroupCache=new Map();logicalHiddenEdgeKeys.clear();
   currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];manufacturingCapability=null;
+  currentAssemblyFocus=null;currentAssemblyMode=false;currentAssemblyHierarchyAvailable=false;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();assemblyTreeRecords=new Map();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblySelectedKey=null;assemblyContextKey=null;
   resetSheetMetalForModel();
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;multiMeasureEnabled=false;
   cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;
   cadNav.pivot.set(0,0,0);cadNav.wheelFocus.set(0,0,0);updateCadCursor();
   E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.toggle('active',edgesVisible);E.gridToggle.classList.toggle('active',navo3dPreferences.gridVisible);E.measure.classList.remove('active');E.multiMeasure?.classList.remove('active');E.multiMeasure?.setAttribute('aria-pressed','false');
   E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.sheetMetalSection.hidden=true;E.empty.classList.remove('hidden');
+  if(E.assemblyTreePanel)E.assemblyTreePanel.hidden=true;if(E.assemblyTreeList)E.assemblyTreeList.replaceChildren();setAssemblyTreeStatus('');setAssemblyBatchBusy(false);
   E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';E.unitSelect.value='u';
   enableTools(false);revokeObjectUrls();
 }
@@ -4207,6 +4530,7 @@ function revokeObjectUrls(){meshObjectUrls.forEach(u=>{try{URL.revokeObjectURL(u
 
 function enableTools(on) {
   [E.clear,E.save,E.saveAs,E.fit,E.edges,E.gridToggle,E.unitSelect,E.measure,E.multiMeasure,E.section,E.viewButton,E.props].filter(Boolean).forEach(el=>el.disabled=!on);
+  if(E.save)E.save.disabled=!on||Boolean(currentAssemblyFocus);if(E.saveAs)E.saveAs.disabled=!on||Boolean(currentAssemblyFocus);
   document.querySelectorAll('[data-select-mode]').forEach(el=>el.disabled=!on);
   E.measureType.disabled=!on||!measureEnabled;
   E.sheetMetal.disabled=!on||!currentStepResult||!sheetMetalCapability.recognized||sheetMetalCapability.bendCount<=0;
