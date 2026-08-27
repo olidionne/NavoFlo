@@ -1,4 +1,4 @@
-/* NavoFlo V8.18.5 — manufacturing / stock-shape classifier.
+/* NavoFlo V8.19.0 — manufacturing / stock-shape classifier.
  *
  * Geometry-only inference from exact STEP analytic faces/edges + the retained
  * tessellated solid.  V8.18.2 keeps analytic-envelope recognition, but

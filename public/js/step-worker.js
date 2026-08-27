@@ -135,10 +135,19 @@ function exactGeometrySignature(occt,selection){
   const r=exactRef(selection),out={family:'other'};
   const type=occt.GetExactGeometryType(r.exactModelId,r.exactShapeHandle,r.kind,r.elementId);if(type?.ok)out.family=type.family;
   const family=String(out.family||'').toLowerCase();
-  if(!['circle','circular','cylinder','cylindrical'].includes(family))return out;
-  const radius=occt.MeasureExactRadius(r.exactModelId,r.exactShapeHandle,r.kind,r.elementId);
-  if(radius?.ok){out.radius=radius.radius;out.localCenter=radius.localCenter;out.axisDirection=radius.localAxisDirection;}
-  else{const center=occt.MeasureExactCenter(r.exactModelId,r.exactShapeHandle,r.kind,r.elementId);if(center?.ok){out.localCenter=center.localCenter;out.axisDirection=center.localAxisDirection;}}
+
+  // V8.19 — keep the analytic frame for every radial/revolved surface family,
+  // not only circles/cylinders.  Manufacturing feature recognition needs the
+  // axes of cones and tori to distinguish a turning groove/taper from an
+  // unrelated fillet or drilled feature.
+  if(['circle','circular','cylinder','cylindrical','sphere','spherical'].includes(family)){
+    const radius=occt.MeasureExactRadius(r.exactModelId,r.exactShapeHandle,r.kind,r.elementId);
+    if(radius?.ok){out.radius=radius.radius;out.localCenter=radius.localCenter;out.axisDirection=radius.localAxisDirection;}
+  }
+  if(!out.localCenter&&['circle','circular','cylinder','cylindrical','sphere','spherical','cone','conical','torus','toroidal'].includes(family)){
+    const center=occt.MeasureExactCenter(r.exactModelId,r.exactShapeHandle,r.kind,r.elementId);
+    if(center?.ok){out.localCenter=center.localCenter;out.axisDirection=center.localAxisDirection;}
+  }
   return out;
 }
 function logicalFaceGroup(occt,selection){
@@ -201,6 +210,7 @@ function sheetMetalFaceInfo(occt,geometryId){
   const gid=String(geometryId),topo=topologyByGeometry.get(gid);
   if(!topo)throw new Error(`No STEP topology for geometry ${gid}.`);
   const faces=[];
+  const allowCompoundRecognition=(topo.faces?.length||0)<=600;
   for(const face of topo.faces||[]){
     const id=Number(face.id),selection={geometryId:gid,kind:'face',elementId:id},sig=exactGeometrySignature(occt,selection);
     const topoFace=(topo.faces||[]).find(f=>Number(f.id)===id);
@@ -243,6 +253,24 @@ function sheetMetalFaceInfo(occt,geometryId){
         if(Number.isFinite(lo)&&Number.isFinite(hi)&&hi>=lo){out.axisMin=lo;out.axisMax=hi;out.axisSpan=hi-lo;}
       }
     }
+    const analyticFamily=String(out.family||'').toLowerCase();
+    if(['cylinder','cylindrical'].includes(analyticFamily)){
+      try{
+        const hole=occt.DescribeExactHole(exactModelId,shapeHandle(gid),'face',id);
+        if(hole?.ok)out.hole={diameter:Number(hole.diameter),radius:Number(hole.radius),depth:Number(hole.depth),isThrough:hole.isThrough===true?true:hole.isThrough===false?false:null};
+      }catch{}
+    }
+    if(allowCompoundRecognition&&['cylinder','cylindrical','cone','conical'].includes(analyticFamily)){
+      try{
+        const compound=occt.DescribeExactCompoundHole(exactModelId,shapeHandle(gid),'face',id);
+        if(compound?.ok)out.compoundHole={
+          family:String(compound.family||''),holeDiameter:Number(compound.holeDiameter),holeDepth:Number(compound.holeDepth),isThrough:compound.isThrough===true?true:compound.isThrough===false?false:null,
+          counterboreDiameter:Number(compound.counterboreDiameter),counterboreDepth:Number(compound.counterboreDepth),
+          countersinkDiameter:Number(compound.countersinkDiameter),countersinkAngle:Number(compound.countersinkAngle),
+          axisDirection:Array.isArray(compound.axisDirection)?compound.axisDirection.map(Number).slice(0,3):null
+        };
+      }catch{}
+    }
     faces.push(out);
   }
   const edges=[];
@@ -273,6 +301,16 @@ function sheetMetalFaceInfo(occt,geometryId){
     }
     edges.push(out);
   }
+  // V8.19 — explicit face-adjacency graph (AAG) at the worker boundary.  This
+  // keeps feature recognition deterministic and independent from triangle order.
+  const neighbors=new Map(faces.map(f=>[Number(f.id),new Set()]));
+  for(const edge of edges){
+    const owners=(edge.ownerFaceIds||[]).map(Number).filter(Number.isFinite);
+    for(let i=0;i<owners.length;i++)for(let j=i+1;j<owners.length;j++){
+      neighbors.get(owners[i])?.add(owners[j]);neighbors.get(owners[j])?.add(owners[i]);
+    }
+  }
+  for(const face of faces)face.neighborFaceIds=[...(neighbors.get(Number(face.id))||[])].sort((a,b)=>a-b);
   const logicalGroups=allLogicalFaceGroups(occt).filter(group=>String(group.geometryId)===gid);
   return{geometryId:gid,faces,edges,logicalGroups};
 }
