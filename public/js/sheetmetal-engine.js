@@ -409,6 +409,40 @@ function detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag){
   return best;
 }
 
+// V8.18.3 — dominant-skin cuttable-plate proof.
+//
+// Exact translated/congruent caps remain the strongest zero-bend proof, but real
+// laser/plasma plate STEP files often contain edge rounds, bevels, clipped corners,
+// or through-features that make the two cap boundary signatures differ.  Those
+// parts are still unambiguously plate when two dominant planar skins are the GLOBAL
+// support planes of the entire solid, are separated by a plausible thickness, and
+// occupy most of the in-plane envelope.  This proof intentionally ignores boundary
+// congruence while keeping the global-support/slender-slab tests that reject W/L/C/
+// HSS profiles and formed sheet-metal parts.
+function detectCuttablePlateSlab(geometry,ctx,planarGroups,tol,diag){
+  const groups=(planarGroups?.groups||[]).filter(g=>g?.stats?.area>EPS),points=allGeometryPoints(geometry,ctx);if(groups.length<2||points.length<3)return null;
+  const maxArea=Math.max(...groups.map(g=>Number(g.stats.area)||0)),supportTol=Math.max(tol*40,diag*2e-6,1e-6);let best=null;
+  for(let i=0;i<groups.length;i++)for(let j=i+1;j<groups.length;j++){
+    const a=groups[i],b=groups[j],basis=planeBasis(a.stats.normal),nb=canonicalDirection(b.stats.normal);if(!basis||!nb||Math.abs(V3.dot(basis.n,nb))<0.99995)continue;
+    const da=V3.dot(a.stats.centroid,basis.n),db=V3.dot(b.stats.centroid,basis.n),lo=Math.min(da,db),hi=Math.max(da,db),thickness=hi-lo;if(!(thickness>supportTol))continue;
+    let minN=Infinity,maxN=-Infinity,minU=Infinity,maxU=-Infinity,minV=Infinity,maxV=-Infinity;
+    for(const p of points){const pn=V3.dot(p,basis.n),pu=V3.dot(p,basis.u),pv=V3.dot(p,basis.v);minN=Math.min(minN,pn);maxN=Math.max(maxN,pn);minU=Math.min(minU,pu);maxU=Math.max(maxU,pu);minV=Math.min(minV,pv);maxV=Math.max(maxV,pv);}
+    // The two skins must bound the WHOLE solid. A flange/web outside this slab means
+    // the body is a formed/profile shape, not a flat cuttable plate.
+    if(Math.abs(lo-minN)>supportTol||Math.abs(hi-maxN)>supportTol)continue;
+    const spanU=maxU-minU,spanV=maxV-minV,major=Math.max(spanU,spanV),minor=Math.min(spanU,spanV);if(!(major>supportTol&&minor>supportTol))continue;
+    if(thickness>major*0.75||thickness>minor*0.65)continue;
+    const areaA=Number(a.stats.area)||0,areaB=Number(b.stats.area)||0,areaRatio=Math.min(areaA,areaB)/Math.max(areaA,areaB,EPS),dominance=Math.min(areaA,areaB)/Math.max(maxArea,EPS),fillRatio=Math.min(areaA,areaB)/Math.max(spanU*spanV,EPS);
+    // Loose only where exact congruence was too strict; still demand two genuinely
+    // dominant skins. Thresholds were regression-tested against W/L/C/HSS examples.
+    if(areaRatio<0.70||dominance<0.30||fillRatio<0.18)continue;
+    const score=Math.min(areaA,areaB)*areaRatio*Math.min(fillRatio,1)/(1+thickness/Math.max(major,EPS));
+    const confidence=clamp(0.82+areaRatio*0.08+Math.min(fillRatio,1)*0.08-Math.min(thickness/Math.max(minor,EPS),1)*0.05,0,0.99);
+    if(!best||score>best.score)best={score,value:thickness,groups:[a.id,b.id],capA:a,capB:b,basis,areaRatio,fillRatio,dominance,supportError:Math.max(Math.abs(lo-minN),Math.abs(hi-maxN)),source:'dominant-global-parallel-skins',confidence};
+  }
+  return best;
+}
+
 
 // V8.17.6 — conservative structural/profile extrusion recognition.
 //
@@ -937,10 +971,12 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   // Only automatic preflight may promote the exact prism proof. A manually
   // selected fixed face remains a true expert override.
   const exactFlatPrism=!hasRequestedFixed?detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag):null;
-  const structuralProfile=!hasRequestedFixed&&!exactFlatPrism?detectStructuralProfileExtrusion(geometry,ctx,tol,diag):null;
+  const cuttablePlate=!hasRequestedFixed&&!exactFlatPrism?detectCuttablePlateSlab(geometry,ctx,planarGroups,tol,diag):null;
+  const flatPlateProof=exactFlatPrism||cuttablePlate;
+  const structuralProfile=!hasRequestedFixed&&!flatPlateProof?detectStructuralProfileExtrusion(geometry,ctx,tol,diag):null;
 
   let rejectedNonBendCylinders=0;
-  const candidateBends=exactFlatPrism?[]:cylinders.map(c=>{
+  const candidateBends=flatPlateProof?[]:cylinders.map(c=>{
     const unique=[];for(const b of c.boundaries){if(!unique.some(x=>x.groupId===b.groupId))unique.push(b);}
     if(unique.length<2)return null;
     const candidate={...c,boundaries:unique},pair=chooseBendBoundaryPair(candidate,planarGroups);
@@ -961,10 +997,10 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
     if(!isPlanar(fixedInfo?.family))return{ok:false,code:'fixed-face-not-planar',message:'The fixed face must be planar.'};
     fixedGroupId=planarGroups.faceToGroup.get(fixed);fixedPanel=planarGroups.byId.get(fixedGroupId);
   }else{
-    if(exactFlatPrism){
-      // Use one proven cap as the DXF plane. Picking the translated cap pair here
-      // prevents a rounded side-wall fillet from becoming the automatic fixed face.
-      fixedPanel=exactFlatPrism.capA;fixedGroupId=fixedPanel.id;
+    if(flatPlateProof){
+      // Use one proven dominant skin as the DXF plane. Exact-prism proof wins; the
+      // V8.18.3 slab proof is the safe fallback for profiled/bevelled plate blanks.
+      fixedPanel=flatPlateProof.capA;fixedGroupId=fixedPanel.id;
       fixed=[...(fixedPanel.faceIds||[])].sort((a,b)=>(Number(ctx.statsById.get(b)?.area)||0)-(Number(ctx.statsById.get(a)?.area)||0))[0];
       fixedWasAutomatic=true;
     }else{
@@ -980,7 +1016,7 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   // even though the part is simply a flat plate ready for DXF.
   const planarThickness=planarThicknessPreflight;
   const cylindricalThickness=detectThickness(cylinders,tol);
-  const exactFlatThickness=exactFlatPrism?{value:exactFlatPrism.value,count:2,samples:2,confidence:1,source:exactFlatPrism.source,groups:exactFlatPrism.groups}:null;
+  const exactFlatThickness=flatPlateProof?{value:flatPlateProof.value,count:2,samples:2,confidence:Number(flatPlateProof.confidence)||1,source:flatPlateProof.source,groups:flatPlateProof.groups}:null;
   const autoThickness=exactFlatThickness||((candidateBends.length===0&&planarThickness)?planarThickness:(cylindricalThickness||planarThickness));
   let resolvedThickness=Number(thickness);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)resolvedThickness=Number(autoThickness?.value);
@@ -1020,19 +1056,19 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   }
   if(cycleLinks.length)warnings.push('Closed/cyclic sheet topology contains an inconsistent closure; a spanning-tree seam was kept for safety.');
   if(!usedBends.length){
-    const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,fixedPanelCandidateBends:connected,tolerance:tol,exactFlatPrism:exactFlatPrism?{source:exactFlatPrism.source,groups:exactFlatPrism.groups,thickness:exactFlatPrism.value,areaRatio:exactFlatPrism.areaRatio,boundaryEdges:exactFlatPrism.boundaryEdges,supportError:exactFlatPrism.supportError}:null,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
+    const connectedBends=(bendsByGroup.get(fixedGroupId)||[]),connected=connectedBends.length,diagnostics={planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,fixedPanelCandidateBends:connected,tolerance:tol,exactFlatPrism:exactFlatPrism?{source:exactFlatPrism.source,groups:exactFlatPrism.groups,thickness:exactFlatPrism.value,areaRatio:exactFlatPrism.areaRatio,boundaryEdges:exactFlatPrism.boundaryEdges,supportError:exactFlatPrism.supportError}:null,cuttablePlate:cuttablePlate?{source:cuttablePlate.source,groups:cuttablePlate.groups,thickness:cuttablePlate.value,areaRatio:cuttablePlate.areaRatio,fillRatio:cuttablePlate.fillRatio,dominance:cuttablePlate.dominance,supportError:cuttablePlate.supportError,confidence:cuttablePlate.confidence}:null,failures:connectedBends.map(c=>({faces:c.faceIds.slice(),radius:c.radius,radialNormalScore:c.radialNormalScore,failure:c.lastFailure||null}))};
 
     // V8.17.2 — zero-bend STEP support. A plain plate is already its own flat
     // pattern, so return the exact dominant planar skin instead of treating
     // "no bends" as an error. This gives the same one-click DXF workflow to
     // laser-cut plates and to formed sheet-metal parts.
-    if(!connected&&candidateBends.length===0&&(exactFlatPrism||autoThickness?.source==='parallel-planar-skins')){
+    if(!connected&&candidateBends.length===0&&(flatPlateProof||autoThickness?.source==='parallel-planar-skins')){
       const mapped=projectPanelTriangles(ctx,fixedPanel,rootMap),triangles=mapped,flatTol=Math.max(diag*1e-6,resolvedThickness*1e-5,1e-6);
       const boundaryEdges=computeBoundaryEdges(triangles,flatTol),boundaryPrimitives=boundaryPrimitivesForSkin(geometry,ctx,panelMaps,[],flatTol,planarGroups,logicalGroups),bounds=bounds2D(triangles);
       if(triangles.length&&boundaryEdges.length){
         const primitivesClosed=boundaryPrimitivesClosed(boundaryPrimitives,Math.max(resolvedThickness*1e-5,1e-6));
         if(!primitivesClosed)warnings.push('Exact CUT primitives contain an open chain; DXF export will use the welded mesh boundary as a safe fallback.');
-        return{ok:true,version:'NavoUnfold MVP 2.0',flatPlate:true,fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds:fixedPanel.faceIds.slice(),bendCount:0,panelCount:1,triangles,selectionFaces:[{id:'flat-panel-1',kind:'panel',sourceFaceIds:fixedPanel.faceIds.slice(),triangles:mapped}],boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines:[],bounds,warnings,cycleLinks:[],cycleClosures:[],diagnostics:{...diagnostics,flatPlate:true}};
+        return{ok:true,version:'NavoUnfold MVP 2.0',flatPlate:true,cuttablePlate:Boolean(cuttablePlate),fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds:fixedPanel.faceIds.slice(),bendCount:0,panelCount:1,triangles,selectionFaces:[{id:'flat-panel-1',kind:'panel',sourceFaceIds:fixedPanel.faceIds.slice(),triangles:mapped}],boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines:[],bounds,warnings,cycleLinks:[],cycleClosures:[],diagnostics:{...diagnostics,flatPlate:true}};
       }
     }
 
@@ -1056,5 +1092,5 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const primitivesClosed=boundaryPrimitivesClosed(boundaryPrimitives,Math.max(resolvedThickness*1e-5,1e-6));
   if(!primitivesClosed)warnings.push('Exact CUT primitives contain an open chain; DXF export will use the welded mesh boundary as a safe fallback.');
   const panelFaceIds=panelOrder.flatMap(id=>planarGroups.byId.get(id)?.faceIds||[]);
-  return{ok:true,version:'NavoUnfold MVP 2.0',fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,selectionFaces,boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines,bounds,warnings,cycleLinks,cycleClosures,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol,structuralProfile:structuralProfile||null,pairedBendEvidence}};
+  return{ok:true,version:'NavoUnfold MVP 2.0',fixedFaceId:fixed,fixedFaceAutomatic:fixedWasAutomatic,fixedPanelFaceIds:fixedPanel.faceIds.slice(),geometryId:String(geometry.id),thickness:resolvedThickness,detectedThickness:autoThickness,panelFaceIds,bendCount:usedBends.length,panelCount:panelOrder.length,triangles,selectionFaces,boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:primitivesClosed,bendLines,bounds,warnings,cycleLinks,cycleClosures,diagnostics:{planarGroups:planarGroups.groups.length,fixedPanelFaces:fixedPanel.faceIds.slice(),cylinders:cylinders.length,candidateBends:candidateBends.length,rejectedNonBendCylinders,tolerance:tol,structuralProfile:structuralProfile||null,cuttablePlate:cuttablePlate||null,pairedBendEvidence}};
 }

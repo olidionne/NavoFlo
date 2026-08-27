@@ -6,7 +6,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
 import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.9';
-import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.18.2';
+import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.18.3';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.9';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
@@ -157,7 +157,7 @@ const sheetMetalState = {
 };
 
 let flatPatternRoot=null,flatPatternResult=null,flatPatternActive=false,flatPatternCameraState=null,sheetMetalUnfoldPromise=null;
-let sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:false,profileType:null,profileData:null};
+let sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:false,profileType:null,profileData:null};
 let manufacturingCapability=null;
 let currentProfileMatch=null,profileMatchEpoch=0;
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, multiMeasureRoot, grid;
@@ -850,7 +850,7 @@ function resetSheetMetalForModel() {
   sheetMetalState.manualKEnabled=false;
   sheetMetalState.manualK=AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness ?? 0.40;
   sheetMetalState.fixedFace=null;
-  sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:false,profileType:null,profileData:null};
+  sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:false,profileType:null,profileData:null};
   manufacturingCapability=null;
   currentProfileMatch=null;profileMatchEpoch++;
 
@@ -1292,7 +1292,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
         flatPatternResult=null;clearFlatPattern();
         if(bestProfile){
           manufacturingCapability=null;
-          sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
+          sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
           syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateProfileStandardUI();updateManufacturingUI();
           void resolveProfileStandardMatch(sheetMetalCapability.profileData);
           if(!quiet)console.info('[NavoFlo profile detection]',bestProfile);
@@ -1312,7 +1312,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
 
       const result=best.result;
       flatPatternResult=result;clearProfileStandardMatch();
-      sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),profile:false,profileType:null,profileData:null};
+      sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),cuttablePlate:Boolean(result.cuttablePlate),profile:false,profileType:null,profileData:null};
       manufacturingCapability=manufacturingByGeometry.get(String(best.geometry.id))||null;
       if((Number(result.bendCount)||0)>0)manufacturingCapability=null;
       sheetMetalState.fixedFace={geometryId:String(best.geometry.id),elementId:Number(result.fixedFaceId)};
@@ -3719,7 +3719,7 @@ function ensureManufacturingSection(){
   if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'Inférence géométrique locale · intention de fabrication non garantie':'Local geometric inference · manufacturing intent not guaranteed'}</p>`;
   return section;
 }
-function updateManufacturingUI(){const section=ensureManufacturingSection();if(!section)return;const c=manufacturingCapability;section.hidden=!c;if(!c)return;const process=$('manufacturing-process'),stock=$('manufacturing-stock'),length=$('manufacturing-length'),rem=$('manufacturing-removal'),evidence=$('manufacturing-evidence'),conf=$('manufacturing-confidence');if(process)process.textContent=c.machined?(FR?'Usinage probable':'Probable machining'):(FR?'Profilé / brut standard':'Stock profile');if(stock)stock.textContent=manufacturingLabel(c);if(length)length.textContent=profileLengthMm(c.lengthMm)||'—';if(rem)rem.textContent=Number.isFinite(c.materialRemoval)?`${(c.materialRemoval*100).toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:1})} %`:'—';if(evidence)evidence.textContent=manufacturingEvidenceText(c);if(conf)conf.textContent=`${Math.round((Number(c.confidence)||0)*100)} %`;}
+function updateManufacturingUI(){const section=ensureManufacturingSection();if(!section)return;const c=manufacturingCapability;section.hidden=!c;if(!c)return;const process=$('manufacturing-process'),stock=$('manufacturing-stock'),length=$('manufacturing-length'),rem=$('manufacturing-removal'),evidence=$('manufacturing-evidence'),conf=$('manufacturing-confidence'),cutPlate=Boolean(sheetMetalCapability?.flatPlate&&(sheetMetalCapability?.cuttablePlate||c.stockType==='plate-blank'));if(process)process.textContent=cutPlate?(FR?'Découpe de plaque':'Plate cutting'):(c.machined?(FR?'Usinage probable':'Probable machining'):(FR?'Profilé / brut standard':'Stock profile'));if(stock)stock.textContent=manufacturingLabel(c);if(length)length.textContent=profileLengthMm(c.lengthMm)||'—';if(rem)rem.textContent=Number.isFinite(c.materialRemoval)?`${(c.materialRemoval*100).toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:1})} %`:'—';if(evidence)evidence.textContent=manufacturingEvidenceText(c);if(conf)conf.textContent=`${Math.round((Number(c.confidence)||0)*100)} %`;}
 
 function updateGeometryTypeIndicator(){
   if(!E.propType)return;
@@ -3731,8 +3731,12 @@ function updateGeometryTypeIndicator(){
     E.propType.textContent=(FR?'Profilé / extrusion':'Profile / extrusion')+suffix;return;
   }
   if(sheetMetalCapability.recognized&&sheetMetalCapability.bendCount>0){E.propType.textContent=FR?'Tôle pliée':'Sheet metal';return;}
+  if(sheetMetalCapability.recognized&&sheetMetalCapability.flatPlate){
+    if(manufacturingCapability?.stockType==='flat-bar'&&!manufacturingCapability.machined){E.propType.textContent=`${FR?'Profilé probable':'Probable profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
+    if(sheetMetalCapability.cuttablePlate||manufacturingCapability?.stockType==='plate-blank'){E.propType.textContent=FR?'Plaque à découper':'Cut plate';return;}
+    E.propType.textContent=FR?'Plaque plane':'Flat plate';return;
+  }
   if(manufacturingCapability&&manufacturingCapability.machined){E.propType.textContent=`${FR?'Pièce usinée':'Machined part'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
-  if(sheetMetalCapability.recognized&&sheetMetalCapability.flatPlate){if(manufacturingCapability?.stockType==='flat-bar'&&!manufacturingCapability.machined){E.propType.textContent=`${FR?'Profilé probable':'Probable profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}E.propType.textContent=FR?'Plaque plane':'Flat plate';return;}
   if(manufacturingCapability){
     if(manufacturingCapability.stockType==='plate-blank'){E.propType.textContent=FR?'Plaque brute':'Plate blank';return;}
     E.propType.textContent=`${FR?'Profilé':'Profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;
