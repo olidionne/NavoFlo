@@ -1,4 +1,4 @@
-/* NavoFlo V8.20.0 — Manufacturing Recognition Engine (MRE)
+/* NavoFlo V8.20.3 — Manufacturing Recognition Engine (MRE)
  *
  * Architecture:
  *   exact B-Rep/AAG -> stock hypothesis -> virtual delta/removal features
@@ -132,6 +132,7 @@ function derivePlateStock(geometry,faceInfo,sheetResult,legacy){
 
 function normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile}){
   if(structuralProfile)return{stockType:'structural-profile',profile:structuralProfile,confidence:Number(structuralProfile?.confidence)||0.9,source:'structural-profile'};
+  if(sheetResult?.rolledPlate&&sheetResult?.rolledPlateData){const r=sheetResult.rolledPlateData;return{stockType:'rolled-plate',axis:canonicalAxis(r.axis),axisCenter:vec(r.axisCenter),thicknessMm:Number(r.thicknessMm)||null,widthMm:Number(r.axialLengthMm)||null,lengthMm:Number(r.developedLengthMm)||null,developedLengthMm:Number(r.developedLengthMm)||null,outerDiameterMm:Number(r.outerDiameterMm)||null,innerDiameterMm:Number(r.innerDiameterMm)||null,gapAngleDeg:Number(r.gapAngleDeg)||0,confidence:Number(r.confidence)||0.96,source:'rolled-slit-plate-brep'};}
   if(Number(sheetResult?.bendCount)>0)return{stockType:'sheet-metal',thicknessMm:Number(sheetResult.thickness)||null,confidence:0.99,source:'sheet-metal-brep'};
   const round=inferRoundStockFromFaces(geometry,faceInfo);
   // Prefer a strong round envelope over a weak plate/box hypothesis.  This is
@@ -284,13 +285,17 @@ function classifyPureThroughCutComponent(ids,ctx,aag,normal,thickness){
     // the complete instance.  Do not silently suppress possible machining.
     return null;
   }
-  if(!cylinders.length)return null; // avoids treating the outer rectangular wall as an internal cut
+  // V8.20.3: a rectangular/window cut can be 100% planar.  Once the side-wall
+  // component is proven to touch BOTH skins and contains no skin-parallel floor,
+  // it is a through-profile just as surely as a circular/obround hole.  The outer
+  // stock perimeter is removed separately by area ranking in recognizePlateFeatures.
+  if(!cylinders.length&&planes.length<3)return null;
   const allIds=[...new Set(ids.map(Number))];
   const wallAreaMm2=allIds.reduce((sum,id)=>sum+(Number(ctx.faceById.get(Number(id))?.area)||0),0);
   let type='through-profile';
   if(cylinders.length>=2&&planes.length>=1)type='through-slot';
   else if(cylinders.length===1&&planes.length===0)type='through-hole';
-  return feature(type,'cutting',allIds,0.985,{throughCutEquivalent:true,topologyProven:true,cylinderFaceCount:cylinders.length,planeWallCount:planes.length,wallAreaMm2});
+  return feature(type,'cutting',allIds,0.985,{throughCutEquivalent:true,topologyProven:true,cylinderFaceCount:cylinders.length,planeWallCount:planes.length,wallAreaMm2,planarWindow:cylinders.length===0});
 }
 function mergeThroughCutComponents(features){
   // If a topological through-slot/profile covers the same faces as lower-level
@@ -318,7 +323,11 @@ function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
     const t=classifyPureThroughCutComponent(ids,ctx,aag,normal,thickness);if(t)throughByKey.set([...ids].map(Number).sort((a,b)=>a-b).join(','),t);
   }
   const throughCandidates=[...throughByKey.values()].sort((a,b)=>(Number(b.parameters?.wallAreaMm2)||0)-(Number(a.parameters?.wallAreaMm2)||0));
-  const externalThroughFaceKey=throughCandidates.length>=2?[...throughCandidates[0].faceIds].sort((a,b)=>a-b).join(','):null;
+  // For ordinary plate blanks the largest full-thickness wall component is the
+  // external perimeter, even when it is all-planar. Round-plate stock already
+  // suppresses its OD via componentIsPureStockBoundary, so keep the historical
+  // >=2 rule there to avoid discarding a lone internal circular hole.
+  const externalThroughFaceKey=stock?.stockType==='round-bar'?(throughCandidates.length>=2?[...throughCandidates[0].faceIds].sort((a,b)=>a-b).join(','):null):(throughCandidates.length?[...throughCandidates[0].faceIds].sort((a,b)=>a-b).join(','):null);
   for(const ids of ctx.components){
     if(componentIsPureStockBoundary(ids,ctx,stock,normal,thickness))continue;
     const componentKey=[...ids].map(Number).sort((a,b)=>a-b).join(',');
@@ -401,8 +410,22 @@ function recognizeRoundFeatures({geometry,faceInfo,aag,stock}){
   return dedupeFeatures(features);
 }
 
+function recognizeRolledPlateFeatures({faceInfo,stock}){
+  if(stock?.stockType!=='rolled-plate')return[];
+  const axis=canonicalAxis(stock.axis),center=vec(stock.axisCenter),outer=Number(stock.outerDiameterMm)/2,inner=Number(stock.innerDiameterMm)/2,scale=Math.max(outer||0,inner||0,Number(stock.thicknessMm)||1,1);
+  if(!axis||!center)return[];
+  const groups=groupCylinders(cylinderRecords(faceInfo),scale*2),features=[];
+  for(const g of groups){
+    const align=Math.abs(V.dot(g.axis,axis)),sameLine=align>0.995&&axisLineDistance(center,axis,g.center)<=Math.max(scale*0.015,0.05),r=Math.max(...g.radii);
+    if(sameLine&&(Math.abs(r-outer)<=Math.max(scale*0.015,0.05)||Math.abs(r-inner)<=Math.max(scale*0.015,0.05)))continue; // rolled OD/ID skins
+    if(align<0.985)features.push(feature('cross-hole','drilling',g.faceIds,0.95,{diameterMm:r*2,rolledPlate:true}));
+    else if(!sameLine)features.push(feature('offset-bore','drilling',g.faceIds,0.88,{diameterMm:r*2,rolledPlate:true}));
+  }
+  return dedupeFeatures(features);
+}
+
 function recognizeGenericBarFeatures({faceInfo,stock,sheetResult}){
-  if(!stock||['round-bar','plate-blank','sheet-metal','structural-profile'].includes(stock.stockType)||sheetResult?.flatPlate)return[];const axis=canonicalAxis(stock.axis),features=[];if(!axis)return features;
+  if(!stock||['round-bar','plate-blank','sheet-metal','rolled-plate','structural-profile'].includes(stock.stockType)||sheetResult?.flatPlate)return[];const axis=canonicalAxis(stock.axis),features=[];if(!axis)return features;
   for(const f of faceInfo||[]){const family=fam(f.family),a=canonicalAxis(f.axisDirection);if(['cylinder','cylindrical'].includes(family)){const align=a?Math.abs(V.dot(a,axis)):0;features.push(feature(align<0.98?'cross-hole':'axial-bore','drilling',[Number(f.id)],0.90,{diameterMm:Number(f.radius)*2}));}else if(family==='cone')features.push(feature('chamfer-countersink','drilling',[Number(f.id)],0.82,{}));else if(family==='torus')features.push(feature('groove-fillet','milling',[Number(f.id)],0.86,{}));}
   return dedupeFeatures(features);
 }
@@ -431,6 +454,13 @@ function plateSurfaceSignals(faceInfo=[],stock=null,sheetResult=null){
 function computeNeedsMlReview({classification,capabilities,processes,features,signals,stock,confidence}){
   const directPlate=Boolean(capabilities?.directFlatDxf);
   const definiteFeatureCount=(features||[]).filter(f=>f.process!=='cutting').length;
+  // V8.20.3: a deterministic constant-thickness plate with ONLY topologically
+  // proven through-cuts must not be sent to AAGNet just because a large window
+  // makes the stock-volume confidence low.  ML is advisory and can otherwise
+  // hallucinate a giant rectangular/obround through opening as one or more
+  // pockets, incorrectly promoting laser cutting to secondary machining.
+  if(directPlate&&definiteFeatureCount===0&&!(signals?.torus>0)&&!(signals?.compoundHoles>0)&&!(signals?.blindCylinders>0)&&!(signals?.partialCylinders>0)&&!(signals?.cone>0))return false;
+  if(stock?.stockType==='rolled-plate'&&Number(stock?.confidence)>=0.90)return false;
   // ML is a second opinion, not the source of truth. Ask for it only when the
   // local B-Rep engine sees an ambiguous instance-level pattern or when its
   // confidence is not strong enough for manufacturing semantics.
@@ -450,16 +480,17 @@ function dedupeFeatures(features){
   const out=[],seen=new Set();for(const f of features){const key=`${f.type}:${[...f.faceIds].sort((a,b)=>a-b).join(',')}`;if(seen.has(key))continue;seen.add(key);out.push(f);}return out;
 }
 function processSummary(features,{sheetResult,structuralProfile}={}){
-  const p={cutting:false,bending:false,turning:false,drilling:false,milling:false,machining:false,profile:false};
+  const p={cutting:false,bending:false,rolling:false,turning:false,drilling:false,milling:false,machining:false,profile:false};
   if(Number(sheetResult?.bendCount)>0)p.bending=true;
+  if(sheetResult?.rolledPlate)p.rolling=true;
   if(sheetResult?.flatPlate)p.cutting=true;
   if(structuralProfile)p.profile=true;
   for(const f of features){if(f.process==='cutting')p.cutting=true;else if(f.process==='turning')p.turning=true;else if(f.process==='drilling')p.drilling=true;else if(f.process==='milling')p.milling=true;}
   p.machining=p.turning||p.drilling||p.milling;return p;
 }
-function evidenceFromFeatures(features,legacy){
+function evidenceFromFeatures(features,legacy,{stock=null}={}){
   const map={'turned-step':'turning','turned-groove':'groove','turned-groove-fillet':'groove','turned-chamfer-taper':'chamfering','turned-shoulder':'turning','axial-bore':'drilling','blind-axial-bore':'blind-hole','blind-hole':'blind-hole','counterbore':'counterbore','countersink':'counterbore','cross-hole':'drilling','offset-bore':'drilling','pocket-floor':'pocket','annular-groove':'groove','groove-fillet':'groove','countersink-chamfer':'chamfering','one-sided-recess':'pocket','edge-chamfer':'chamfering','through-hole':'through-hole'};
-  const out=[];for(const f of features){const e=map[f.type];if(e)out.push(e);}if(Number.isFinite(legacy?.materialRemoval)&&legacy.materialRemoval>0.003)out.push('material-removal');return[...new Set(out)];
+  const out=[];for(const f of features){const e=map[f.type];if(e)out.push(e);}if(stock?.stockType!=='rolled-plate'&&Number.isFinite(legacy?.materialRemoval)&&legacy.materialRemoval>0.003)out.push('material-removal');return[...new Set(out)];
 }
 function featureConfidence(features){if(!features.length)return 0;const machining=features.filter(f=>f.process!=='cutting');if(!machining.length)return 0;return machining.reduce((s,f)=>s+f.confidence,0)/machining.length;}
 function strongRoundShaft(stock,processes,features){
@@ -474,8 +505,9 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile});
   let features=[];
   const roundPlateContext=Boolean(sheetResult?.flatPlate&&stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45);
-  if(!roundPlateContext)features.push(...recognizeRoundFeatures({geometry,faceInfo,aag,stock}));
+  if(!roundPlateContext&&stock?.stockType!=='rolled-plate')features.push(...recognizeRoundFeatures({geometry,faceInfo,aag,stock}));
   features.push(...recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}));
+  features.push(...recognizeRolledPlateFeatures({geometry,faceInfo,aag,stock,sheetResult}));
   features.push(...recognizeGenericBarFeatures({geometry,faceInfo,aag,stock,sheetResult}));
   features=dedupeFeatures(features);
   const processes=processSummary(features,{sheetResult,structuralProfile});
@@ -484,15 +516,17 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
     unfold:Boolean(sheetResult?.ok&&Number(sheetResult?.bendCount)>0),
     export2dDxf:Boolean(sheetResult?.ok&&(Number(sheetResult?.bendCount)>0||sheetResult?.flatPlate)&&!suppressFlatDxf),
     directFlatDxf:Boolean(sheetResult?.ok&&sheetResult?.flatPlate&&!suppressFlatDxf),
-    structuralProfile:Boolean(structuralProfile)
+    structuralProfile:Boolean(structuralProfile),
+    rolledPlate:Boolean(sheetResult?.rolledPlate||stock?.stockType==='rolled-plate')
   };
-  const evidence=evidenceFromFeatures(features,legacy),compat=compatibilityProjection(stock,legacy,processes,features,evidence);
+  const evidence=evidenceFromFeatures(features,legacy,{stock}),compat=compatibilityProjection(stock,legacy,processes,features,evidence);
   const machineConfidence=featureConfidence(features),stockConfidence=Number(stock?.confidence)||0;
   let classification='solid';
   if(capabilities.unfold)classification='sheet-metal';
   else if(structuralProfile)classification='structural-profile';
   else if(capabilities.directFlatDxf&&processes.machining)classification='cuttable-plate-machined';
   else if(capabilities.directFlatDxf)classification='cuttable-plate';
+  else if(stock?.stockType==='rolled-plate')classification=processes.machining?'rolled-plate-machined':'rolled-plate';
   else if(processes.machining)classification='machined-part';
   else if(stock)classification='stock-profile';
   const estimatedRemovedVolumeMm3=Number.isFinite(Number(legacy?.stockVolume))&&Number.isFinite(Number(legacy?.materialRemoval))
@@ -519,6 +553,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
     finalKnowledge.capabilities?.structuralProfile?'structural-profile':
     finalKnowledge.capabilities?.directFlatDxf&&finalKnowledge.processes?.machining?'cuttable-plate-machined':
     finalKnowledge.capabilities?.directFlatDxf?'cuttable-plate':
+    finalKnowledge.stock?.stockType==='rolled-plate'?(finalKnowledge.processes?.machining?'rolled-plate-machined':'rolled-plate'):
     finalKnowledge.processes?.machining?'machined-part':
     finalKnowledge.stock?'stock-profile':'solid';
   finalKnowledge.diagnostics={...(finalKnowledge.diagnostics||{}),needsMlReview:Boolean(base.diagnostics.needsMlReview&&!mlPrediction?.ok)};
@@ -528,7 +563,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
 export function applyManufacturingMlPrediction(knowledge,{sheetResult=null,mlPrediction=null}={}){
   if(!knowledge||!mlPrediction?.ok)return knowledge;
   const out=arbitrateManufacturingKnowledge(knowledge,{sheetResult,mlPrediction});
-  out.classification=out.capabilities?.unfold?'sheet-metal':out.capabilities?.structuralProfile?'structural-profile':out.capabilities?.directFlatDxf&&out.processes?.machining?'cuttable-plate-machined':out.capabilities?.directFlatDxf?'cuttable-plate':out.processes?.machining?'machined-part':out.stock?'stock-profile':'solid';
+  out.classification=out.capabilities?.unfold?'sheet-metal':out.capabilities?.structuralProfile?'structural-profile':out.capabilities?.directFlatDxf&&out.processes?.machining?'cuttable-plate-machined':out.capabilities?.directFlatDxf?'cuttable-plate':out.stock?.stockType==='rolled-plate'?(out.processes?.machining?'rolled-plate-machined':'rolled-plate'):out.processes?.machining?'machined-part':out.stock?'stock-profile':'solid';
   out.confidence=clamp(Math.max(Number(out.confidence)||0,Number(mlPrediction.confidence)||0));
   out.diagnostics={...(out.diagnostics||{}),needsMlReview:false,mlReviewed:true};
   return out;

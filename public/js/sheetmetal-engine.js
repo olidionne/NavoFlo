@@ -1,7 +1,7 @@
 import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.7';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.20.2
+ * NavoFlo Sheet Metal Engine — V8.20.3
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -327,6 +327,59 @@ function detectPlanarThickness(planarGroups,tol){
 }
 
 
+// V8.20.3 — rolled/slit plate proof.
+//
+// A rolled plate exported as a finished solid is mathematically a constant-
+// section extrusion along the roll axis.  Without this guard, the two axial end
+// caps can look like the "skins" of a very thick flat plate.  A genuine slit
+// rolled plate has much stronger manufacturing evidence: two large coaxial
+// cylindrical skins separated by the material thickness PLUS two longitudinal
+// radial seam faces whose area is approximately thickness × axial width.
+function detectRolledPlateSlit(geometry,ctx,tol,diag){
+  const infos=[...ctx.infoById.values()],points=allGeometryPoints(geometry,ctx);if(!points.length)return null;
+  const cyls=infos.filter(f=>isCyl(f?.family)).map(f=>({
+    id:Number(f.id),axis:canonicalDirection(Array.isArray(f.axisDirection)?f.axisDirection.map(Number).slice(0,3):null),
+    center:Array.isArray(f.localCenter)?f.localCenter.map(Number).slice(0,3):null,radius:Number(f.radius),area:Number(f.area)||0
+  })).filter(c=>c.axis&&c.center?.every(Number.isFinite)&&c.radius>EPS&&c.area>EPS);
+  if(cyls.length<2)return null;
+  const axisTol=Math.max(tol*80,diag*2e-5,1e-4),radiusTol=Math.max(tol*40,diag*5e-6,1e-5),groups=[];
+  for(const c of cyls){
+    let g=groups.find(x=>Math.abs(V3.dot(x.axis,c.axis))>0.9995&&lineDistanceParallel(x.center,x.axis,c.center)<=axisTol&&Math.abs(x.radius-c.radius)<=radiusTol);
+    if(!g){g={axis:c.axis,center:c.center,radius:c.radius,area:0,faceIds:[]};groups.push(g);}g.area+=c.area;g.faceIds.push(c.id);
+  }
+  groups.sort((a,b)=>b.area-a.area);let best=null;
+  for(let i=0;i<groups.length;i++)for(let j=i+1;j<groups.length;j++){
+    const a=groups[i],b=groups[j];if(Math.abs(V3.dot(a.axis,b.axis))<0.9995||lineDistanceParallel(a.center,a.axis,b.center)>axisTol)continue;
+    const outer=a.radius>b.radius?a:b,inner=a.radius>b.radius?b:a,t=outer.radius-inner.radius;if(!(t>Math.max(tol*10,1e-5)))continue;
+    if(t>outer.radius*0.25||inner.radius<t*2.5)continue;
+    let lo=Infinity,hi=-Infinity;for(const p of points){const d=V3.dot(V3.sub(p,outer.center),outer.axis);lo=Math.min(lo,d);hi=Math.max(hi,d);}const axial=hi-lo;if(!(axial>t*2.5))continue;
+    const targetSeamArea=t*axial,seams=[];
+    for(const f of infos){if(!isPlanar(f?.family))continue;const n=canonicalDirection(Array.isArray(f.localNormal)?f.localNormal.map(Number).slice(0,3):null),c=Array.isArray(f.localCentroid)?f.localCentroid.map(Number).slice(0,3):null,area=Number(f.area)||0;if(!n||!c?.every(Number.isFinite)||!(area>EPS))continue;
+      if(Math.abs(V3.dot(n,outer.axis))>0.10)continue; // end caps are axial-normal and are not seams
+      const radial=radialToAxis(c,outer.center,outer.axis),rr=V3.len(radial);if(rr<inner.radius-t*0.25||rr>outer.radius+t*0.25)continue;
+      const areaRatio=area/Math.max(targetSeamArea,EPS);if(areaRatio<0.55||areaRatio>1.45)continue;
+      seams.push({id:Number(f.id),normal:n,centroid:c,area,radial:V3.unit(radial)});
+    }
+    if(seams.length<2)continue;
+    // Choose the two seam faces whose radial directions are closest.  They bound
+    // the slit gap; the complementary angle is the rolled material coverage.
+    let seamPair=null;for(let m=0;m<seams.length;m++)for(let n=m+1;n<seams.length;n++){
+      const ua=seams[m].radial,ub=seams[n].radial;if(!ua||!ub)continue;const gap=Math.acos(clamp(V3.dot(ua,ub),-1,1));
+      if(!seamPair||gap<seamPair.gap)seamPair={a:seams[m],b:seams[n],gap};
+    }
+    if(!seamPair||seamPair.gap>Math.PI*0.40)continue; // not a slit tube / rolled plate
+    const meanRadius=(outer.radius+inner.radius)/2,coverage=TAU-seamPair.gap,developed=meanRadius*coverage;
+    const cylindricalArea=Math.min(outer.area,inner.area),idealArea=Math.max(meanRadius*coverage*axial,EPS),coverageEvidence=clamp(cylindricalArea/idealArea,0,1);
+    // Holes can remove a meaningful amount of cylindrical skin, so coverage is a
+    // confidence term rather than a hard full-area requirement.
+    const confidence=clamp(0.90+Math.min(0.07,coverageEvidence*0.07)+Math.min(0.02,axial/Math.max(outer.radius,EPS)*0.01),0,0.995);
+    const candidate={kind:'rolled-slit-plate',axis:outer.axis,axisCenter:outer.center,outerRadiusMm:outer.radius,innerRadiusMm:inner.radius,outerDiameterMm:outer.radius*2,innerDiameterMm:inner.radius*2,thicknessMm:t,axialLengthMm:axial,developedLengthMm:developed,gapAngleRad:seamPair.gap,gapAngleDeg:seamPair.gap*180/Math.PI,coverageAngleRad:coverage,coverageAngleDeg:coverage*180/Math.PI,seamFaceIds:[seamPair.a.id,seamPair.b.id],outerFaceIds:outer.faceIds.slice(),innerFaceIds:inner.faceIds.slice(),confidence,source:'coaxial-cylinder-pair+radial-slit-seams'};
+    if(!best||candidate.confidence>best.confidence)best=candidate;
+  }
+  return best;
+}
+
+
 // V8.17.4 — exact flat-prism proof.
 //
 // A rounded CUT contour must never be confused with a sheet-metal bend.  The
@@ -394,17 +447,25 @@ function detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag){
     // Both cap planes must be the global support planes of the entire solid.
     if(Math.abs(lo-minN)>supportTol||Math.abs(hi-maxN)>supportTol)continue;
     const spanU=maxU-minU,spanV=maxV-minV,inPlaneSpan=Math.max(spanU,spanV),minorInPlaneSpan=Math.min(spanU,spanV);
-    // A plate must be thin relative to both in-plane dimensions.  Looking only
-    // at the major span can misclassify a long HSS / bar as a "flat plate" by
-    // treating two opposite longitudinal walls as the plate skins.
-    if(!(inPlaneSpan>supportTol&&minorInPlaneSpan>supportTol)||thickness>inPlaneSpan*0.75||thickness>minorInPlaneSpan*0.65)continue;
+    if(!(inPlaneSpan>supportTol&&minorInPlaneSpan>supportTol)||thickness>inPlaneSpan*0.75)continue;
+    // Normal plate proof stays thin relative to BOTH in-plane dimensions. V8.20.3
+    // also accepts a thick *profiled* cut blank (e.g. 1.5 x 1.75 x 10.75 with
+    // clipped/rounded outline) when the cap is an exact translated profile and
+    // the solid is substantially filled.  This does NOT promote a plain square/
+    // rectangular bar: the thick exception requires a non-rectangular/curved cap.
+    const saPreview=projectedBoundarySignature(a,ctx,basis,matchStep),sbPreview=projectedBoundarySignature(b,ctx,basis,matchStep);
+    const curvedBoundary=saPreview.some(x=>!String(x).startsWith('line|')),complexBoundary=saPreview.length>4||curvedBoundary;
+    const volume=triangulatedSolidVolume(geometry),prismVolume=thickness*spanU*spanV,volumeFill=Number.isFinite(volume)&&prismVolume>EPS?volume/prismVolume:null;
+    const thinEnough=thickness<=minorInPlaneSpan*0.65;
+    const profiledThickBlank=!thinEnough&&complexBoundary&&inPlaneSpan/thickness>=2.5&&(!Number.isFinite(volumeFill)||volumeFill>=0.62);
+    if(!thinEnough&&!profiledThickBlank)continue;
     const areaA=Number(a.stats.area)||0,areaB=Number(b.stats.area)||0,areaRatio=Math.min(areaA,areaB)/Math.max(areaA,areaB,EPS);
     // The cap pair must be a dominant skin pair. This rejects small parallel
     // machining faces that happen to sit at an extremum.
     if(areaRatio<0.995||Math.min(areaA,areaB)<maxArea*0.45)continue;
-    const sa=projectedBoundarySignature(a,ctx,basis,matchStep),sb=projectedBoundarySignature(b,ctx,basis,matchStep);if(!sa.length||!signaturesEqual(sa,sb))continue;
+    const sa=saPreview,sb=sbPreview;if(!sa.length||!signaturesEqual(sa,sb))continue;
     const score=Math.min(areaA,areaB)*areaRatio/(1+thickness/Math.max(inPlaneSpan,EPS));
-    if(!best||score>best.score)best={score,value:thickness,groups:[a.id,b.id],capA:a,capB:b,basis,areaRatio,boundaryEdges:sa.length,supportError:Math.max(Math.abs(lo-minN),Math.abs(hi-maxN)),source:'translated-congruent-caps',confidence:1};
+    if(!best||score>best.score)best={score,value:thickness,groups:[a.id,b.id],capA:a,capB:b,basis,areaRatio,boundaryEdges:sa.length,supportError:Math.max(Math.abs(lo-minN),Math.abs(hi-maxN)),source:profiledThickBlank?'translated-congruent-profiled-thick-blank':'translated-congruent-caps',confidence:profiledThickBlank?0.985:1,profiledThickBlank,volumeFill:Number.isFinite(volumeFill)?volumeFill:null};
   }
   return best;
 }
@@ -977,8 +1038,10 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   const cylinders=buildCylinderGroups(geometry,ctx,logicalGroups,tol,planarGroups);
 
   const hasRequestedFixed=fixedFaceId!==null&&fixedFaceId!==undefined&&fixedFaceId!==''&&Number.isFinite(Number(fixedFaceId)),requestedFixed=hasRequestedFixed?Number(fixedFaceId):NaN;
-  // Only automatic preflight may promote the exact prism proof. A manually
-  // selected fixed face remains a true expert override.
+  // Only automatic preflight may promote automatic manufacturing proofs. A
+  // manually selected fixed face remains a true expert override.
+  const rolledPlate=!hasRequestedFixed?detectRolledPlateSlit(geometry,ctx,tol,diag):null;
+  if(rolledPlate)return{ok:false,code:'rolled-plate',message:'A slit rolled plate / rolled shell was detected; flat-plate DXF is suppressed until cylindrical unroll is explicitly requested.',rolledPlate:true,rolledPlateData:rolledPlate,profile:false,diagnostics:{rolledPlate}};
   const exactFlatPrism=!hasRequestedFixed?detectExactFlatPrism(geometry,ctx,planarGroups,tol,diag):null;
   const cuttablePlate=!hasRequestedFixed&&!exactFlatPrism?detectCuttablePlateSlab(geometry,ctx,planarGroups,tol,diag):null;
   const flatPlateProof=exactFlatPrism||cuttablePlate;

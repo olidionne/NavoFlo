@@ -5,8 +5,8 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.20.2';
-import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.20.0';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.20.3';
+import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.20.3';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.20.1';
 
@@ -82,7 +82,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.20.2';
+const WORKER_URL = '/js/step-worker.js?v=8.20.3';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -159,7 +159,7 @@ const sheetMetalState = {
 };
 
 let flatPatternRoot=null,flatPatternResult=null,flatPatternActive=false,flatPatternCameraState=null,sheetMetalUnfoldPromise=null;
-let sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:false,profileType:null,profileData:null};
+let sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:false,rolledPlateData:null,profile:false,profileType:null,profileData:null};
 let manufacturingCapability=null;
 let currentProfileMatch=null,profileMatchEpoch=0;
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, multiMeasureRoot, grid;
@@ -201,7 +201,7 @@ let baseMaterials = new Set();
 // File objects and per-document camera/unit state stay local in the browser.
 const modelDocuments=new Map();
 let activeModelDocumentId=null,modelDocumentSeq=0,modelDocumentBusy=false,pendingModelDocumentId=null;
-const MODEL_ANALYSIS_CACHE_VERSION=7;
+const MODEL_ANALYSIS_CACHE_VERSION=8;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -904,7 +904,7 @@ function resetSheetMetalForModel() {
   sheetMetalState.manualKEnabled=false;
   sheetMetalState.manualK=AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness ?? 0.40;
   sheetMetalState.fixedFace=null;
-  sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:false,profileType:null,profileData:null};
+  sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:false,rolledPlateData:null,profile:false,profileType:null,profileData:null};
   manufacturingCapability=null;
   currentProfileMatch=null;profileMatchEpoch++;
   modelAnalysisReady=false;
@@ -1288,7 +1288,7 @@ function manufacturingHasPlateSecondaryMachining(c){
     e.has('groove')||e.has('blind-hole')||e.has('counterbore')||e.has('recess')||e.has('pocket')
   );
 }
-function emptySheetMetalCapability(){return{recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:false,profileType:null,profileData:null};}
+function emptySheetMetalCapability(){return{recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:false,rolledPlateData:null,profile:false,profileType:null,profileData:null};}
 async function scheduleManufacturingMlReview(localKnowledge,sheetResult,docId=activeModelDocumentId,file=currentFile,stepRef=currentStepResult){
   if(!localKnowledge?.diagnostics?.needsMlReview||!file||!stepRef)return;
   const prediction=await requestManufacturingMlReview(file,localKnowledge).catch(()=>null);if(!prediction?.ok)return;
@@ -1324,7 +1324,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       const geometries=fixed?allGeometries.filter(g=>String(g.id)===String(fixed.geometryId)):allGeometries;
       if(!geometries.length){if(!quiet)setSheetMetalStatus(SMT.unfoldFailed+' · géométrie introuvable','warn');return null;}
 
-      let best=null,bestScore=-Infinity,bestFailure=null,bestProfile=null,bestManufacturing=null;
+      let best=null,bestScore=-Infinity,bestFailure=null,bestProfile=null,bestRolled=null,bestManufacturing=null;
       const manufacturingByGeometry=new Map();
       for(const geometry of geometries){
         if(currentStepResult!==stepRef)return null;
@@ -1340,7 +1340,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           kResolver:resolveUnfoldK
         });
         try{
-          // V8.20.2 — sheet metal gets a lightweight first pass. A perforated
+          // V8.20.3 — sheet metal keeps a lightweight first pass. A perforated
           // bent part can contain hundreds of cylindrical hole faces and thousands
           // of edges; none of those hole descriptors are needed to prove its bends.
           exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});
@@ -1363,7 +1363,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
               geometry,
               faceInfo:exact?.faces||[],
               edgeInfo:exact?.edges||[],
-              sheetResult:result?.ok?result:null,
+              sheetResult:result?.ok||result?.code==='rolled-plate'?result:null,
               structuralProfile:result?.code==='structural-profile'?(result.profile||null):null
             });
           }catch(error){console.warn('[NavoFlo Manufacturing Recognition Engine]',error);}
@@ -1381,6 +1381,11 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           continue;
         }
         if(!result?.ok){
+          if(result?.code==='rolled-plate'&&result?.rolledPlateData){
+            const confidence=Number(result.rolledPlateData.confidence)||0;
+            if(!bestRolled||confidence>(Number(bestRolled?.rolledPlateData?.confidence)||0))bestRolled={...result,geometryId:String(geometry.id),manufacturing};
+            continue;
+          }
           if(result?.code==='structural-profile'){
             // Structural profile remains authoritative for the visible type, but
             // the MRE knowledge object is still retained with the document so later
@@ -1412,9 +1417,18 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       if(currentStepResult!==stepRef)return null;
       if(!best){
         flatPatternResult=null;clearFlatPattern();
+        if(bestRolled){
+          clearProfileStandardMatch();
+          manufacturingCapability=bestRolled.manufacturing||null;
+          sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:true,rolledPlateData:bestRolled.rolledPlateData||null,profile:false,profileType:null,profileData:null};
+          modelAnalysisReady=true;
+          syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateSheetMetalDimensionsUI();updateProfileStandardUI();updateManufacturingUI();captureActiveModelDocumentState();
+          if(!quiet)console.info('[NavoFlo rolled plate detection]',bestRolled);
+          return null;
+        }
         if(bestProfile){
           manufacturingCapability=bestProfile.manufacturing||null;
-          sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
+          sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:false,rolledPlateData:null,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
           modelAnalysisReady=true;
           syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateProfileStandardUI();updateManufacturingUI();captureActiveModelDocumentState();
           void resolveProfileStandardMatch(sheetMetalCapability.profileData);
@@ -1440,7 +1454,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       const result=best.result;
       flatPatternResult=result;clearProfileStandardMatch();
       modelAnalysisReady=true;
-      sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),cuttablePlate:Boolean(result.cuttablePlate),profile:false,profileType:null,profileData:null};
+      sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),cuttablePlate:Boolean(result.cuttablePlate),rolledPlate:false,rolledPlateData:null,profile:false,profileType:null,profileData:null};
       manufacturingCapability=manufacturingByGeometry.get(String(best.geometry.id))||null;
       if((Number(result.bendCount)||0)>0)manufacturingCapability=null;
       sheetMetalState.fixedFace={geometryId:String(best.geometry.id),elementId:Number(result.fixedFaceId)};
@@ -3845,6 +3859,7 @@ function manufacturingLabel(c){
   if(c.stockType==='square-bar')return `${FR?'Barre carrée':'Square bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
   if(c.stockType==='flat-bar')return `${FR?'Barre plate':'Flat bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
   if(c.stockType==='plate-blank')return `${FR?'Plaque brute':'Plate blank'} · ${len(c.lengthMm)} × ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
+  if(c.stockType==='rolled-plate')return `${FR?'Plaque roulée':'Rolled plate'} · T ${len(c.thicknessMm)} · Ø ${FR?'ext.':'OD'} ${len(c.outerDiameterMm)}`;
   if(c.stockType==='hex-bar')return `${FR?'Barre hexagonale':'Hex bar'} · ${FR?'sur plats':'across flats'} ${len(c.acrossFlatsMm)}`;
   if(c.stockType==='rectangular-bar')return `${FR?'Barre rectangulaire':'Rectangular bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
   return FR?'Brut prismatique':'Prismatic stock';
@@ -3874,7 +3889,7 @@ function manufacturingFeatureText(c){
 }
 function ensureManufacturingSection(){
   const drawer=E.propsDrawer,anchor=drawer?.querySelector?.('.drawer-stats');if(!drawer||!anchor)return null;let section=$('manufacturing-section');if(!section){section=document.createElement('div');section.id='manufacturing-section';section.className='drawer-section';anchor.after(section);}
-  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.20 · B-Rep/AAG + arbitrage critique + ML optionnel':'MRE V8.20 · B-Rep/AAG + critical arbitration + optional ML'}</p>`;
+  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.20.3 · B-Rep/AAG + arbitrage critique + ML optionnel':'MRE V8.20.3 · B-Rep/AAG + critical arbitration + optional ML'}</p>`;
   return section;
 }
 function updateManufacturingUI(){
@@ -3883,7 +3898,8 @@ function updateManufacturingUI(){
   const process=$('manufacturing-process'),stock=$('manufacturing-stock'),length=$('manufacturing-length'),rem=$('manufacturing-removal'),features=$('manufacturing-features'),evidence=$('manufacturing-evidence'),conf=$('manufacturing-confidence');
   const directDxf=Boolean(c?.capabilities?.directFlatDxf||sheetMetalCapability?.flatPlate),plateMachining=directDxf&&Boolean(c?.processes?.machining||manufacturingHasPlateSecondaryMachining(c));
   let processText;
-  if(directDxf)processText=plateMachining?(FR?'Découpe de plaque + usinage':'Plate cutting + machining'):(FR?'Découpe de plaque':'Plate cutting');
+  if(c?.stockType==='rolled-plate'||sheetMetalCapability?.rolledPlate)processText=c?.processes?.drilling?(FR?'Roulage + perçage':'Rolling + drilling'):(FR?'Roulage de plaque':'Plate rolling');
+  else if(directDxf)processText=plateMachining?(FR?'Découpe de plaque + usinage':'Plate cutting + machining'):(FR?'Découpe de plaque':'Plate cutting');
   else if(c?.processes?.turning)processText=c?.processes?.drilling?(FR?'Tournage + perçage/alésage':'Turning + drilling/boring'):(FR?'Tournage / usinage':'Turning / machining');
   else if(c?.processes?.machining||c.machined)processText=FR?'Usinage probable':'Probable machining';
   else processText=FR?'Profilé / brut standard':'Stock profile';
@@ -3899,6 +3915,10 @@ function updateManufacturingUI(){
 
 function updateSheetMetalDimensionsUI(){
   const row=E.propSheetDimensionsRow,label=E.propSheetDimensionsLabel,value=E.propSheetDimensions;if(!row||!label||!value)return;
+  if(sheetMetalCapability?.rolledPlate&&sheetMetalCapability?.rolledPlateData){
+    const r=sheetMetalCapability.rolledPlateData,t=Number(r.thicknessMm),h=Number(r.axialLengthMm),w=Number(r.developedLengthMm);
+    if(t>0&&h>0&&w>0){label.textContent=FR?'Dimensions développées (T × H × L)':'Developed dimensions (T × H × W)';value.textContent=`${formatLength(t)} × ${formatLength(h)} × ${formatLength(w)}`;row.hidden=false;return;}
+  }
   const result=flatPatternResult,b=result?.bounds,t=Number(result?.thickness);
   const recognized=Boolean(sheetMetalCapability?.recognized&&result?.ok),h=Number(b?.height),w=Number(b?.width);
   if(!recognized||!(t>0)||!(h>0)||!(w>0)){row.hidden=true;value.textContent='—';return;}
@@ -3915,6 +3935,7 @@ function updateSheetMetalDimensionsUI(){
 function updateGeometryTypeIndicator(){
   if(!E.propType)return;
   if(!currentStepResult){E.propType.textContent=currentModel?(FR?'Maillage':'Mesh'):'—';return;}
+  if(sheetMetalCapability.rolledPlate){const drilled=Boolean(manufacturingCapability?.processes?.drilling);E.propType.textContent=drilled?(FR?'Plaque roulée · perçage':'Rolled plate · drilling'):(FR?'Plaque roulée':'Rolled plate');return;}
   if(sheetMetalCapability.profile){
     const match=currentProfileMatch,label=match&&(match.level==='high'||match.level==='probable')?(match.imperialLabel||match.metricLabel):null;
     if(label){const prefix=match?.sourceKind==='geometry'?(FR?'Profilé':'Profile'):(FR?'Profilé AISC':'AISC profile');E.propType.textContent=`${prefix} · ${label}`;return;}
