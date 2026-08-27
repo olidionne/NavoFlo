@@ -6,6 +6,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
 import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.9';
+import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.18.0';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.9';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
@@ -157,6 +158,7 @@ const sheetMetalState = {
 
 let flatPatternRoot=null,flatPatternResult=null,flatPatternActive=false,flatPatternCameraState=null,sheetMetalUnfoldPromise=null;
 let sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:false,profileType:null,profileData:null};
+let manufacturingCapability=null;
 let currentProfileMatch=null,profileMatchEpoch=0;
 let renderer, scene, camera, controls, modelRoot, selectionRoot, preselectionRoot, measureOverlayRoot, multiMeasureRoot, grid;
 let sectionCapRoot=null,sectionCapPlaneMesh=null;
@@ -849,6 +851,7 @@ function resetSheetMetalForModel() {
   sheetMetalState.manualK=AIR_BENDING_K_TABLE[sheetMetalState.materialClass]?.toThickness ?? 0.40;
   sheetMetalState.fixedFace=null;
   sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:false,profileType:null,profileData:null};
+  manufacturingCapability=null;
   currentProfileMatch=null;profileMatchEpoch++;
 
   if(E.smAngle)E.smAngle.value='90';
@@ -1236,11 +1239,13 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       const geometries=fixed?allGeometries.filter(g=>String(g.id)===String(fixed.geometryId)):allGeometries;
       if(!geometries.length){if(!quiet)setSheetMetalStatus(SMT.unfoldFailed+' · géométrie introuvable','warn');return null;}
 
-      let best=null,bestScore=-Infinity,bestFailure=null,bestProfile=null;
+      let best=null,bestScore=-Infinity,bestFailure=null,bestProfile=null,bestManufacturing=null;
       for(const geometry of geometries){
         if(currentStepResult!==stepRef)return null;
         let exact;
         try{exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});}catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
+        const manufacturing=classifyManufacturingGeometry({geometry,faceInfo:exact?.faces||[],edgeInfo:exact?.edges||[]});
+        if(manufacturing&&(!bestManufacturing||(Number(manufacturing.confidence)||0)>(Number(bestManufacturing.confidence)||0)))bestManufacturing={...manufacturing,geometryId:String(geometry.id)};
         const result=analyzeAndUnfold({
           geometry,
           faceInfo:exact?.faces||[],
@@ -1268,16 +1273,17 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       }
 
       if(currentStepResult!==stepRef)return null;
+      manufacturingCapability=bestManufacturing;
       if(!best){
         flatPatternResult=null;clearFlatPattern();
         if(bestProfile){
           sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,profile:true,profileType:bestProfile.profileType||'constant-section-profile',profileData:bestProfile.profile||null};
-          syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateProfileStandardUI();
+          syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateProfileStandardUI();updateManufacturingUI();
           void resolveProfileStandardMatch(sheetMetalCapability.profileData);
           if(!quiet)console.info('[NavoFlo profile detection]',bestProfile);
           return null;
         }
-        syncSheetMetalUnfoldUI();
+        syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateManufacturingUI();
         if(!quiet){
           console.warn('[NavoUnfold diagnostics]',bestFailure);
           const reason=describeUnfoldFailure(bestFailure||{});
@@ -1291,12 +1297,13 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       const result=best.result;
       flatPatternResult=result;clearProfileStandardMatch();
       sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),profile:false,profileType:null,profileData:null};
+      if((Number(result.bendCount)||0)>0)manufacturingCapability=null;
       sheetMetalState.fixedFace={geometryId:String(best.geometry.id),elementId:Number(result.fixedFaceId)};
       if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
       const firstR=result.bendLines?.find(b=>Number.isFinite(b.insideRadius))?.insideRadius;
       if((!Number.isFinite(sheetMetalState.radius)||sheetMetalState.radius<0)&&Number.isFinite(firstR))sheetMetalState.radius=firstR;
       buildFlatPatternScene(result);
-      syncSheetMetalInputs();syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();captureActiveModelDocumentState();
+      syncSheetMetalInputs();syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateManufacturingUI();captureActiveModelDocumentState();
       if(!quiet){
         const warnings=(result.warnings||[]).filter(Boolean);
         const auto=result.fixedFaceAutomatic?(FR?' · détection auto':' · auto-detected'):'';
@@ -3604,7 +3611,8 @@ function profileThicknessText(m){
 }
 function updateProfileStandardUI(){
   const section=ensureProfileStandardSection();if(!section)return;
-  const active=Boolean(currentStepResult&&sheetMetalCapability.profile);section.hidden=!active;if(!active)return;
+  const genericStock=Boolean(manufacturingCapability&&['round-bar','square-bar','flat-bar','rectangular-bar','hex-bar'].includes(manufacturingCapability.stockType));
+  const active=Boolean(currentStepResult&&sheetMetalCapability.profile&&(!genericStock||currentProfileMatch));section.hidden=!active;if(!active)return;
   const m=currentProfileMatch,fields=[E.profileAiscLabel,E.profileMetricLabel,E.profileFamily,E.profileDimensions,E.profileThickness,E.profileArea,E.profileWeight,E.profileLength,E.profileTotalWeight,E.profileConfidence];
   if(!m){fields.forEach(e=>{if(e)e.textContent='—';});if(E.profileAiscLabel)E.profileAiscLabel.textContent=FR?'Analyse locale…':'Local analysis…';if(E.profileSource)E.profileSource.textContent='AISC Shapes Database v16.0 · LOCAL';return;}
   if(E.profileAiscLabel)E.profileAiscLabel.textContent=m.imperialLabel||m.imperialEdi||'—';
@@ -3622,6 +3630,7 @@ function updateProfileStandardUI(){
 async function resolveProfileStandardMatch(profile){
   const epoch=++profileMatchEpoch;currentProfileMatch=null;updateProfileStandardUI();
   if(!profile)return;
+  if(manufacturingCapability&&['round-bar','square-bar','flat-bar','rectangular-bar','hex-bar'].includes(manufacturingCapability.stockType)){updateGeometryTypeIndicator();updateManufacturingUI();return;}
   try{
     const match=await matchAiscProfile(profile);
     if(epoch!==profileMatchEpoch||!sheetMetalCapability.profile||sheetMetalCapability.profileData!==profile)return;
@@ -3633,17 +3642,38 @@ async function resolveProfileStandardMatch(profile){
 }
 function clearProfileStandardMatch(){currentProfileMatch=null;profileMatchEpoch++;updateProfileStandardUI();}
 
+
+function manufacturingLabel(c){
+  if(!c)return '—';const len=profileLengthMm;
+  if(c.stockType==='round-bar')return `${FR?'Barre ronde':'Round bar'} · Ø ${len(c.diameterMm)}`;
+  if(c.stockType==='square-bar')return `${FR?'Barre carrée':'Square bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
+  if(c.stockType==='flat-bar')return `${FR?'Barre plate':'Flat bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
+  if(c.stockType==='hex-bar')return `${FR?'Barre hexagonale':'Hex bar'} · ${FR?'sur plats':'across flats'} ${len(c.acrossFlatsMm)}`;
+  if(c.stockType==='rectangular-bar')return `${FR?'Barre rectangulaire':'Rectangular bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
+  return FR?'Brut prismatique':'Prismatic stock';
+}
+function manufacturingEvidenceText(c){const map=FR?{turning:'tournage',drilling:'perçage/alésage',chamfering:'chanfreins',fillets:'rayons/fillets','material-removal':'enlèvement de matière'}:{turning:'turning',drilling:'drilling/boring',chamfering:'chamfers',fillets:'fillets','material-removal':'material removal'};return (c?.evidence||[]).map(x=>map[x]||x).join(' · ')||'—';}
+function ensureManufacturingSection(){
+  const drawer=E.propsDrawer,anchor=drawer?.querySelector?.('.drawer-stats');if(!drawer||!anchor)return null;let section=$('manufacturing-section');if(!section){section=document.createElement('div');section.id='manufacturing-section';section.className='drawer-section';anchor.after(section);}
+  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'Inférence géométrique locale · intention de fabrication non garantie':'Local geometric inference · manufacturing intent not guaranteed'}</p>`;
+  return section;
+}
+function updateManufacturingUI(){const section=ensureManufacturingSection();if(!section)return;const c=manufacturingCapability;section.hidden=!c;if(!c)return;const process=$('manufacturing-process'),stock=$('manufacturing-stock'),length=$('manufacturing-length'),rem=$('manufacturing-removal'),evidence=$('manufacturing-evidence'),conf=$('manufacturing-confidence');if(process)process.textContent=c.machined?(FR?'Usinage probable':'Probable machining'):(FR?'Profilé / brut standard':'Stock profile');if(stock)stock.textContent=manufacturingLabel(c);if(length)length.textContent=profileLengthMm(c.lengthMm)||'—';if(rem)rem.textContent=Number.isFinite(c.materialRemoval)?`${(c.materialRemoval*100).toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:1})} %`:'—';if(evidence)evidence.textContent=manufacturingEvidenceText(c);if(conf)conf.textContent=`${Math.round((Number(c.confidence)||0)*100)} %`;}
+
 function updateGeometryTypeIndicator(){
   if(!E.propType)return;
   if(!currentStepResult){E.propType.textContent=currentModel?(FR?'Maillage':'Mesh'):'—';return;}
   if(sheetMetalCapability.profile){
     const match=currentProfileMatch,label=match&&(match.level==='high'||match.level==='probable')?(match.imperialLabel||match.metricLabel):null;
     if(label){E.propType.textContent=`${FR?'Profilé AISC':'AISC profile'} · ${label}`;return;}
+    if(manufacturingCapability){E.propType.textContent=`${FR?'Profilé':'Profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
     const aspect=Number(sheetMetalCapability.profileData?.aspect),suffix=Number.isFinite(aspect)?` · L/C ${aspect.toFixed(1)}`:'';
     E.propType.textContent=(FR?'Profilé / extrusion':'Profile / extrusion')+suffix;return;
   }
-  if(sheetMetalCapability.recognized&&sheetMetalCapability.flatPlate){E.propType.textContent=FR?'Plaque plane':'Flat plate';return;}
   if(sheetMetalCapability.recognized&&sheetMetalCapability.bendCount>0){E.propType.textContent=FR?'Tôle pliée':'Sheet metal';return;}
+  if(manufacturingCapability&&manufacturingCapability.machined){E.propType.textContent=`${FR?'Pièce usinée':'Machined part'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
+  if(sheetMetalCapability.recognized&&sheetMetalCapability.flatPlate){if(manufacturingCapability?.stockType==='flat-bar'&&!manufacturingCapability.machined){E.propType.textContent=`${FR?'Profilé probable':'Probable profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}E.propType.textContent=FR?'Plaque plane':'Flat plate';return;}
+  if(manufacturingCapability){E.propType.textContent=`${FR?'Profilé':'Profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
   E.propType.textContent=FR?'Solide STEP':'STEP solid';
 }
 
@@ -3652,6 +3682,7 @@ function fillProperties() {
   E.propFormat.textContent=currentFormat||'—';
   updateGeometryTypeIndicator();
   updateProfileStandardUI();
+  updateManufacturingUI();
   E.propUnits.textContent=unitLabel(displayUnit);
   E.propParts.textContent=String(currentStats?.partCount??1);
   E.propGeometries.textContent=String(currentStats?.geometryCount??surfaceMeshes.length);
@@ -3863,7 +3894,7 @@ async function clearModel(showMessage=true) {
   }
   modelRoot.position.set(0,0,0);
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();logicalEdgeGroupCache=new Map();logicalHiddenEdgeKeys.clear();
-  currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];
+  currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];manufacturingCapability=null;
   resetSheetMetalForModel();
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;multiMeasureEnabled=false;
   cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;
@@ -3933,6 +3964,7 @@ function updateDisplayedUnits() {
   E.propUnits.textContent=label;
   if(currentStepResult)syncSheetMetalInputs();
   updateProfileStandardUI();
+  updateManufacturingUI();
 }
 
 async function refreshMeasurementUnits() {
