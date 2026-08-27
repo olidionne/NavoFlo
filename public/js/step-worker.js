@@ -203,7 +203,8 @@ function sheetMetalFaceInfo(occt,geometryId){
   const faces=[];
   for(const face of topo.faces||[]){
     const id=Number(face.id),selection={geometryId:gid,kind:'face',elementId:id},sig=exactGeometrySignature(occt,selection);
-    const out={id,family:String(sig?.family||'other')};
+    const topoFace=(topo.faces||[]).find(f=>Number(f.id)===id);
+    const out={id,family:String(sig?.family||'other'),edgeIds:Array.from(topoFace?.edgeIndices||[]).map(Number)};
     if(Number.isFinite(Number(sig?.radius)))out.radius=Number(sig.radius);
     const center=Array.isArray(sig?.localCenter)?sig.localCenter.map(Number).slice(0,3):null;
     const axis=Array.isArray(sig?.axisDirection)?sig.axisDirection.map(Number).slice(0,3):null;
@@ -225,12 +226,30 @@ function sheetMetalFaceInfo(occt,geometryId){
         }
       }
     }
+    // V8.18.5 — retain the exact axial extent of analytic faces.  This lets the
+    // manufacturing classifier distinguish a simple through-cut cylinder from
+    // a blind bore / counterbore / turned step without guessing from face count.
+    if(axis?.length===3&&axis.every(Number.isFinite)&&topoFace){
+      const la=Math.hypot(...axis);
+      if(la>1e-12){
+        const u=axis.map(v=>v/la);let lo=Infinity,hi=-Infinity;
+        for(const edgeId of topoFace.edgeIndices||[]){
+          const topoEdge=(topo.edges||[]).find(e=>Number(e.id)===Number(edgeId)),pts=Array.from(topoEdge?.points||[]).map(Number);
+          for(let k=0;k+2<pts.length;k+=3){
+            const d=pts[k]*u[0]+pts[k+1]*u[1]+pts[k+2]*u[2];
+            if(Number.isFinite(d)){lo=Math.min(lo,d);hi=Math.max(hi,d);}
+          }
+        }
+        if(Number.isFinite(lo)&&Number.isFinite(hi)&&hi>=lo){out.axisMin=lo;out.axisMax=hi;out.axisSpan=hi-lo;}
+      }
+    }
     faces.push(out);
   }
   const edges=[];
   for(const edge of topo.edges||[]){
     const id=Number(edge.id),selection={geometryId:gid,kind:'edge',elementId:id},sig=exactGeometrySignature(occt,selection);
-    const out={id,family:String(sig?.family||'other')};
+    const topoEdge=(topo.edges||[]).find(e=>Number(e.id)===id);
+    const out={id,family:String(sig?.family||'other'),ownerFaceIds:Array.from(topoEdge?.ownerFaceIds||[]).map(Number)};
     if(Number.isFinite(Number(sig?.radius)))out.radius=Number(sig.radius);
     const center=Array.isArray(sig?.localCenter)?sig.localCenter.map(Number).slice(0,3):null;
     const axis=Array.isArray(sig?.axisDirection)?sig.axisDirection.map(Number).slice(0,3):null;

@@ -1,4 +1,4 @@
-/* NavoFlo V8.18.3 — manufacturing / stock-shape classifier.
+/* NavoFlo V8.18.5 — manufacturing / stock-shape classifier.
  *
  * Geometry-only inference from exact STEP analytic faces/edges + the retained
  * tessellated solid.  V8.18.2 keeps analytic-envelope recognition, but
@@ -72,8 +72,9 @@ function planeNormalClusters(faceInfo,axis){
   clusters.sort((a,b)=>b.area-a.area);return clusters;
 }
 
-function featureSummary(faceInfo,stockAxis,stockCenter=null,stockRadius=null){
+function featureSummary(faceInfo,stockAxis,stockCenter=null,stockRadius=null,stockSpan=null,mode='bar'){
   let cones=0,tori=0,cylindersCount=0,transverseCylinders=0,parallelOffAxisCylinders=0,coaxialOtherRadii=0,planes=0;
+  let blindAxialCylinders=0,throughAxialCylinders=0;
   const axisTol=Math.max(Number(stockRadius)||1,1)*1e-3;
   for(const f of faceInfo){
     const g=fam(f.family);
@@ -86,17 +87,27 @@ function featureSummary(faceInfo,stockAxis,stockCenter=null,stockRadius=null){
       if(a&&stockAxis){
         const align=Math.abs(V.dot(a,stockAxis));
         if(align<0.98)transverseCylinders++;
-        else if(c&&stockCenter&&axisLineDistance(stockCenter,stockAxis,c)>axisTol)parallelOffAxisCylinders++;
-        else if(Number.isFinite(stockRadius)&&Math.abs(Number(f.radius)-stockRadius)>Math.max(stockRadius*0.01,1e-4))coaxialOtherRadii++;
+        else {
+          if(c&&stockCenter&&axisLineDistance(stockCenter,stockAxis,c)>axisTol)parallelOffAxisCylinders++;
+          else if(Number.isFinite(stockRadius)&&Math.abs(Number(f.radius)-stockRadius)>Math.max(stockRadius*0.01,1e-4))coaxialOtherRadii++;
+          if(mode==='plate'&&Number.isFinite(stockSpan)&&stockSpan>EPS){
+            const span=Number(f.axisSpan);
+            if(Number.isFinite(span)){
+              if(span<stockSpan*0.88)blindAxialCylinders++;else if(span>=stockSpan*0.94)throughAxialCylinders++;
+            }
+          }
+        }
       }
     }
   }
+  const grooves=tori;
   const hints=[];
   if(coaxialOtherRadii>0)hints.push('turning');
   if(transverseCylinders>0||parallelOffAxisCylinders>0)hints.push('drilling');
+  if(blindAxialCylinders>0)hints.push('blind-hole');
   if(cones>0)hints.push('chamfering');
-  if(tori>0)hints.push('fillets');
-  return{cones,tori,cylinders:cylindersCount,transverseCylinders,parallelOffAxisCylinders,coaxialOtherRadii,planes,hints};
+  if(grooves>0)hints.push('groove');
+  return{cones,tori,grooves,cylinders:cylindersCount,transverseCylinders,parallelOffAxisCylinders,coaxialOtherRadii,blindAxialCylinders,throughAxialCylinders,planes,hints};
 }
 
 function roundCandidate(geometry,faceInfo,points,volume){
@@ -115,8 +126,8 @@ function roundCandidate(geometry,faceInfo,points,volume){
     if(coverage<0.01&&L/(2*R)>0.35)continue;
 
     const stockVolume=Math.PI*R*R*L,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1);
-    const features=featureSummary(faceInfo,axis,center,R);
-    const featureMachining=features.cones>0||features.tori>0||features.transverseCylinders>0||features.parallelOffAxisCylinders>0||features.coaxialOtherRadii>0||features.planes>2;
+    const features=featureSummary(faceInfo,axis,center,R,L,'round');
+    const featureMachining=features.cones>0||features.grooves>0||features.transverseCylinders>0||features.parallelOffAxisCylinders>0||features.coaxialOtherRadii>0||features.planes>2;features.secondaryMachining=featureMachining;
     const machined=featureMachining||(Number.isFinite(removal)&&removal>0.003);
     const confidence=clamp(0.90+Math.min(coverage,1)*0.08-envelopeError*2.2-(coverage<0.15?0.03:0));
     const c={stockType:'round-bar',axis,axisCenter:center,lengthMm:L,diameterMm:2*R,stockVolume,volumeRatio,materialRemoval:removal,machined,features,confidence,aspect:L/(2*R),envelopeError,stockSurfaceCoverage:coverage,volumeReliable:volumeRatio!=null};
@@ -167,7 +178,7 @@ function plateBlankCandidate(geometry,faceInfo,edgeInfo,points,volume){
   for(let i=0;i<planes.length;i++)for(let j=i+1;j<planes.length;j++){
     const a=planes[i],b=planes[j];if(Math.abs(V.dot(a.n,b.n))<0.9995)continue;
     const thickness=Math.abs(V.dot(V.sub(b.c,a.c),a.n));if(!(thickness>EPS))continue;
-    const ratio=Math.min(a.area,b.area)/Math.max(a.area,b.area);if(ratio<0.98)continue;
+    const ratio=Math.min(a.area,b.area)/Math.max(a.area,b.area);if(ratio<0.70)continue;
     if(Math.min(a.area,b.area)<maxArea*0.45)continue;
     const scorePair=Math.min(a.area,b.area)*ratio;
     if(!bestPair||scorePair>bestPair.score)bestPair={a,b,n:a.n,thickness,score:scorePair,ratio};
@@ -175,17 +186,25 @@ function plateBlankCandidate(geometry,faceInfo,edgeInfo,points,volume){
   if(!bestPair)return null;
   const basis=plateAxesFromEdges(edgeInfo,bestPair.n);if(!basis)return null;
   const spanU=extent(points,basis.u),spanV=extent(points,basis.v),major=Math.max(spanU,spanV),minor=Math.min(spanU,spanV),t=bestPair.thickness;
-  if(!(major>EPS&&minor>EPS&&t>EPS)||t>minor*0.68||t>major*0.68)return null;
+  // A generic manufacturing "plate blank" is intentionally stricter than the
+  // DXF slab proof.  This keeps short turned shafts from being relabelled as
+  // plate merely because they have two parallel end caps.
+  const slabRatio=t/Math.max(minor,EPS);
+  if(!(major>EPS&&minor>EPS&&t>EPS)||t>minor*0.42||t>major*0.42)return null;
   const stockVolume=major*minor*t,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1);
-  const cylCount=(faceInfo||[]).filter(f=>['cylinder','cylindrical'].includes(fam(f.family))).length;
-  const coneCount=(faceInfo||[]).filter(f=>fam(f.family)==='cone').length;
-  const torusCount=(faceInfo||[]).filter(f=>fam(f.family)==='torus').length;
-  const planeCount=planes.length;
-  const hints=[];if(cylCount>0)hints.push('drilling');if(coneCount>0)hints.push('chamfering');if(torusCount>0)hints.push('fillets');
-  const machined=cylCount>0||coneCount>0||torusCount>0||planeCount>6||(Number.isFinite(removal)&&removal>0.003);
-  let confidence=0.88+Math.min(bestPair.ratio,1)*0.05;
-  if(volumeRatio!=null)confidence+=Math.min(volumeRatio,1)*0.03;
-  return{stockType:'plate-blank',axis:bestPair.n,lengthMm:major,widthMm:minor,thicknessMm:t,stockVolume,volumeRatio,materialRemoval:removal,machined,features:{cylinders:cylCount,cones:coneCount,tori:torusCount,planes:planeCount,hints},confidence:clamp(confidence),aspect:major/minor,capAreaRatio:bestPair.ratio,volumeReliable:volumeRatio!=null};
+  const features=featureSummary(faceInfo,bestPair.n,null,null,t,'plate'),planeCount=planes.length;
+  const da=V.dot(bestPair.a.c,bestPair.n),db=V.dot(bestPair.b.c,bestPair.n),lo=Math.min(da,db),hi=Math.max(da,db),faceTol=Math.max(t*0.02,1e-4);
+  const interiorParallelPlanes=planes.filter(p=>Math.abs(V.dot(p.n,bestPair.n))>0.9995).filter(p=>{const d=V.dot(p.c,bestPair.n);return d>lo+faceTol&&d<hi-faceTol;}).length;
+  features.interiorParallelPlanes=interiorParallelPlanes;
+  if(interiorParallelPlanes>0)features.hints.push('pocket');
+  const secondaryMachining=features.cones>0||features.grooves>0||features.blindAxialCylinders>0||interiorParallelPlanes>0;
+  features.secondaryMachining=secondaryMachining;
+  // Through cylindrical contours alone are compatible with laser/plasma cutting.
+  // Blind bores, counterbores, annular grooves and internal pocket floors are not.
+  const machined=secondaryMachining;
+  let confidence=0.86+Math.min(bestPair.ratio,1)*0.06+Math.max(0,0.42-slabRatio)*0.08;
+  if(volumeRatio!=null)confidence+=Math.min(volumeRatio,1)*0.02;
+  return{stockType:'plate-blank',axis:bestPair.n,lengthMm:major,widthMm:minor,thicknessMm:t,stockVolume,volumeRatio,materialRemoval:removal,machined,features,confidence:clamp(confidence),aspect:major/minor,capAreaRatio:bestPair.ratio,slabRatio,volumeReliable:volumeRatio!=null};
 }
 
 function rectangularCandidate(geometry,faceInfo,edgeInfo,points,volume){
@@ -201,7 +220,7 @@ function rectangularCandidate(geometry,faceInfo,edgeInfo,points,volume){
   const normals=planeNormalClusters(faceInfo,axis);if(normals.length<2)return null;const u=normals[0].n,vEntry=normals.slice(1).find(c=>Math.abs(V.dot(u,c.n))<0.12);if(!vEntry)return null;const v=vEntry.n,w=extent(points,u),h=extent(points,v);if(!(w>EPS&&h>EPS))return null;
   const stockVolume=L*w*h,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1);
   const major=Math.max(w,h),minor=Math.min(w,h),crossRatio=major/minor,aspect=L/major;let stockType='rectangular-bar';if(crossRatio<=1.08)stockType='square-bar';else if(crossRatio>=2.5)stockType='flat-bar';
-  const features=featureSummary(faceInfo,axis,null,null),expectedPlaneCount=6,featureMachining=features.cylinders>0||features.cones>0||features.tori>0||features.planes>expectedPlaneCount,machined=featureMachining||(Number.isFinite(removal)&&removal>0.003);
+  const features=featureSummary(faceInfo,axis,null,null,L,'bar'),expectedPlaneCount=6,featureMachining=features.cylinders>0||features.cones>0||features.grooves>0||features.planes>expectedPlaneCount,machined=featureMachining||(Number.isFinite(removal)&&removal>0.003);features.secondaryMachining=featureMachining;
   let confidence=0.88+Math.min(aspect,5)*0.012+Math.min(fullLengthMembers.length,8)*0.006;
   if(volumeRatio!=null){if(volumeRatio<0.05)confidence-=0.15;else confidence+=Math.min(volumeRatio,1)*0.04;}
   confidence=clamp(confidence);
@@ -212,8 +231,25 @@ function hexCandidate(geometry,faceInfo,edgeInfo,points,volume){
   const dirs=[];for(const c of normals){if(dirs.every(d=>Math.abs(V.dot(d,c.n))<0.995))dirs.push(c.n);if(dirs.length===3)break;}if(dirs.length!==3)return null;
   const widths=dirs.map(n=>extent(points,n)),mean=widths.reduce((a,b)=>a+b,0)/3;if(!(mean>EPS))return null;const spread=(Math.max(...widths)-Math.min(...widths))/mean;if(spread>0.08)return null;
   const angles=[];for(let i=0;i<3;i++)for(let j=i+1;j<3;j++)angles.push(Math.acos(clamp(Math.abs(V.dot(dirs[i],dirs[j])),-1,1))*180/Math.PI);if(!angles.every(a=>a>50&&a<70))return null;
-  const area=Math.sqrt(3)/2*mean*mean,stockVolume=area*L,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1),features=featureSummary(faceInfo,axis,null,null),machined=features.cylinders>0||features.cones>0||features.tori>0||features.planes>8||(Number.isFinite(removal)&&removal>0.003);
+  const area=Math.sqrt(3)/2*mean*mean,stockVolume=area*L,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1),features=featureSummary(faceInfo,axis,null,null,L,'bar'),machined=features.cylinders>0||features.cones>0||features.grooves>0||features.planes>8||(Number.isFinite(removal)&&removal>0.003);features.secondaryMachining=machined;
   return{stockType:'hex-bar',axis,lengthMm:L,acrossFlatsMm:mean,stockVolume,volumeRatio,materialRemoval:removal,machined,features,confidence:clamp(0.90-spread*1.8+Math.min(L/mean,6)*0.006),aspect:L/mean,volumeReliable:volumeRatio!=null};
+}
+function partialBoreEvidence(best,faceInfo,points){
+  let partial=0;
+  for(const f of faceInfo||[]){
+    if(!['cylinder','cylindrical'].includes(fam(f.family)))continue;
+    const axis=canonicalAxis(Array.isArray(f.axisDirection)?f.axisDirection.map(Number):null),span=Number(f.axisSpan);
+    if(!axis||!Number.isFinite(span)||!(span>EPS))continue;
+    // Coaxial short cylinders on round stock are turned diameters/steps, not
+    // blind drilling.  They are already captured by the turning fingerprint.
+    if(best?.stockType==='round-bar'&&best.axis&&Math.abs(V.dot(axis,best.axis))>0.995){
+      const c=Array.isArray(f.localCenter)?f.localCenter.map(Number).slice(0,3):null;
+      if(c&&best.axisCenter&&sameAxisLine(best.axis,best.axisCenter,axis,c,Math.max(Number(best.diameterMm)||1,1)*1e-3))continue;
+    }
+    const solidSpan=extent(points,axis);
+    if(solidSpan>EPS&&span<solidSpan*0.90)partial++;
+  }
+  return partial;
 }
 function score(c){if(!c)return-Infinity;let s=Number(c.confidence)||0;if(c.stockType==='round-bar')s+=0.06;if(c.rectangularEnvelopeProven)s+=0.05;if(c.stockType==='plate-blank')s-=0.02;if(c.volumeReliable)s+=0.01;return s;}
 
@@ -225,6 +261,9 @@ export function classifyManufacturingGeometry({geometry,faceInfo=[],edgeInfo=[]}
   const plate=(!round&&!hex&&!rect)?plateBlankCandidate(geometry,faceInfo,edgeInfo,points,volume):null;
   const candidates=[round,hex,rect,plate].filter(Boolean);
   if(!candidates.length)return null;candidates.sort((a,b)=>score(b)-score(a));const best=candidates[0];
-  const evidence=[];if(best.features?.hints?.length)evidence.push(...best.features.hints);if(Number.isFinite(best.materialRemoval)&&best.materialRemoval>0.003)evidence.push('material-removal');
-  return{...best,kind:'stock-shape',process:best.machined?'machining':'stock-profile',evidence:[...new Set(evidence)],volumeMm3:volume,diagnostics:{candidateCount:candidates.length,volumeReliable:Boolean(best.volumeReliable),stockSurfaceCoverage:Number.isFinite(best.stockSurfaceCoverage)?best.stockSurfaceCoverage:null,envelopeError:Number.isFinite(best.envelopeError)?best.envelopeError:null}};
+  const partialBores=partialBoreEvidence(best,faceInfo,points);
+  if(best.features){best.features.partialAxialCylinders=partialBores;if(partialBores>0)best.features.secondaryMachining=true;}
+  if(partialBores>0)best.machined=true;
+  const evidence=[];if(best.features?.hints?.length)evidence.push(...best.features.hints);if(partialBores>0)evidence.push('recess');if(Number.isFinite(best.materialRemoval)&&best.materialRemoval>0.003)evidence.push('material-removal');
+  return{...best,kind:'stock-shape',process:best.machined?'machining':'stock-profile',evidence:[...new Set(evidence)],volumeMm3:volume,diagnostics:{candidateCount:candidates.length,volumeReliable:Boolean(best.volumeReliable),stockSurfaceCoverage:Number.isFinite(best.stockSurfaceCoverage)?best.stockSurfaceCoverage:null,envelopeError:Number.isFinite(best.envelopeError)?best.envelopeError:null,partialAxialCylinders:partialBores}};
 }

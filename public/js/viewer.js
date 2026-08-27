@@ -6,7 +6,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
 import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.9';
-import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.18.3';
+import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.18.5';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.9';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
@@ -80,7 +80,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.17.7';
+const WORKER_URL = '/js/step-worker.js?v=8.18.5';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -199,7 +199,7 @@ let baseMaterials = new Set();
 // File objects and per-document camera/unit state stay local in the browser.
 const modelDocuments=new Map();
 let activeModelDocumentId=null,modelDocumentSeq=0,modelDocumentBusy=false,pendingModelDocumentId=null;
-const MODEL_ANALYSIS_CACHE_VERSION=1;
+const MODEL_ANALYSIS_CACHE_VERSION=2;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -1268,6 +1268,24 @@ function describeUnfoldFailure(result){
   return messages[code]||result?.message||SMT.unsupportedTopology;
 }
 
+function manufacturingLooksLikeRoundShaft(c){
+  const aspect=Number(c?.aspect),confidence=Number(c?.confidence);
+  // A strong analytic round-stock envelope with appreciable axial length is a
+  // shaft/turned-blank signature, not a flat sheet.  Keep short round plate
+  // blanks eligible for DXF; they are handled as plate + machining below.
+  const turningEvidence=Number(c?.features?.coaxialOtherRadii)>0||(c?.evidence||[]).includes('turning');
+  return c?.stockType==='round-bar'&&Boolean(c?.machined)&&turningEvidence&&Number.isFinite(aspect)&&aspect>=0.45&&confidence>=0.78;
+}
+function manufacturingHasPlateSecondaryMachining(c){
+  if(!c)return false;const f=c.features||{},e=new Set(c.evidence||[]);
+  return Boolean(
+    Number(f.cones)>0||Number(f.grooves)>0||Number(f.tori)>0||
+    Number(f.blindAxialCylinders)>0||Number(f.interiorParallelPlanes)>0||
+    e.has('groove')||e.has('blind-hole')||e.has('counterbore')||e.has('recess')||e.has('pocket')
+  );
+}
+function emptySheetMetalCapability(){return{recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,profile:false,profileType:null,profileData:null};}
+
 async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
   if(!currentStepResult){if(!quiet)setSheetMetalStatus(SMT.needStep,'warn');return null;}
   if(flatPatternResult&&!force){if(activate)setFlatPatternView(true);return flatPatternResult;}
@@ -1310,6 +1328,19 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           fallbackInsideRadius:sheetMetalState.radius,
           kResolver:resolveUnfoldK
         });
+
+        // V8.18.5 — manufacturing arbitration.  A turned shaft can contain two
+        // parallel planar end faces and was occasionally accepted by the generic
+        // flat-plate proof, which exposed a meaningless DXF button.  A strong
+        // analytic round-bar + machining signature wins over a zero-bend plate
+        // result, while short disk/plate blanks remain DXF-capable.
+        if(result?.ok&&result.flatPlate&&manufacturingLooksLikeRoundShaft(manufacturing)){
+          const tagged={...manufacturing,geometryId:String(geometry.id)};
+          manufacturingByGeometry.set(String(geometry.id),tagged);
+          if(!bestManufacturing||(Number(tagged.confidence)||0)>(Number(bestManufacturing.confidence)||0))bestManufacturing=tagged;
+          bestFailure=bestFailure||{code:'machined-round-stock',message:'Machined round stock / shaft detected; flat DXF is intentionally suppressed.'};
+          continue;
+        }
         if(!result?.ok){
           if(result?.code==='structural-profile'){
             // Structural/extruded steel profile detection is authoritative.  A W/L/C/HSS
@@ -1351,6 +1382,8 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           if(!quiet)console.info('[NavoFlo profile detection]',bestProfile);
           return null;
         }
+        clearProfileStandardMatch();
+        sheetMetalCapability=emptySheetMetalCapability();
         manufacturingCapability=bestManufacturing;
         modelAnalysisReady=true;
         syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateManufacturingUI();captureActiveModelDocumentState();
@@ -3774,13 +3807,32 @@ function manufacturingLabel(c){
   if(c.stockType==='rectangular-bar')return `${FR?'Barre rectangulaire':'Rectangular bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
   return FR?'Brut prismatique':'Prismatic stock';
 }
-function manufacturingEvidenceText(c){const map=FR?{turning:'tournage',drilling:'perçage/alésage',chamfering:'chanfreins',fillets:'rayons/fillets','material-removal':'enlèvement de matière'}:{turning:'turning',drilling:'drilling/boring',chamfering:'chamfers',fillets:'fillets','material-removal':'material removal'};return (c?.evidence||[]).map(x=>map[x]||x).join(' · ')||'—';}
+function manufacturingLabelForCurrentContext(c){
+  const cutPlate=Boolean(sheetMetalCapability?.flatPlate);
+  if(cutPlate&&c?.stockType==='round-bar'&&Number(c?.aspect)<0.45){
+    return `${FR?'Plaque ronde brute':'Round plate blank'} · Ø ${profileLengthMm(c.diameterMm)} × ${profileLengthMm(c.lengthMm)}`;
+  }
+  return manufacturingLabel(c);
+}
+function manufacturingEvidenceText(c){const map=FR?{turning:'tournage',drilling:'perçage/alésage',chamfering:'chanfreins',fillets:'rayons/fillets',groove:'rainure / rayon','blind-hole':'trou borgne / alésage',counterbore:'lamage',recess:'alésage / lamage / trou borgne',pocket:'poche','material-removal':'enlèvement de matière'}:{turning:'turning',drilling:'drilling/boring',chamfering:'chamfers',fillets:'fillets',groove:'groove / fillet','blind-hole':'blind hole / bore',counterbore:'counterbore',recess:'bore / counterbore / blind feature',pocket:'pocket','material-removal':'material removal'};return (c?.evidence||[]).map(x=>map[x]||x).join(' · ')||'—';}
 function ensureManufacturingSection(){
   const drawer=E.propsDrawer,anchor=drawer?.querySelector?.('.drawer-stats');if(!drawer||!anchor)return null;let section=$('manufacturing-section');if(!section){section=document.createElement('div');section.id='manufacturing-section';section.className='drawer-section';anchor.after(section);}
   if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'Inférence géométrique locale · intention de fabrication non garantie':'Local geometric inference · manufacturing intent not guaranteed'}</p>`;
   return section;
 }
-function updateManufacturingUI(){const section=ensureManufacturingSection();if(!section)return;const c=manufacturingCapability;section.hidden=!c;if(!c)return;const process=$('manufacturing-process'),stock=$('manufacturing-stock'),length=$('manufacturing-length'),rem=$('manufacturing-removal'),evidence=$('manufacturing-evidence'),conf=$('manufacturing-confidence'),cutPlate=Boolean(sheetMetalCapability?.flatPlate&&(sheetMetalCapability?.cuttablePlate||c.stockType==='plate-blank'));if(process)process.textContent=cutPlate?(FR?'Découpe de plaque':'Plate cutting'):(c.machined?(FR?'Usinage probable':'Probable machining'):(FR?'Profilé / brut standard':'Stock profile'));if(stock)stock.textContent=manufacturingLabel(c);if(length)length.textContent=profileLengthMm(c.lengthMm)||'—';if(rem)rem.textContent=Number.isFinite(c.materialRemoval)?`${(c.materialRemoval*100).toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:1})} %`:'—';if(evidence)evidence.textContent=manufacturingEvidenceText(c);if(conf)conf.textContent=`${Math.round((Number(c.confidence)||0)*100)} %`;}
+function updateManufacturingUI(){
+  const section=ensureManufacturingSection();if(!section)return;const c=manufacturingCapability;section.hidden=!c;if(!c)return;
+  const process=$('manufacturing-process'),stock=$('manufacturing-stock'),length=$('manufacturing-length'),rem=$('manufacturing-removal'),evidence=$('manufacturing-evidence'),conf=$('manufacturing-confidence');
+  const cutPlate=Boolean(sheetMetalCapability?.flatPlate&&(sheetMetalCapability?.cuttablePlate||c.stockType==='plate-blank'||Number(c?.aspect)<0.45));
+  const plateMachining=cutPlate&&manufacturingHasPlateSecondaryMachining(c);
+  if(process)process.textContent=cutPlate?(plateMachining?(FR?'Découpe de plaque + usinage':'Plate cutting + machining'):(FR?'Découpe de plaque':'Plate cutting')):(c.machined?(FR?'Usinage probable':'Probable machining'):(FR?'Profilé / brut standard':'Stock profile'));
+  if(stock)stock.textContent=manufacturingLabelForCurrentContext(c);
+  if(length)length.textContent=profileLengthMm(c.lengthMm)||'—';
+  if(rem)rem.textContent=Number.isFinite(c.materialRemoval)?`${(c.materialRemoval*100).toLocaleString(FR?'fr-CA':'en-CA',{maximumFractionDigits:1})} %`:'—';
+  if(evidence)evidence.textContent=manufacturingEvidenceText(c);
+  if(conf)conf.textContent=`${Math.round((Number(c.confidence)||0)*100)} %`;
+}
+
 
 function updateGeometryTypeIndicator(){
   if(!E.propType)return;
@@ -3794,8 +3846,11 @@ function updateGeometryTypeIndicator(){
   if(sheetMetalCapability.recognized&&sheetMetalCapability.bendCount>0){E.propType.textContent=FR?'Tôle pliée':'Sheet metal';return;}
   if(sheetMetalCapability.recognized&&sheetMetalCapability.flatPlate){
     if(manufacturingCapability?.stockType==='flat-bar'&&!manufacturingCapability.machined){E.propType.textContent=`${FR?'Profilé probable':'Probable profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
-    if(sheetMetalCapability.cuttablePlate||manufacturingCapability?.stockType==='plate-blank'){E.propType.textContent=FR?'Plaque à découper':'Cut plate';return;}
-    E.propType.textContent=FR?'Plaque plane':'Flat plate';return;
+    const plateMachining=manufacturingHasPlateSecondaryMachining(manufacturingCapability);
+    if(sheetMetalCapability.cuttablePlate||manufacturingCapability?.stockType==='plate-blank'||(manufacturingCapability?.stockType==='round-bar'&&Number(manufacturingCapability?.aspect)<0.45)){
+      E.propType.textContent=plateMachining?(FR?'Plaque à découper · usinage':'Cut plate · machining'):(FR?'Plaque à découper':'Cut plate');return;
+    }
+    E.propType.textContent=plateMachining?(FR?'Plaque plane · usinage':'Flat plate · machining'):(FR?'Plaque plane':'Flat plate');return;
   }
   if(manufacturingCapability&&manufacturingCapability.machined){E.propType.textContent=`${FR?'Pièce usinée':'Machined part'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
   if(manufacturingCapability){
