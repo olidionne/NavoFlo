@@ -6,7 +6,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
 import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.17.9';
-import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.18.1';
+import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.18.2';
 import { matchAiscProfile } from './profile-standard-matcher.js?v=8.17.9';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
@@ -3451,7 +3451,7 @@ function sectionTriangleSegment(a,b,c,plane,tol){
   if(d.every(x=>x>tol)||d.every(x=>x<-tol))return null;
   if(d.every(x=>Math.abs(x)<=tol))return null; // coplanar source face is not itself a section boundary
   const hits=[];
-  // V8.18.1: every cap point is projected back onto the mathematical clipping
+  // V8.18.2: every cap point is projected back onto the mathematical clipping
   // plane.  This prevents a vertex from a chamfer/angled end face that merely
   // falls inside the welding tolerance from pulling the visual cap onto that
   // angled face.
@@ -3540,6 +3540,33 @@ function buildSectionCaps(){
   const root=new THREE.Group();root.name='NavoFlo Solid Section Cap';root.add(cap);sectionCapRoot=root;sectionCapPlaneMesh=cap;scene.add(root);
 }
 
+function refreshCadEdgesAfterClipping(){
+  // V8.18.2 — force CAD edge state back into sync with local clipping.
+  //
+  // Three.js recompiles line materials when clipping is added/removed. Because
+  // Navo3D shares one black edge material across many exact B-Rep edge objects,
+  // a clip toggle could leave the previous GPU program visible for one render
+  // cycle (or until the user toggled Coupe again). Re-assert the visual state
+  // immediately and once more on the next frame.
+  const sync=()=>{
+    blackEdgeMaterial.clippingPlanes=clipEnabled?[clipPlane]:null;
+    blackEdgeMaterial.visible=edgesVisible;
+    blackEdgeMaterial.needsUpdate=true;
+    applyEdgesVisibility();
+    for(const object of visualEdges){
+      if(!object)continue;
+      const materials=Array.isArray(object.material)?object.material:[object.material].filter(Boolean);
+      materials.forEach(material=>{
+        material.clippingPlanes=clipEnabled?[clipPlane]:null;
+        material.visible=edgesVisible;
+        material.needsUpdate=true;
+      });
+    }
+  };
+  sync();
+  requestAnimationFrame(sync);
+}
+
 function updateClipping() {
   const axis=E.clipAxis.value;
   clipPlane.normal.set(axis==='x'?1:0,axis==='y'?1:0,axis==='z'?1:0);
@@ -3551,7 +3578,6 @@ function updateClipping() {
     if (E.clipInvert.checked) clipPlane.constant*=-1;
   }
   baseMaterials.forEach(m=>{m.clippingPlanes=clipEnabled?[clipPlane]:null;m.needsUpdate=true});
-  blackEdgeMaterial.clippingPlanes=clipEnabled?[clipPlane]:null;blackEdgeMaterial.needsUpdate=true;
 
   selectionRoot?.traverse?.(object=>{
     if(!object.material)return;
@@ -3563,6 +3589,7 @@ function updateClipping() {
   });
   if(clipEnabled){buildSectionCaps();if(sectionCapRoot)sectionCapRoot.visible=!flatPatternActive;}
   else clearSectionCaps();
+  refreshCadEdgesAfterClipping();
 }
 
 function modelBoundsViewExtents(center){
@@ -3681,6 +3708,7 @@ function manufacturingLabel(c){
   if(c.stockType==='round-bar')return `${FR?'Barre ronde':'Round bar'} · Ø ${len(c.diameterMm)}`;
   if(c.stockType==='square-bar')return `${FR?'Barre carrée':'Square bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
   if(c.stockType==='flat-bar')return `${FR?'Barre plate':'Flat bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
+  if(c.stockType==='plate-blank')return `${FR?'Plaque brute':'Plate blank'} · ${len(c.lengthMm)} × ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
   if(c.stockType==='hex-bar')return `${FR?'Barre hexagonale':'Hex bar'} · ${FR?'sur plats':'across flats'} ${len(c.acrossFlatsMm)}`;
   if(c.stockType==='rectangular-bar')return `${FR?'Barre rectangulaire':'Rectangular bar'} · ${len(c.widthMm)} × ${len(c.thicknessMm)}`;
   return FR?'Brut prismatique':'Prismatic stock';
@@ -3705,7 +3733,10 @@ function updateGeometryTypeIndicator(){
   if(sheetMetalCapability.recognized&&sheetMetalCapability.bendCount>0){E.propType.textContent=FR?'Tôle pliée':'Sheet metal';return;}
   if(manufacturingCapability&&manufacturingCapability.machined){E.propType.textContent=`${FR?'Pièce usinée':'Machined part'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
   if(sheetMetalCapability.recognized&&sheetMetalCapability.flatPlate){if(manufacturingCapability?.stockType==='flat-bar'&&!manufacturingCapability.machined){E.propType.textContent=`${FR?'Profilé probable':'Probable profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}E.propType.textContent=FR?'Plaque plane':'Flat plate';return;}
-  if(manufacturingCapability){E.propType.textContent=`${FR?'Profilé':'Profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
+  if(manufacturingCapability){
+    if(manufacturingCapability.stockType==='plate-blank'){E.propType.textContent=FR?'Plaque brute':'Plate blank';return;}
+    E.propType.textContent=`${FR?'Profilé':'Profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;
+  }
   E.propType.textContent=FR?'Solide STEP':'STEP solid';
 }
 

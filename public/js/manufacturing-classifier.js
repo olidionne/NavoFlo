@@ -1,7 +1,7 @@
-/* NavoFlo V8.18.1 — manufacturing / stock-shape classifier.
+/* NavoFlo V8.18.2 — manufacturing / stock-shape classifier.
  *
  * Geometry-only inference from exact STEP analytic faces/edges + the retained
- * tessellated solid.  V8.18.1 deliberately does NOT require a valid signed
+ * tessellated solid.  V8.18.2 keeps analytic-envelope recognition, but
  * triangle volume before recognizing stock.  Some STEP tessellations can have
  * per-face winding that makes a divergence-theorem volume cancel even though
  * the B-Rep itself is perfectly valid.  Stock recognition is therefore driven
@@ -125,21 +125,88 @@ function roundCandidate(geometry,faceInfo,points,volume){
   return best;
 }
 
+
+function planeRecords(faceInfo=[]){
+  const out=[];
+  for(const f of faceInfo){
+    if(fam(f.family)!=='plane')continue;
+    const n=canonicalAxis(Array.isArray(f.localNormal)?f.localNormal.map(Number):null);
+    const c=Array.isArray(f.localCenter)?f.localCenter.map(Number).slice(0,3):null;
+    const area=Number(f.area)||0;
+    if(!n||!c?.every(Number.isFinite)||!(area>EPS))continue;
+    out.push({face:f,n,c,area});
+  }
+  return out;
+}
+function fallbackPlaneBasis(n){
+  const refs=[[1,0,0],[0,1,0],[0,0,1]].sort((a,b)=>Math.abs(V.dot(a,n))-Math.abs(V.dot(b,n)));
+  const u=V.unit([n[1]*refs[0][2]-n[2]*refs[0][1],n[2]*refs[0][0]-n[0]*refs[0][2],n[0]*refs[0][1]-n[1]*refs[0][0]]);
+  if(!u)return null;
+  const v=V.unit([n[1]*u[2]-n[2]*u[1],n[2]*u[0]-n[0]*u[2],n[0]*u[1]-n[1]*u[0]]);
+  return v?{u,v}:null;
+}
+function plateAxesFromEdges(edgeInfo,n){
+  const clusters=lineClusters(edgeInfo).filter(c=>Math.abs(V.dot(c.axis,n))<0.08);
+  const first=clusters[0]?.axis||null;
+  const second=first?(clusters.slice(1).find(c=>Math.abs(V.dot(c.axis,first))<0.12)?.axis||null):null;
+  if(first&&second)return{u:first,v:second};
+  return fallbackPlaneBasis(n);
+}
+
+// V8.18.2 — plate blank fallback.
+//
+// "Flat bar" is now a proof, not a guess: a rectangular bar must retain four
+// full-length longitudinal corner traces. If machining/profiling changes the
+// outside footprint so those four stock corners no longer run for the complete
+// stock length, we fall back to a plate blank. This matches fabrication reality:
+// a 1" thick profiled blank cut from plate is not called flat bar merely because
+// its bounding box could fit inside a flat-bar rectangle.
+function plateBlankCandidate(geometry,faceInfo,edgeInfo,points,volume){
+  const planes=planeRecords(faceInfo);if(planes.length<2)return null;
+  const maxArea=Math.max(...planes.map(p=>p.area));let bestPair=null;
+  for(let i=0;i<planes.length;i++)for(let j=i+1;j<planes.length;j++){
+    const a=planes[i],b=planes[j];if(Math.abs(V.dot(a.n,b.n))<0.9995)continue;
+    const thickness=Math.abs(V.dot(V.sub(b.c,a.c),a.n));if(!(thickness>EPS))continue;
+    const ratio=Math.min(a.area,b.area)/Math.max(a.area,b.area);if(ratio<0.98)continue;
+    if(Math.min(a.area,b.area)<maxArea*0.45)continue;
+    const scorePair=Math.min(a.area,b.area)*ratio;
+    if(!bestPair||scorePair>bestPair.score)bestPair={a,b,n:a.n,thickness,score:scorePair,ratio};
+  }
+  if(!bestPair)return null;
+  const basis=plateAxesFromEdges(edgeInfo,bestPair.n);if(!basis)return null;
+  const spanU=extent(points,basis.u),spanV=extent(points,basis.v),major=Math.max(spanU,spanV),minor=Math.min(spanU,spanV),t=bestPair.thickness;
+  if(!(major>EPS&&minor>EPS&&t>EPS)||t>minor*0.68||t>major*0.68)return null;
+  const stockVolume=major*minor*t,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1);
+  const cylCount=(faceInfo||[]).filter(f=>['cylinder','cylindrical'].includes(fam(f.family))).length;
+  const coneCount=(faceInfo||[]).filter(f=>fam(f.family)==='cone').length;
+  const torusCount=(faceInfo||[]).filter(f=>fam(f.family)==='torus').length;
+  const planeCount=planes.length;
+  const hints=[];if(cylCount>0)hints.push('drilling');if(coneCount>0)hints.push('chamfering');if(torusCount>0)hints.push('fillets');
+  const machined=cylCount>0||coneCount>0||torusCount>0||planeCount>6||(Number.isFinite(removal)&&removal>0.003);
+  let confidence=0.88+Math.min(bestPair.ratio,1)*0.05;
+  if(volumeRatio!=null)confidence+=Math.min(volumeRatio,1)*0.03;
+  return{stockType:'plate-blank',axis:bestPair.n,lengthMm:major,widthMm:minor,thicknessMm:t,stockVolume,volumeRatio,materialRemoval:removal,machined,features:{cylinders:cylCount,cones:coneCount,tori:torusCount,planes:planeCount,hints},confidence:clamp(confidence),aspect:major/minor,capAreaRatio:bestPair.ratio,volumeReliable:volumeRatio!=null};
+}
+
 function rectangularCandidate(geometry,faceInfo,edgeInfo,points,volume){
   const line=lineClusters(edgeInfo)[0];if(!line||line.members.length<2)return null;const axis=line.axis,L=extent(points,axis);if(!(L>EPS))return null;
+
+  // V8.18.2: a generic rectangle only earns "bar stock" when the four stock
+  // corners survive for essentially 100% of the candidate stock length.
+  // Drilled holes do not disturb those traces; profiled plate outlines, clipped
+  // corners and diagonal end geometry do.
+  const fullLengthMembers=line.members.filter(m=>m.length>=L*0.995);
+  if(fullLengthMembers.length<4)return null;
+
   const normals=planeNormalClusters(faceInfo,axis);if(normals.length<2)return null;const u=normals[0].n,vEntry=normals.slice(1).find(c=>Math.abs(V.dot(u,c.n))<0.12);if(!vEntry)return null;const v=vEntry.n,w=extent(points,u),h=extent(points,v);if(!(w>EPS&&h>EPS))return null;
   const stockVolume=L*w*h,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1);
   const major=Math.max(w,h),minor=Math.min(w,h),crossRatio=major/minor,aspect=L/major;let stockType='rectangular-bar';if(crossRatio<=1.08)stockType='square-bar';else if(crossRatio>=2.5)stockType='flat-bar';
   const features=featureSummary(faceInfo,axis,null,null),expectedPlaneCount=6,featureMachining=features.cylinders>0||features.cones>0||features.tori>0||features.planes>expectedPlaneCount,machined=featureMachining||(Number.isFinite(removal)&&removal>0.003);
-  // Do not reject solely because mesh volume is unavailable or pessimistic.
-  // Envelope + exact orthogonal planar families are sufficient to identify the
-  // probable bar stock; structural profiles are filtered by viewer arbitration.
-  let confidence=0.84+Math.min(aspect,5)*0.012+Math.min(line.members.length,8)*0.005;
+  let confidence=0.88+Math.min(aspect,5)*0.012+Math.min(fullLengthMembers.length,8)*0.006;
   if(volumeRatio!=null){if(volumeRatio<0.05)confidence-=0.15;else confidence+=Math.min(volumeRatio,1)*0.04;}
   confidence=clamp(confidence);
-  return{stockType,axis,lengthMm:L,widthMm:major,thicknessMm:minor,stockVolume,volumeRatio,materialRemoval:removal,machined,features,confidence,aspect,normalFamilyCount:normals.length,volumeReliable:volumeRatio!=null};
+  return{stockType,axis,lengthMm:L,widthMm:major,thicknessMm:minor,stockVolume,volumeRatio,materialRemoval:removal,machined,features,confidence,aspect,normalFamilyCount:normals.length,fullLengthCornerTraces:fullLengthMembers.length,rectangularEnvelopeProven:true,volumeReliable:volumeRatio!=null};
 }
-
 function hexCandidate(geometry,faceInfo,edgeInfo,points,volume){
   const line=lineClusters(edgeInfo)[0];if(!line||line.members.length<4)return null;const axis=line.axis,L=extent(points,axis),normals=planeNormalClusters(faceInfo,axis);if(!(L>EPS)||normals.length<3)return null;
   const dirs=[];for(const c of normals){if(dirs.every(d=>Math.abs(V.dot(d,c.n))<0.995))dirs.push(c.n);if(dirs.length===3)break;}if(dirs.length!==3)return null;
@@ -148,11 +215,15 @@ function hexCandidate(geometry,faceInfo,edgeInfo,points,volume){
   const area=Math.sqrt(3)/2*mean*mean,stockVolume=area*L,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1),features=featureSummary(faceInfo,axis,null,null),machined=features.cylinders>0||features.cones>0||features.tori>0||features.planes>8||(Number.isFinite(removal)&&removal>0.003);
   return{stockType:'hex-bar',axis,lengthMm:L,acrossFlatsMm:mean,stockVolume,volumeRatio,materialRemoval:removal,machined,features,confidence:clamp(0.90-spread*1.8+Math.min(L/mean,6)*0.006),aspect:L/mean,volumeReliable:volumeRatio!=null};
 }
-function score(c){if(!c)return-Infinity;let s=Number(c.confidence)||0;if(c.stockType==='round-bar')s+=0.06;if(c.volumeReliable)s+=0.01;return s;}
+function score(c){if(!c)return-Infinity;let s=Number(c.confidence)||0;if(c.stockType==='round-bar')s+=0.06;if(c.rectangularEnvelopeProven)s+=0.05;if(c.stockType==='plate-blank')s-=0.02;if(c.volumeReliable)s+=0.01;return s;}
 
 export function classifyManufacturingGeometry({geometry,faceInfo=[],edgeInfo=[]}={}){
   const points=pointsOf(geometry);if(points.length<4)return null;const volume=signedMeshVolume(geometry);
-  const candidates=[roundCandidate(geometry,faceInfo,points,volume),hexCandidate(geometry,faceInfo,edgeInfo,points,volume),rectangularCandidate(geometry,faceInfo,edgeInfo,points,volume)].filter(Boolean);
+  const round=roundCandidate(geometry,faceInfo,points,volume),hex=hexCandidate(geometry,faceInfo,edgeInfo,points,volume),rect=rectangularCandidate(geometry,faceInfo,edgeInfo,points,volume);
+  // Plate blank is a conservative fallback only when a stronger bar/profile
+  // primitive has not been proven.
+  const plate=(!round&&!hex&&!rect)?plateBlankCandidate(geometry,faceInfo,edgeInfo,points,volume):null;
+  const candidates=[round,hex,rect,plate].filter(Boolean);
   if(!candidates.length)return null;candidates.sort((a,b)=>score(b)-score(a));const best=candidates[0];
   const evidence=[];if(best.features?.hints?.length)evidence.push(...best.features.hints);if(Number.isFinite(best.materialRemoval)&&best.materialRemoval>0.003)evidence.push('material-removal');
   return{...best,kind:'stock-shape',process:best.machined?'machining':'stock-profile',evidence:[...new Set(evidence)],volumeMm3:volume,diagnostics:{candidateCount:candidates.length,volumeReliable:Boolean(best.volumeReliable),stockSurfaceCoverage:Number.isFinite(best.stockSurfaceCoverage)?best.stockSurfaceCoverage:null,envelopeError:Number.isFinite(best.envelopeError)?best.envelopeError:null}};
