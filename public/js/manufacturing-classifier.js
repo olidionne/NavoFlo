@@ -1,4 +1,4 @@
-/* NavoFlo V8.19.2 — manufacturing / stock-shape classifier.
+/* NavoFlo V8.20.0 — manufacturing / stock-shape classifier.
  *
  * Geometry-only inference from exact STEP analytic faces/edges + the retained
  * tessellated solid.  V8.18.2 keeps analytic-envelope recognition, but
@@ -12,7 +12,7 @@
  * priority in viewer.js.  This module is for generic stock (round/square/flat/
  * rectangular/hex) and probable secondary machining.
  */
-import { applyRawStockKnowledge } from './raw-stock-knowledge.js?v=8.19.2';
+import { applyRawStockKnowledge } from './raw-stock-knowledge.js?v=8.20.0';
 
 const EPS=1e-9;
 const V={

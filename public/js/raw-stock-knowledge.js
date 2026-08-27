@@ -1,4 +1,4 @@
-/* NavoFlo V8.19.2 — Raw Stock Knowledge Helper
+/* NavoFlo V8.20.0 — Raw Stock Knowledge Helper
  *
  * This helper adds manufacturing-domain plausibility on top of geometry.
  * It intentionally does NOT replace B-Rep recognition.  It answers a narrower

@@ -1,7 +1,7 @@
 import OcctJS from 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.mjs';
 
 const WASM_URL = 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.wasm';
-const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.19.2';
+const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.20.0';
 
 let occtPromise = null;
 let exactModelId = null;
@@ -294,7 +294,7 @@ function sheetMetalFaceInfo(occt,geometryId){
         };
       }catch{}
     }
-    // V8.19.2 — use the exact OCCT chamfer helper when available.  This is a
+    // V8.20.0 — use the exact OCCT chamfer helper when available.  This is a
     // stronger manufacturing signal than merely seeing an extra planar face.
     if(allowCompoundRecognition&&analyticFamily==='plane'){
       try{

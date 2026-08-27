@@ -39,6 +39,15 @@ not replace the complete license texts in LEGAL/licenses/.
    License files: licenses/LGPL-2.1.txt and
                   licenses/OPEN-CASCADE-EXCEPTION.txt
 
+6. AAGNet, pinned commit e0e36b7a12a7f01a29d7be36efc22730d293a1bd
+   Project: whjdark/AAGNet
+   License: MIT
+   Copyright (c) 2023 whj_dark
+   Used by: optional NavoFeatureEngine machining-feature second-opinion service.
+   Navo3D local CAD analysis does not require this service.
+   License file: licenses/AAGNET-MIT.txt
+
+
 TRADEMARKS
 SOLIDWORKS is a trademark of Dassault Systèmes SolidWorks Corporation or its
 affiliates. AutoCAD and Autodesk are trademarks of Autodesk, Inc. NavoFlo is

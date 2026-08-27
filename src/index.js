@@ -38,6 +38,7 @@ import { licensingContext } from './lib/licensing.js';
 import { sessionUser } from './lib/auth.js';
 import { getOrganizationAudit } from './handlers/audit.js';
 import { getPreferences, putPreferences } from './handlers/preferences.js';
+import { getMfrStatus, postMfrAnalyze, MAX_MFR_BODY } from './handlers/mfr.js';
 import { apiBodyTooLarge, assertTrustedMutation, hardenResponse, maybeScheduleSecurityMaintenance, runSecurityMaintenance, securityJsonError } from './lib/security.js';
 
 const API = Object.freeze({
@@ -58,6 +59,8 @@ const API = Object.freeze({
   '/api/auth/accept-invitation': { POST:postAcceptInvitation },
   '/api/audit': { GET:getOrganizationAudit },
   '/api/preferences': { GET:getPreferences, PUT:putPreferences },
+  '/api/mfr/status': { GET:getMfrStatus },
+  '/api/mfr/analyze': { POST:postMfrAnalyze },
   '/api/licensing/me': { GET:getLicensingMe },
   '/api/licensing/devices': { GET:getLicensingDevices },
   '/api/licensing/members': { POST:createLicensingMember },
@@ -166,7 +169,8 @@ export default {
         maybeScheduleSecurityMaintenance(env,ctx);
         if(url.pathname!=='/api/stripe/webhook'){
           assertTrustedMutation(request);
-          if(apiBodyTooLarge(request))return hardenResponse(json({error:'API request body is too large.',code:'REQUEST_TOO_LARGE'},413),request);
+          const bodyLimit=url.pathname==='/api/mfr/analyze'?MAX_MFR_BODY:undefined;
+          if(apiBodyTooLarge(request,bodyLimit))return hardenResponse(json({error:'API request body is too large.',code:'REQUEST_TOO_LARGE'},413),request);
         }
       }
       return hardenResponse(await routeRequest(request,env,ctx),request);

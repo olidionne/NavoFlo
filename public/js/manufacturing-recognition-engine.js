@@ -1,4 +1,4 @@
-/* NavoFlo V8.19.2 — Manufacturing Recognition Engine (MRE)
+/* NavoFlo V8.20.0 — Manufacturing Recognition Engine (MRE)
  *
  * Architecture:
  *   exact B-Rep/AAG -> stock hypothesis -> virtual delta/removal features
@@ -9,8 +9,9 @@
  * contain a counterbore/groove; a shaft may be round stock AND heavily turned.
  * This module deliberately does not collapse those facts into one enum.
  */
-import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.19.2';
-import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.19.2';
+import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.20.0';
+import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.20.0';
+import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.20.0';
 
 const EPS=1e-8;
 const V={
@@ -240,11 +241,90 @@ function globalPlateAnalyticFeatures({faceInfo,ctx,normal,thickness,stock,exclud
   }
   return dedupeFeatures(out);
 }
+
+function componentSkinContact(ids,ctx,aag){
+  let low=false,high=false;
+  for(const id of ids){
+    const node=aag.nodes.get(Number(id));
+    for(const n of node?.neighbors||[]){if(ctx.lowSkinIds?.has(Number(n)))low=true;if(ctx.highSkinIds?.has(Number(n)))high=true;}
+  }
+  return{low,high,both:low&&high};
+}
+function componentSurfaceFamilies(ids,ctx){
+  const counts=new Map();
+  for(const id of ids){const family=fam(ctx.faceById.get(Number(id))?.family);counts.set(family,(counts.get(family)||0)+1);}
+  return counts;
+}
+function classifyPureThroughCutComponent(ids,ctx,aag,normal,thickness){
+  // A pure 2D cut through a constant-thickness plate has side walls that join
+  // BOTH physical skins, no offset floor, no cone/torus, and every radial wall
+  // spans the complete thickness.  This is the exact topological distinction
+  // needed for obround/slot cuts: two cylindrical ends + two planar side walls
+  // are ONE through-slot, not "2 holes + 2 pockets".
+  const contact=componentSkinContact(ids,ctx,aag);if(!contact.both)return null;
+  const families=componentSurfaceFamilies(ids,ctx),cylinders=[],planes=[];
+  for(const id of ids){
+    const f=ctx.faceById.get(Number(id)),family=fam(f?.family);if(!f)continue;
+    if(['cone','conical','torus','toroidal','sphere','spherical'].includes(family))return null;
+    if(['cylinder','cylindrical'].includes(family)){
+      const axis=canonicalAxis(f.axisDirection),span=Number(f.axisSpan),explicit=f.hole?.isThrough;
+      if(!axis||Math.abs(V.dot(axis,normal))<0.985)return null;
+      if(explicit===false)return null;
+      if(explicit!==true&&Number.isFinite(span)&&span<thickness*0.92)return null;
+      cylinders.push(Number(id));continue;
+    }
+    if(family==='plane'){
+      const n=canonicalAxis(f.localNormal);if(!n)return null;
+      // A plane parallel to the plate skins inside the slab is a floor/recess,
+      // not a through-cut side wall.
+      if(Math.abs(V.dot(n,normal))>0.985)return null;
+      planes.push(Number(id));continue;
+    }
+    // Be conservative for NURBS/unknown walls until ML/Boolean delta confirms
+    // the complete instance.  Do not silently suppress possible machining.
+    return null;
+  }
+  if(!cylinders.length)return null; // avoids treating the outer rectangular wall as an internal cut
+  const allIds=[...new Set(ids.map(Number))];
+  const wallAreaMm2=allIds.reduce((sum,id)=>sum+(Number(ctx.faceById.get(Number(id))?.area)||0),0);
+  let type='through-profile';
+  if(cylinders.length>=2&&planes.length>=1)type='through-slot';
+  else if(cylinders.length===1&&planes.length===0)type='through-hole';
+  return feature(type,'cutting',allIds,0.985,{throughCutEquivalent:true,topologyProven:true,cylinderFaceCount:cylinders.length,planeWallCount:planes.length,wallAreaMm2});
+}
+function mergeThroughCutComponents(features){
+  // If a topological through-slot/profile covers the same faces as lower-level
+  // through-hole/cross-hole/pocket guesses, the instance-level feature wins.
+  const thru=features.filter(f=>['through-slot','through-profile','through-pocket','through-passage','through-step','through-polygon'].includes(f.type));
+  if(!thru.length)return features;
+  return features.filter(f=>{
+    if(thru.includes(f))return true;
+    if(!['through-hole','cross-hole','pocket-floor','one-sided-recess'].includes(f.type))return true;
+    const A=new Set(f.faceIds||[]);for(const t of thru){const B=new Set(t.faceIds||[]);let overlap=0;for(const id of A)if(B.has(id))overlap++;if(A.size&&overlap/A.size>=0.65)return false;}return true;
+  });
+}
+
 function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
   const ctx0=plateContext(stock,sheetResult,faceInfo);if(!ctx0)return[];const {normal,thickness}=ctx0,ctx=plateMachiningContext(faceInfo,aag,normal,thickness),features=[];
   const used=new Set();
+  // Pre-classify every full-thickness wall component.  For profiles whose OUTER
+  // perimeter itself contains arcs (obround/rounded plate), the outer wall can
+  // look exactly like an internal through-slot.  Side-wall area = perimeter × T,
+  // so when 2+ closed full-thickness components exist the largest one is the
+  // physical external perimeter; smaller ones are internal through cuts.
+  const throughByKey=new Map();
   for(const ids of ctx.components){
     if(componentIsPureStockBoundary(ids,ctx,stock,normal,thickness))continue;
+    const t=classifyPureThroughCutComponent(ids,ctx,aag,normal,thickness);if(t)throughByKey.set([...ids].map(Number).sort((a,b)=>a-b).join(','),t);
+  }
+  const throughCandidates=[...throughByKey.values()].sort((a,b)=>(Number(b.parameters?.wallAreaMm2)||0)-(Number(a.parameters?.wallAreaMm2)||0));
+  const externalThroughFaceKey=throughCandidates.length>=2?[...throughCandidates[0].faceIds].sort((a,b)=>a-b).join(','):null;
+  for(const ids of ctx.components){
+    if(componentIsPureStockBoundary(ids,ctx,stock,normal,thickness))continue;
+    const componentKey=[...ids].map(Number).sort((a,b)=>a-b).join(',');
+    const throughCut=throughByKey.get(componentKey)||null;
+    if(throughCut&&componentKey!==externalThroughFaceKey){features.push(throughCut);for(const id of ids)used.add(Number(id));continue;}
+    if(throughCut&&componentKey===externalThroughFaceKey)continue;
     const families=ids.map(id=>fam(ctx.faceById.get(Number(id))?.family));
     const coneIds=ids.filter(id=>['cone','conical'].includes(fam(ctx.faceById.get(Number(id))?.family)));
     const torusIds=ids.filter(id=>['torus','toroidal'].includes(fam(ctx.faceById.get(Number(id))?.family)));
@@ -295,7 +375,7 @@ function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
   // deliberately redundant.  It catches grooves/blind bores even when a STEP
   // periodic seam fragments the physical feature into unexpected components.
   features.push(...globalPlateAnalyticFeatures({faceInfo,ctx,normal,thickness,stock,excludeFaceIds:new Set(features.flatMap(f=>f.faceIds))}));
-  return dedupeFeatures(features);
+  return dedupeFeatures(mergeThroughCutComponents(features));
 }
 function recognizeRoundFeatures({geometry,faceInfo,aag,stock}){
   if(stock?.stockType!=='round-bar')return[];const points=pointsOf(geometry),axis=canonicalAxis(stock.axis),center=vec(stock.axisCenter),R=Number(stock.diameterMm)/2,L=Number(stock.lengthMm);if(!axis||!center||!(R>EPS&&L>EPS))return[];
@@ -327,6 +407,45 @@ function recognizeGenericBarFeatures({faceInfo,stock,sheetResult}){
   return dedupeFeatures(features);
 }
 
+
+function plateSurfaceSignals(faceInfo=[],stock=null,sheetResult=null){
+  const counts={plane:0,cylinder:0,cone:0,torus:0,other:0,blindCylinders:0,throughCylinders:0,partialCylinders:0,compoundHoles:0,exactChamfers:0};
+  const thickness=Number(sheetResult?.thickness)||Number(stock?.thicknessMm)||null;
+  for(const f of faceInfo||[]){
+    const family=fam(f.family);
+    if(family==='plane')counts.plane++;
+    else if(['cylinder','cylindrical'].includes(family)){
+      counts.cylinder++;
+      if(f.hole?.isThrough===false)counts.blindCylinders++;
+      if(f.hole?.isThrough===true)counts.throughCylinders++;
+      const span=Number(f.axisSpan);
+      if(Number.isFinite(span)&&Number.isFinite(thickness)&&thickness>EPS&&span<thickness*0.90)counts.partialCylinders++;
+    }else if(['cone','conical'].includes(family))counts.cone++;
+    else if(['torus','toroidal'].includes(family))counts.torus++;
+    else counts.other++;
+    if(f.compoundHole)counts.compoundHoles++;
+    if(f.chamfer)counts.exactChamfers++;
+  }
+  return counts;
+}
+function computeNeedsMlReview({classification,capabilities,processes,features,signals,stock,confidence}){
+  const directPlate=Boolean(capabilities?.directFlatDxf);
+  const definiteFeatureCount=(features||[]).filter(f=>f.process!=='cutting').length;
+  // ML is a second opinion, not the source of truth. Ask for it only when the
+  // local B-Rep engine sees an ambiguous instance-level pattern or when its
+  // confidence is not strong enough for manufacturing semantics.
+  if(Number(confidence)<0.94)return true;
+  if(directPlate){
+    if((signals?.torus||0)>0||(signals?.compoundHoles||0)>0||(signals?.blindCylinders||0)>0||(signals?.partialCylinders||0)>1)return definiteFeatureCount===0;
+    const lowLevel=(features||[]).filter(f=>['cross-hole','pocket-floor','one-sided-recess'].includes(f.type));
+    if(processes?.machining&&lowLevel.length===definiteFeatureCount&&definiteFeatureCount>0)return true;
+    const throughFragments=(features||[]).filter(f=>['through-hole','cross-hole'].includes(f.type)).length;
+    if(throughFragments>=2&&definiteFeatureCount>0)return true;
+  }
+  if(stock?.stockType==='round-bar'&&!processes?.turning&&Number(stock?.aspect)>=0.45&&(signals?.cylinder||0)>=2)return true;
+  return false;
+}
+
 function dedupeFeatures(features){
   const out=[],seen=new Set();for(const f of features){const key=`${f.type}:${[...f.faceIds].sort((a,b)=>a-b).join(',')}`;if(seen.has(key))continue;seen.add(key);out.push(f);}return out;
 }
@@ -350,7 +469,7 @@ function compatibilityProjection(stock,legacy,processes,features,evidence){
   const base={...(legacy||{}),...(stock||{})};base.machined=Boolean(processes.machining);base.process=base.machined?'machining':'stock-profile';base.evidence=evidence;base.features={...(legacy?.features||{}),recognizedInstances:features.length,secondaryMachining:base.machined};return base;
 }
 
-export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sheetResult=null,structuralProfile=null}={}){
+export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sheetResult=null,structuralProfile=null,mlPrediction=null}={}){
   const aag=buildAttributedAdjacencyGraph(faceInfo,edgeInfo);let legacy=null;try{legacy=classifyManufacturingGeometry({geometry,faceInfo,edgeInfo});}catch{}
   const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile});
   let features=[];
@@ -383,11 +502,34 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
     estimatedRemovedVolumeMm3,featureCount:features.filter(f=>f.process!=='cutting').length,
     featureFaceIds:[...new Set(features.filter(f=>f.process!=='cutting').flatMap(f=>f.faceIds))]
   };
-  return{
+  const signals=plateSurfaceSignals(faceInfo,stock,sheetResult);
+  const localConfidence=clamp(Math.max(stockConfidence,machineConfidence*0.96));
+  const base={
     ...compat,
-    kind:'manufacturing-knowledge',knowledgeVersion:3,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
+    kind:'manufacturing-knowledge',knowledgeVersion:4,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
     aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount},
-    confidence:clamp(Math.max(stockConfidence,machineConfidence*0.96)),
-    diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,analysisPipeline:['brep-aag','same-domain-healing','commercial-stock-prior','stock-hypothesis','removal-feature-decomposition','capability-process-arbitration'],rawStockKnowledgeVersion:RAW_STOCK_KNOWLEDGE_VERSION}
+    confidence:localConfidence,
+    diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,surfaceSignals:signals,
+      analysisPipeline:['brep-aag','same-domain-healing','commercial-stock-prior','stock-hypothesis','instance-through-cut-proof','removal-feature-decomposition','critical-manufacturing-arbitration'],
+      rawStockKnowledgeVersion:RAW_STOCK_KNOWLEDGE_VERSION,criticalArbitratorVersion:CRITICAL_ARBITRATOR_VERSION}
   };
+  base.diagnostics.needsMlReview=computeNeedsMlReview({classification,capabilities,processes,features,signals,stock,confidence:localConfidence});
+  const finalKnowledge=arbitrateManufacturingKnowledge(base,{sheetResult,mlPrediction});
+  finalKnowledge.classification=finalKnowledge.capabilities?.unfold?'sheet-metal':
+    finalKnowledge.capabilities?.structuralProfile?'structural-profile':
+    finalKnowledge.capabilities?.directFlatDxf&&finalKnowledge.processes?.machining?'cuttable-plate-machined':
+    finalKnowledge.capabilities?.directFlatDxf?'cuttable-plate':
+    finalKnowledge.processes?.machining?'machined-part':
+    finalKnowledge.stock?'stock-profile':'solid';
+  finalKnowledge.diagnostics={...(finalKnowledge.diagnostics||{}),needsMlReview:Boolean(base.diagnostics.needsMlReview&&!mlPrediction?.ok)};
+  return finalKnowledge;
+}
+
+export function applyManufacturingMlPrediction(knowledge,{sheetResult=null,mlPrediction=null}={}){
+  if(!knowledge||!mlPrediction?.ok)return knowledge;
+  const out=arbitrateManufacturingKnowledge(knowledge,{sheetResult,mlPrediction});
+  out.classification=out.capabilities?.unfold?'sheet-metal':out.capabilities?.structuralProfile?'structural-profile':out.capabilities?.directFlatDxf&&out.processes?.machining?'cuttable-plate-machined':out.capabilities?.directFlatDxf?'cuttable-plate':out.processes?.machining?'machined-part':out.stock?'stock-profile':'solid';
+  out.confidence=clamp(Math.max(Number(out.confidence)||0,Number(mlPrediction.confidence)||0));
+  out.diagnostics={...(out.diagnostics||{}),needsMlReview:false,mlReviewed:true};
+  return out;
 }
