@@ -394,6 +394,11 @@ function detectRolledPlateSlit(geometry,ctx,tol,diag){
 // flange leaves the cap slab and/or the two cap boundaries stop being translated
 // copies.
 function canonicalDirection(v){
+  // V8.24 — guard against null/malformed input. Some STEP exporters emit a
+  // planar face whose localNormal is null; V3.unit(null) → V3.len(null) then
+  // crashed on null[0], aborting detectRolledPlateSlit and forcing a whole
+  // rolled/slit plate (e.g. ST13-0011) to fall back to "Solid STEP".
+  if(!Array.isArray(v)||v.length<3||!v.slice(0,3).every(Number.isFinite))return null;
   let n=V3.unit(v);if(!n)return null;
   let k=0;for(let i=1;i<3;i++)if(Math.abs(n[i])>Math.abs(n[k]))k=i;
   if(n[k]<0)n=V3.scale(n,-1);return n;
