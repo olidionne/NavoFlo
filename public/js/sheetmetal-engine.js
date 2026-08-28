@@ -1131,6 +1131,11 @@ export function buildRolledFlatPattern(rolled,faceInfo=[],geometry=null){
     const theta=angleOf(cCenter),delta=norm2pi(theta-seamStart);
     if(delta>coverage+1e-6)continue;                    // hole sits in the slit gap → ignore
     const x=meanR*delta,y=ax-axialMin;
+    // V8.24b — one physical hole is often several coaxial cylindrical B-Rep faces
+    // (inner/outer shell intersection, thread relief, split seam). Merge them so a
+    // single DXF circle is emitted instead of stacked duplicates.
+    const dup=holes.find(h=>Math.hypot(h.center[0]-x,h.center[1]-y)<=Math.max(r,t)*0.6);
+    if(dup){dup.radius=Math.max(dup.radius,r);dup.sourceFaceIds.push(Number(f.id));continue;}
     holes.push({kind:'circle',center:[x,y],radius:r,edgeId:`rolled-hole-${holes.length+1}`,sourceFaceIds:[Number(f.id)]});
   }
 
@@ -1154,6 +1159,7 @@ export function buildRolledFlatPattern(rolled,faceInfo=[],geometry=null){
     selectionFaces:[{id:'rolled-panel-1',kind:'panel',sourceFaceIds:(rolled.outerFaceIds||[]).map(Number),triangles}],
     boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:true,
     bendLines:[],bounds,
+    holes2D:holes.map(h=>({center:[...h.center],radius:h.radius})),
     warnings:seamAngles.length>=2?[]:['Slit seam faces not resolved; hole angular reference is approximate.'],
     developed:{meanRadiusMm:meanR,developedLengthMm:developedLen,axialLengthMm:axialLen,thicknessMm:t,holeCount:holes.length,coverageAngleDeg:coverage*180/Math.PI},
     diagnostics:{rolledFlat:true,holeCount:holes.length}

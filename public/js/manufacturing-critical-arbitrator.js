@@ -145,6 +145,12 @@ function hasHardMachiningProof(feature,{plateContext=false}={}){
 export function requiresSecondaryMachining(feature,{plateContext=false}={}){
   const type=normalizeType(feature?.type);if(!type)return false;
   if(THROUGH_CUT_TYPES.has(type))return false;
+  // V8.24b — a through-hole in a proven flat plate is part of the 2D laser/plasma
+  // cut profile, never machining. The recognizer sometimes labels a normal
+  // through-hole as "cross-hole" when the exported plate normal is a few degrees
+  // off; on plate stock that hole is still a cut (502-01-06 / 502-01-10 / ST01-0009).
+  // A genuinely blind cross-hole keeps its own blind-hole proof and is unaffected.
+  if(type==='cross-hole'&&plateContext&&feature?.parameters?.through!==false)return false;
   if(type==='cross-hole'&&plateContext&&feature?.parameters?.throughCutEquivalent)return false;
   if(type==='pocket-floor'&&plateContext&&feature?.parameters?.throughCutEquivalent)return false;
   return hasHardMachiningProof(feature,{plateContext});

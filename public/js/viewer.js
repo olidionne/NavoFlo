@@ -5,8 +5,8 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf, buildRolledFlatPattern } from './sheetmetal-engine.js?v=8.24.2';
-import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.24.2';
+import { analyzeAndUnfold, flatPatternToDxf, buildRolledFlatPattern } from './sheetmetal-engine.js?v=8.24.3';
+import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.24.3';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
 import { matchAiscProfile, matchAiscProfileWithName, aiscDesignationHint } from './profile-standard-matcher.js?v=8.21.2';
 import { fastenerNameHint } from './fastener-recognition.js?v=8.21.1';
@@ -238,7 +238,7 @@ let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
 const assemblyHighlightedMeshes=new Set();
 const assemblyExpandedKeys=new Set();
 
-const MODEL_ANALYSIS_CACHE_VERSION=17;
+const MODEL_ANALYSIS_CACHE_VERSION=18;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -2073,11 +2073,50 @@ function flatWallGeometryChains(chains,thickness){
   if(!pos.length)return null;const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.computeVertexNormals();return g;
 }
 
+function rolledFlatTrianglePositions(result){
+  // Developed rolled blank: rectangle with circular hole cut-outs, closed by
+  // through-thickness hole walls, so the flat view shows complete holes.
+  const t=Math.max(Number(result.thickness)||0,1e-6);
+  const W=Number(result.bounds?.width)||0,H=Number(result.bounds?.height)||0;
+  const shape=new THREE.Shape();
+  shape.moveTo(0,0);shape.lineTo(W,0);shape.lineTo(W,H);shape.lineTo(0,H);shape.lineTo(0,0);
+  for(const h of result.holes2D||[]){
+    const path=new THREE.Path();
+    path.absarc(Number(h.center[0]),Number(h.center[1]),Math.max(Number(h.radius)||0,1e-6),0,Math.PI*2,true);
+    shape.holes.push(path);
+  }
+  const geo=new THREE.ShapeGeometry(shape,24),pos=geo.attributes.position,idx=geo.index;
+  const top=[],bottom=[];
+  if(idx){
+    for(let i=0;i<idx.count;i+=3){
+      const a=idx.getX(i),b=idx.getX(i+1),c=idx.getX(i+2);
+      const ax=pos.getX(a),ay=pos.getY(a),bx=pos.getX(b),by=pos.getY(b),cx=pos.getX(c),cy=pos.getY(c);
+      top.push(ax,ay,0,bx,by,0,cx,cy,0);
+      bottom.push(cx,cy,-t,bx,by,-t,ax,ay,-t);
+    }
+  }
+  const walls=[];
+  for(const h of result.holes2D||[]){
+    const cx=Number(h.center[0]),cy=Number(h.center[1]),r=Math.max(Number(h.radius)||0,1e-6),steps=40;
+    for(let i=0;i<steps;i++){
+      const a0=i/steps*Math.PI*2,a1=(i+1)/steps*Math.PI*2;
+      const x0=cx+Math.cos(a0)*r,y0=cy+Math.sin(a0)*r,x1=cx+Math.cos(a1)*r,y1=cy+Math.sin(a1)*r;
+      walls.push(x0,y0,0,x1,y1,0,x1,y1,-t, x0,y0,0,x1,y1,-t,x0,y0,-t);
+    }
+  }
+  return new Float32Array([...top,...bottom,...walls]);
+}
 function buildFlatPatternScene(result){
   if(flatPatternRoot){scene.remove(flatPatternRoot);disposeObject(flatPatternRoot);}
   flatSurfaceMeshes=[];flatEdgeObjects=[];flatVertexObjects=[];
   flatPatternRoot=new THREE.Group();flatPatternRoot.name='NavoFlo Flat Pattern';
-  const positions=flatPatternTrianglePositions(result),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));geometry.computeVertexNormals();
+  // V8.24 — a rolled/slit shell develops to a rectangle with real hole cut-outs.
+  // Triangulate the blank WITH holes so the openings render complete (edge to
+  // edge), not as overlays on a solid rectangle.
+  const positions=(result.rolledFlat&&Array.isArray(result.holes2D)&&result.holes2D.length)
+    ?rolledFlatTrianglePositions(result)
+    :flatPatternTrianglePositions(result);
+  const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));geometry.computeVertexNormals();
   const material=new THREE.MeshStandardMaterial({color:0xc7ced1,metalness:0.05,roughness:0.58,side:THREE.DoubleSide});
   const mesh=new THREE.Mesh(geometry,material);mesh.userData.flatPattern=true;flatPatternRoot.add(mesh);
 

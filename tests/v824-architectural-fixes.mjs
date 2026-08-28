@@ -20,6 +20,7 @@ import { buildManufacturingKnowledge } from '../public/js/manufacturing-recognit
 import { buildAttributedAdjacencyGraph } from '../public/js/manufacturing-recognition-engine.js';
 import { analyzeMachiningEvidence, detectTurningByGpAx1 } from '../public/js/manufacturing-machining-evidence.js';
 import { classifyManufacturingGeometry } from '../public/js/manufacturing-classifier.js';
+import { buildRolledFlatPattern } from '../public/js/sheetmetal-engine.js';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 function makeBox(L,W,T){
@@ -294,6 +295,52 @@ const concaveEdge=(id,a,b)=>({id,family:'line',ownerFaceIds:[a,b],length:10,
   assert.equal(m.capabilities?.directFlatDxf,true,'bevel plate: directFlatDxf');
   assert.equal(m.processes?.machining,false,'edge-chamfer on flat plate = laser bevel, not machining');
   assert.equal(m.machined,false,'bevel plate must not be machined');
+}
+
+// ─── TEST 9: cross-hole through a flat plate = cut, not machining ─────────────
+// A through-hole whose axis is a few degrees off the exported plate normal was
+// labelled "cross-hole → drilling → machining" (502-01-06 / 502-01-10 / ST01-0009).
+// On a proven flat plate a through-hole is part of the 2D cut profile.
+{
+  const geo=makeBox(180,90,10);
+  const botSkin=plane(1, 0, 0,0,-1, 16000, 90,45, 0, [3]);
+  const topSkin=plane(2,10, 0,0, 1, 16000, 90,45,10, [3]);
+  // Through-hole whose axis is 30° off the plate normal (align≈0.87 < 0.985).
+  const tilt=[Math.sin(Math.PI/6),0,Math.cos(Math.PI/6)];
+  const hole ={id:3,family:'cylinder',area:900,localCenter:[90,45,5],localCentroid:[90,45,5],
+    axisDirection:tilt,radius:12,axisSpan:11,hole:{isThrough:true},neighborFaceIds:[1,2],sameDomainFaceIds:[]};
+  const faces=[botSkin,topSkin,hole];
+  const flatResult={ok:true,flatPlate:true,thickness:10,fixedFaceId:2,panelFaceIds:[1,2],bendCount:0,cuttablePlate:true};
+  const m=buildManufacturingKnowledge({geometry:geo,faceInfo:faces,edgeInfo:[],sheetResult:flatResult});
+  assert.equal(m.capabilities?.directFlatDxf,true,'tilted through-hole plate: directFlatDxf');
+  assert.equal(m.processes?.drilling,false,'through cross-hole on flat plate is NOT drilling');
+  assert.equal(m.processes?.machining,false,'through cross-hole on flat plate is NOT machining');
+  assert.equal(m.machined,false,'flat plate with a through-hole must not be machined');
+}
+
+// ─── TEST 10: rolled unfold merges coaxial hole faces into ONE DXF circle ─────
+{
+  const TAU=Math.PI*2,meanR=101,gap=0.3,coverage=TAU-gap;
+  const rolled={axis:[0,0,1],axisCenter:[0,0,0],outerRadiusMm:102,innerRadiusMm:100,thicknessMm:2,
+    axialLengthMm:300,axialMinAlongAxis:0,developedLengthMm:meanR*coverage,coverageAngleRad:coverage,
+    gapAngleRad:gap,seamFaceIds:[90,91],outerFaceIds:[1],innerFaceIds:[2]};
+  const P=(phi,r)=>[r*Math.cos(phi),r*Math.sin(phi),150];
+  // Same physical hole represented by TWO coaxial cylinder faces (outer+inner
+  // shell intersection). Must collapse to a single circle.
+  const holeAxis=[Math.cos(Math.PI),Math.sin(Math.PI),0];
+  const faceInfo=[
+    {id:1,family:'cylinder',axisDirection:[0,0,1],localCenter:[0,0,150],radius:102},
+    {id:2,family:'cylinder',axisDirection:[0,0,1],localCenter:[0,0,150],radius:100},
+    {id:90,family:'plane',localCentroid:P(0.15,101),localNormal:[0,1,0]},
+    {id:91,family:'plane',localCentroid:P(-0.15,101),localNormal:[0,1,0]},
+    {id:5,family:'cylinder',axisDirection:holeAxis,localCenter:P(Math.PI,101),radius:8},
+    {id:6,family:'cylinder',axisDirection:holeAxis,localCenter:P(Math.PI,101.5),radius:8}
+  ];
+  const r=buildRolledFlatPattern(rolled,faceInfo,{id:'g1'});
+  assert.equal(r.ok,true,'rolled flat pattern builds');
+  const circles=r.boundaryPrimitives.filter(p=>p.kind==='circle');
+  assert.equal(circles.length,1,'two coaxial hole faces collapse to ONE DXF circle');
+  assert.equal(r.holes2D.length,1,'one developed hole');
 }
 
 console.log('V8.24 architectural fixes regression: PASS');

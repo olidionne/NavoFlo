@@ -11,7 +11,7 @@
  */
 import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.24.2';
 import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.20.0';
-import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.24.2';
+import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.24.3';
 import { detectFastenerComponent, FASTENER_RECOGNIZER_VERSION } from './fastener-recognition.js?v=8.21.1';
 import { analyzeMachiningEvidence, detectTurningByGpAx1, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.24.2';
 
