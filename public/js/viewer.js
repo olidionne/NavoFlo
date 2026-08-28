@@ -5,12 +5,12 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.24.2';
-import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.24.0';
+import { analyzeAndUnfold, flatPatternToDxf, buildRolledFlatPattern } from './sheetmetal-engine.js?v=8.24.2';
+import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.24.2';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
 import { matchAiscProfile, matchAiscProfileWithName, aiscDesignationHint } from './profile-standard-matcher.js?v=8.21.2';
 import { fastenerNameHint } from './fastener-recognition.js?v=8.21.1';
-import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.23.1';
+import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.24.2';
 import { shouldUseFullClassificationDescriptors, strongGeometryHypothesis, choosePreservedGeometryHypothesis } from './manufacturing-analysis-policy.js?v=8.23.1';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
@@ -238,7 +238,7 @@ let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
 const assemblyHighlightedMeshes=new Set();
 const assemblyExpandedKeys=new Set();
 
-const MODEL_ANALYSIS_CACHE_VERSION=16;
+const MODEL_ANALYSIS_CACHE_VERSION=17;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -1550,18 +1550,23 @@ async function captureSheetMetalRadius() {
 
 function syncSheetMetalUnfoldUI(){
   const recognized=Boolean(currentStepResult&&sheetMetalCapability.recognized);
+  const rolledFlat=recognized&&Boolean(sheetMetalCapability.rolledFlat);
   const hasBends=recognized&&sheetMetalCapability.bendCount>0;
+  // A rolled/slit shell unrolls to a developed rectangle, so it behaves like a
+  // bent part for the unfold button (fold/unfold) and like a plate for DXF.
+  const canUnfold=hasBends||rolledFlat;
   const flatPlate=recognized&&sheetMetalCapability.flatPlate;
   const busyUnfold=Boolean(sheetMetalUnfoldPromise);
 
   if(E.sheetMetalSection)E.sheetMetalSection.hidden=!recognized;
   if(E.sheetMetal){
-    E.sheetMetal.hidden=!hasBends;
-    E.sheetMetal.disabled=!hasBends||busyUnfold;
+    E.sheetMetal.hidden=!canUnfold;
+    E.sheetMetal.disabled=!canUnfold||busyUnfold;
     E.sheetMetal.classList.toggle('active',Boolean(flatPatternActive));
     const label=E.sheetMetal.querySelector('span:last-child');
-    if(label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Déplier':'Unfold');
-    E.sheetMetal.title=flatPatternActive?(FR?'Revenir à la pièce pliée':'Return to folded part'):(FR?'Déplier automatiquement la tôle':'Automatically unfold sheet metal');
+    if(label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Dérouler':'Unroll');
+    if(!rolledFlat&&label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Déplier':'Unfold');
+    E.sheetMetal.title=flatPatternActive?(FR?'Revenir à la pièce':'Return to the part'):(rolledFlat?(FR?'Dérouler la plaque roulée':'Unroll the rolled plate'):(FR?'Déplier automatiquement la tôle':'Automatically unfold sheet metal'));
   }
 
   // V8.17.3 — DXF is a first-class quick action. As soon as the automatic
@@ -1571,18 +1576,20 @@ function syncSheetMetalUnfoldUI(){
   if(E.dxfExportFloat){
     E.dxfExportFloat.hidden=!recognized;
     E.dxfExportFloat.disabled=!recognized||busyUnfold;
-    E.dxfExportFloat.title=flatPlate
-      ? (FR?'Exporter le contour 1:1 en DXF':'Export the 1:1 contour as DXF')
+    E.dxfExportFloat.title=(flatPlate||rolledFlat)
+      ? (FR?'Exporter le contour développé 1:1 en DXF':'Export the 1:1 developed contour as DXF')
       : (FR?'Déplier automatiquement si nécessaire puis exporter le DXF':'Automatically unfold if needed, then export DXF');
   }
 
-  if(E.smSectionTitle)E.smSectionTitle.textContent=flatPlate?(FR?'DXF':'DXF'):(FR?'TÔLERIE':'SHEET METAL');
-  if(E.smEngineNote)E.smEngineNote.textContent=flatPlate
+  if(E.smSectionTitle)E.smSectionTitle.textContent=rolledFlat?(FR?'DÉROULAGE':'UNROLL'):flatPlate?(FR?'DXF':'DXF'):(FR?'TÔLERIE':'SHEET METAL');
+  if(E.smEngineNote)E.smEngineNote.textContent=rolledFlat
+    ? (FR?'Plaque roulée détectée. Le développé est un rectangle (circonférence développée × largeur); le DXF reprend le contour et les trous déroulés.':'Rolled plate detected. The developed blank is a rectangle (developed circumference × width); the DXF includes the unrolled contour and holes.')
+    : flatPlate
     ? (FR?'Plaque plane détectée automatiquement. Le DXF reprend directement le contour exact de la pièce.':'Flat plate detected automatically. DXF uses the exact part contour directly.')
     : (FR?'Face fixe, épaisseur, rayon de pliage et facteur K détectés automatiquement. Utilisez les paramètres avancés seulement pour forcer une valeur.':'Fixed face, thickness, bend radius and K-factor are detected automatically. Use advanced settings only to override a value.');
-  if(E.smAdvanced)E.smAdvanced.hidden=flatPlate;
-  if(E.smKRow)E.smKRow.hidden=flatPlate;
-  if(E.smBendsRow)E.smBendsRow.hidden=flatPlate;
+  if(E.smAdvanced)E.smAdvanced.hidden=flatPlate||rolledFlat;
+  if(E.smKRow)E.smKRow.hidden=flatPlate||rolledFlat;
+  if(E.smBendsRow)E.smBendsRow.hidden=flatPlate||rolledFlat;
 
   if(E.smFixedFace)E.smFixedFace.textContent=sheetMetalState.fixedFace?`Face #${sheetMetalState.fixedFace.elementId}`:(FR?'AUTO':'AUTO');
   if(E.smDetectedThickness){
@@ -1898,7 +1905,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
         if(!result?.ok){
           if(result?.code==='rolled-plate'&&result?.rolledPlateData){
             const confidence=Number(result.rolledPlateData.confidence)||0;
-            if(!bestRolled||confidence>(Number(bestRolled?.rolledPlateData?.confidence)||0))bestRolled={...result,geometryId:String(geometry.id),manufacturing};
+            if(!bestRolled||confidence>(Number(bestRolled?.rolledPlateData?.confidence)||0))bestRolled={...result,geometryId:String(geometry.id),manufacturing,faceInfo:exact?.faces||[],geometry};
             continue;
           }
           if(result?.code==='structural-profile'){
@@ -1935,10 +1942,22 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
         if(bestRolled){
           clearProfileStandardMatch();
           manufacturingCapability=bestRolled.manufacturing||null;
-          sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:true,rolledPlateData:bestRolled.rolledPlateData||null,profile:false,profileType:null,profileData:null};
+          // V8.24 — build the developed flat pattern for the rolled/slit shell so
+          // it can be viewed unrolled and exported to DXF like a sheet-metal flat.
+          let rolledFlat=null;
+          try{
+            rolledFlat=buildRolledFlatPattern(bestRolled.rolledPlateData,bestRolled.faceInfo||[],bestRolled.geometry||null);
+          }catch(error){console.warn('[NavoFlo rolled unfold]',error);}
+          if(rolledFlat?.ok){
+            flatPatternResult=rolledFlat;
+            buildFlatPatternScene(rolledFlat);
+            sheetMetalCapability={recognized:true,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:true,rolledFlat:true,rolledPlateData:bestRolled.rolledPlateData||null,profile:false,profileType:null,profileData:null};
+          }else{
+            sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:true,rolledFlat:false,rolledPlateData:bestRolled.rolledPlateData||null,profile:false,profileType:null,profileData:null};
+          }
           modelAnalysisReady=true;
           syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateSheetMetalDimensionsUI();updateProfileStandardUI();updateManufacturingUI();captureActiveModelDocumentState();
-          if(!quiet)console.info('[NavoFlo rolled plate detection]',bestRolled);
+          if(!quiet)console.info('[NavoFlo rolled plate detection]',{rolled:bestRolled.rolledPlateData,flat:rolledFlat?.developed||null});
           return null;
         }
         if(bestProfile){
@@ -4794,8 +4813,8 @@ function enableTools(on) {
   if(E.save)E.save.disabled=!on||Boolean(currentAssemblyFocus);if(E.saveAs)E.saveAs.disabled=!on||Boolean(currentAssemblyFocus);
   document.querySelectorAll('[data-select-mode]').forEach(el=>el.disabled=!on);
   E.measureType.disabled=!on||!measureEnabled;
-  E.sheetMetal.disabled=!on||!currentStepResult||!sheetMetalCapability.recognized||sheetMetalCapability.bendCount<=0;
-  E.sheetMetal.hidden=!on||!sheetMetalCapability.recognized||sheetMetalCapability.bendCount<=0;
+  E.sheetMetal.disabled=!on||!currentStepResult||!sheetMetalCapability.recognized||(sheetMetalCapability.bendCount<=0&&!sheetMetalCapability.rolledFlat);
+  E.sheetMetal.hidden=!on||!sheetMetalCapability.recognized||(sheetMetalCapability.bendCount<=0&&!sheetMetalCapability.rolledFlat);
   if(E.smSetFixedFace)E.smSetFixedFace.disabled=!on||!currentStepResult;
   if(E.smUnfold)E.smUnfold.disabled=!on||!currentStepResult;
   syncSheetMetalUnfoldUI();

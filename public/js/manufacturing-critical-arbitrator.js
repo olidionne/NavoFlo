@@ -129,7 +129,10 @@ function hasHardMachiningProof(feature,{plateContext=false}={}){
     if(type==='counterbore'||type==='countersink')return true;
   }
   if(p.topologyProven===true){
-    if(['pocket-floor','blind-pocket','blind-slot','one-sided-recess','annular-groove','groove-fillet','countersink-chamfer','edge-chamfer','oring-groove'].includes(type))return true;
+    // V8.24b — edge-chamfer removed from the plate hard-machining list: a bevel
+    // on a proven flat-plate perimeter is a laser/plasma cut condition, not a
+    // milled chamfer (502-00-08). countersink-chamfer (drilled) stays machining.
+    if(['pocket-floor','blind-pocket','blind-slot','one-sided-recess','annular-groove','groove-fillet','countersink-chamfer','oring-groove'].includes(type))return true;
     if(['counterbore','countersink','blind-hole','cross-hole'].includes(type))return true;
   }
   // Backward-compatible deterministic escape hatch for legacy recognizers that

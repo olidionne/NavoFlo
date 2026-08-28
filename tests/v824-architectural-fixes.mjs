@@ -258,4 +258,42 @@ const concaveEdge=(id,a,b)=>({id,family:'line',ownerFaceIds:[a,b],length:10,
   assert.ok(cbFeature,'puck: counterbore avec axisPatternProven doit exister');
 }
 
+// ─── TEST 7: split-skin false pocket (502-00-01 picture frame) ────────────────
+// A flat plate whose top skin is split into two coplanar B-Rep faces WITHOUT
+// sameDomain flags. The small split piece sits AT skin depth and used to be
+// misread as a pocket floor → false machining. Fix A rejects floors coplanar
+// with a skin (strictly-interior requirement).
+{
+  const geo=makeBox(100,50,10);
+  const botSkin =plane(1, 0, 0,0,-1, 4800, 50,25, 0, [4,5]);
+  const topMain =plane(2,10, 0,0, 1, 4200, 40,25,10, [4,5]);
+  const topSplit=plane(3,10, 0,0, 1, 600,  85,25,10, [4,5]); // coplanar with topMain, NO sameDomain
+  const wall4   =plane(4, 0, 1,0, 0, 500,  85,0, 5, [1,2,3]);
+  const wall5   =plane(5, 0,-1,0, 0, 500,  85,50,5, [1,2,3]);
+  const faces=[botSkin,topMain,topSplit,wall4,wall5];
+  // Concave edges making the split piece look like a floor bounded by walls.
+  const edges=[concaveEdge(1,3,4),concaveEdge(2,3,5)];
+  const flatResult={ok:true,flatPlate:true,thickness:10,fixedFaceId:2,panelFaceIds:[1,2],bendCount:0,cuttablePlate:true};
+  const m=buildManufacturingKnowledge({geometry:geo,faceInfo:faces,edgeInfo:edges,sheetResult:flatResult});
+  assert.equal(m.processes?.milling,false,'split-skin: coplanar skin piece must NOT be a pocket');
+  assert.equal(m.processes?.machining,false,'split-skin frame must not be machined');
+  assert.equal(m.featureInstances.some(f=>f.type==='pocket-floor'&&!f.parameters?.advisoryOnly),false,'no definite pocket-floor');
+}
+
+// ─── TEST 8: edge-chamfer on flat plate = laser bevel, not machining (502-00-08)
+{
+  const geo=makeBox(100,50,10);
+  const botSkin=plane(1, 0, 0,0,-1, 4800, 50,25, 0, [3]);
+  const topSkin=plane(2,10, 0,0, 1, 4800, 50,25,10, [3]);
+  const bevel  ={id:3,family:'plane',area:200,localCentroid:[50,0,5],localCenter:[50,0,5],
+    localNormal:[0,0.7,0.7],neighborFaceIds:[1,2],sameDomainFaceIds:[],
+    chamfer:{profile:'chamfer',variant:'distance',distanceA:2,distanceB:2,supportAngle:0.785}};
+  const faces=[botSkin,topSkin,bevel];
+  const flatResult={ok:true,flatPlate:true,thickness:10,fixedFaceId:2,panelFaceIds:[1,2],bendCount:0,cuttablePlate:true};
+  const m=buildManufacturingKnowledge({geometry:geo,faceInfo:faces,edgeInfo:[],sheetResult:flatResult});
+  assert.equal(m.capabilities?.directFlatDxf,true,'bevel plate: directFlatDxf');
+  assert.equal(m.processes?.machining,false,'edge-chamfer on flat plate = laser bevel, not machining');
+  assert.equal(m.machined,false,'bevel plate must not be machined');
+}
+
 console.log('V8.24 architectural fixes regression: PASS');

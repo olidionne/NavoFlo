@@ -158,6 +158,21 @@ function detectPocketFloors(aag,faceInfo,negativeVolumes,sheetNativeFaceIds=null
     // transitions. Three/four walls increase confidence, but slots with two
     // straight walls + curved ends remain valid.
     const volume=negativeVolumes.components.find(v=>v.faceIds.includes(Number(floor.id)))||null;
+    // V8.24b — split-skin rejection. A genuine blind pocket floor lies STRICTLY
+    // between the two physical plate skins. A floor coplanar with either skin is
+    // a SolidWorks/Inventor "separation line" (one physical skin split into
+    // several B-Rep faces whose sameDomain flags were not exported), never a
+    // pocket. This is the 502-00-01 picture-frame false-positive.
+    if(plateSkinPair?.low?.size&&plateSkinPair?.high?.size&&Array.isArray(allowedFloorNormals)&&allowedFloorNormals.length){
+      const pn=allowedFloorNormals[0];
+      const depthOf=set=>{let s=0,n=0;for(const id of set){const c=faceCenter(faceById.get(Number(id)));if(c&&c.every(Number.isFinite)){s+=dot(c,pn);n++;}}return n?s/n:null;};
+      const loD=depthOf(plateSkinPair.low),hiD=depthOf(plateSkinPair.high),fc=faceCenter(floor);
+      if(loD!=null&&hiD!=null&&fc&&fc.every(Number.isFinite)){
+        const d=dot(fc,pn),lo=Math.min(loD,hiD),hi=Math.max(loD,hiD),span=hi-lo,tol=Math.max(span*0.08,1e-3);
+        // Must be strictly interior to the slab; coplanar-with-skin or outside → skip.
+        if(!(d>lo+tol&&d<hi-tol))continue;
+      }
+    }
     // V8.24 — through-connectivity guard: a negative-volume component that
     // reaches BOTH physical plate skins is a through-cut (laser/plasma cut),
     // not a blind pocket.  Rejecting it prevents large frames, obround washers
