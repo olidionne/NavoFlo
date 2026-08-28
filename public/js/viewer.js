@@ -238,7 +238,7 @@ let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
 const assemblyHighlightedMeshes=new Set();
 const assemblyExpandedKeys=new Set();
 
-const MODEL_ANALYSIS_CACHE_VERSION=15;
+const MODEL_ANALYSIS_CACHE_VERSION=16;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
