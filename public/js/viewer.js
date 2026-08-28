@@ -5,11 +5,12 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.21.1';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.21.2';
 import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.21.1';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
-import { matchAiscProfile, matchAiscProfileWithName, aiscDesignationHint } from './profile-standard-matcher.js?v=8.21.1';
+import { matchAiscProfile, matchAiscProfileWithName, aiscDesignationHint } from './profile-standard-matcher.js?v=8.21.2';
 import { fastenerNameHint } from './fastener-recognition.js?v=8.21.1';
+import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.21.2';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -236,7 +237,7 @@ let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
 const assemblyHighlightedMeshes=new Set();
 const assemblyExpandedKeys=new Set();
 
-const MODEL_ANALYSIS_CACHE_VERSION=11;
+const MODEL_ANALYSIS_CACHE_VERSION=12;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -1753,7 +1754,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       for(const geometry of geometries){
         if(currentStepResult!==stepRef)return null;
         const componentName=componentNameForGeometry(geometry),fastenerHint=fastenerNameHint(componentName),structuralNameHint=aiscDesignationHint(componentName);
-        let exact,result,profileStandardMatch=null;
+        let exact,result,profileStandardMatch=null,independentManufacturing=null;
         const analyzeWith=info=>analyzeAndUnfold({
           geometry,
           faceInfo:info?.faces||[],
@@ -1776,20 +1777,35 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           // for a structural-profile candidate, or when Inventor metadata says
           // the component is hardware.  This preserves UI responsiveness while
           // keeping the deterministic classifier authoritative.
-          if(Boolean(fastenerHint?.recognized)||Boolean(structuralNameHint)||!(result?.ok&&(Number(result.bendCount)||0)>0)){
+          const gate=requiresIndependentManufacturingReview({faceInfo:exact?.faces||[],sheetResult:result,structuralNameHint,fastenerHint});
+          if(gate.required){
             try{
               const fullExact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});
               exact=fullExact;
               const fullAuthority=await enforceStructuralProfileAuthority(analyzeWith(fullExact),componentName);
               result=fullAuthority.result;profileStandardMatch=fullAuthority.match||profileStandardMatch;
+
+              // V8.21.2: the sheet hypothesis is no longer allowed to short-circuit
+              // raw-stock recognition.  Build one independent manufacturing
+              // hypothesis WITHOUT feeding it the candidate sheet result. A
+              // proven round-stock + turning body (shaft, stepped pin, roller,
+              // etc.) outranks local cylindrical surfaces that resemble bends.
+              if(result?.code!=='structural-profile'){
+                independentManufacturing=buildManufacturingKnowledge({
+                  geometry,faceInfo:fullExact.faces||[],edgeInfo:fullExact.edges||[],sheetResult:null,structuralProfile:null,componentName
+                });
+                if(result?.ok&&Number(result?.bendCount)>0&&hasRoundStockMachiningAuthority(independentManufacturing)){
+                  result={ok:false,code:'machined-round-stock',message:'Round stock + turning is proven independently from the sheet-metal hypothesis; false bend interpretation is suppressed.',diagnostics:{manufacturingGate:gate,independentManufacturing:{stockType:independentManufacturing.stock?.stockType,confidence:independentManufacturing.confidence,processes:independentManufacturing.processes}}};
+                }
+              }
             }catch(error){
               if(!result?.ok)throw error;
               console.warn('[NavoFlo manufacturing enrichment fallback]',error);
             }
           }
         }catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
-        let manufacturing=null;
-        if(!(result?.ok&&(Number(result.bendCount)||0)>0)||Boolean(fastenerHint?.recognized)){
+        let manufacturing=independentManufacturing;
+        if(!manufacturing&&(!(result?.ok&&(Number(result.bendCount)||0)>0)||Boolean(fastenerHint?.recognized))){
           try{
             manufacturing=buildManufacturingKnowledge({
               geometry,
@@ -4393,7 +4409,7 @@ function manufacturingFeatureText(c){
 }
 function ensureManufacturingSection(){
   const drawer=E.propsDrawer,anchor=drawer?.querySelector?.('.drawer-stats');if(!drawer||!anchor)return null;let section=$('manufacturing-section');if(!section){section=document.createElement('div');section.id='manufacturing-section';section.className='drawer-section';anchor.after(section);}
-  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.21.1 · preuves géométriques hiérarchisées · ML consultatif':'MRE V8.21.1 · hierarchical geometry proofs · advisory ML'}</p>`;
+  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.21.2 · preuves géométriques hiérarchisées · ML consultatif':'MRE V8.21.2 · hierarchical geometry proofs · advisory ML'}</p>`;
   return section;
 }
 function updateManufacturingUI(){

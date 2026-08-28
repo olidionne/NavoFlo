@@ -1,4 +1,4 @@
-// NavoFlo V8.21.1 — local structural-shape matcher (AISC + Inventor metadata + geometric proof).
+// NavoFlo V8.21.2 — local structural-shape matcher (AISC + Inventor metadata + geometric proof).
 //
 // The AISC table is loaded lazily only after Navo3D has already classified the
 // STEP body as a long constant-section structural profile/extrusion. Matching is
@@ -8,7 +8,7 @@
 // intact perpendicular section sampled from the real STEP mesh. This makes stock
 // identification resilient to drilled holes, copes, slots and angled end cuts.
 
-const DB_URL='/data/aisc-shapes-v16.json?v=16.0-nf8211';
+const DB_URL='/data/aisc-shapes-v16.json?v=16.0-nf8212';
 let dbPromise=null;
 
 function finite(v){if(v==null||v===''||v==='–')return null;const n=Number(v);return Number.isFinite(n)?n:null;}
@@ -25,6 +25,13 @@ export function aiscDesignationHint(name){
   // recognize only canonical families and require B-Rep agreement later.
   const m=raw.match(/(?:^|[^A-Z0-9])(W|M|S|HP|C|MC|WT|MT|ST)\s*([0-9]+(?:\.[0-9]+)?)\s*X\s*([0-9]+(?:\.[0-9]+)?)(?=$|[^0-9.])/i);
   if(m)return normalizeAiscLabel(`${m[1]}${m[2]}X${m[3]}`);
+  // Rolled angles are structural stock too. Inventor Content Center commonly
+  // exports names such as "AISC - L 4x4x1/2".  V8.21.1 omitted L/2L from
+  // metadata recognition, which let the single root fillet be interpreted as a
+  // press-brake bend.  Keep fractions intact because they are part of the AISC
+  // designation and still require the measured B-Rep to agree later.
+  const angle=raw.match(/(?:^|[^A-Z0-9])(2L|L)\s*((?:[0-9]+(?:-[0-9]+)?\/[0-9]+)|(?:[0-9]+(?:\.[0-9]+)?))\s*X\s*((?:[0-9]+(?:-[0-9]+)?\/[0-9]+)|(?:[0-9]+(?:\.[0-9]+)?))(?:\s*X\s*((?:[0-9]+(?:-[0-9]+)?\/[0-9]+)|(?:[0-9]+(?:\.[0-9]+)?)))?/i);
+  if(angle){const bits=[angle[1],angle[2],angle[3],angle[4]].filter(Boolean);return normalizeAiscLabel(bits.join('X').replace(/^LX/,'L').replace(/^2LX/,'2L'));}
   const hss=raw.match(/(?:^|[^A-Z0-9])(HSS)\s*([0-9]+(?:[- ][0-9]+\/[0-9]+|\.[0-9]+)?)[ X]([0-9]+(?:[- ][0-9]+\/[0-9]+|\.[0-9]+)?)\s*X\s*([0-9]+(?:\/[0-9]+|\.[0-9]+)?)/i);
   if(hss)return normalizeAiscLabel(`${hss[1]}${hss[2]}X${hss[3]}X${hss[4]}`);
   const pipe=raw.match(/(?:^|[^A-Z0-9])(PIPE)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:STD|XS|XXS)?/i);

@@ -627,7 +627,7 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
     const length=exactStraightEdgeLength(ctx,edge),dir=canonicalAxis(exactStraightEdgeDirection(ctx,edge));if(!(length>tol*20)||!dir)continue;
     const pts=exactEdgePoints(ctx,edge);if(pts.length<2)continue;lines.push({edge,length,dir,a:pts[0],b:pts.at(-1)});
   }
-  if(lines.length<5)return null;
+  if(lines.length<4)return null;
   const clusters=[];
   for(const line of lines){
     let cluster=clusters.find(c=>Math.abs(V3.dot(c.axis,line.dir))>=0.9995);
@@ -635,7 +635,7 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
     const aligned=V3.dot(cluster.axis,line.dir)<0?V3.scale(line.dir,-1):line.dir;cluster.members.push(line);cluster.score+=line.length;
     const weighted=V3.add(V3.scale(cluster.axis,Math.max(cluster.score-line.length,EPS)),V3.scale(aligned,line.length));cluster.axis=canonicalAxis(weighted)||cluster.axis;
   }
-  clusters.sort((a,b)=>b.score-a.score);const best=clusters[0];if(!best||best.members.length<5)return null;
+  clusters.sort((a,b)=>b.score-a.score);const best=clusters[0];if(!best||best.members.length<4)return null;
   const basis=profilePlaneBasis(best.axis),points=allGeometryPoints(geometry,ctx);if(!basis||points.length<4)return null;
   let lo=Infinity,hi=-Infinity,minU=Infinity,maxU=-Infinity,minV=Infinity,maxV=-Infinity;
   for(const p of points){const d=V3.dot(p,basis.n),u=V3.dot(p,basis.u),v=V3.dot(p,basis.v);lo=Math.min(lo,d);hi=Math.max(hi,d);minU=Math.min(minU,u);maxU=Math.max(maxU,u);minV=Math.min(minV,v);maxV=Math.max(maxV,v);}
@@ -647,7 +647,7 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   // Below 2.45 it must later pass a much stronger invariant-section topology
   // proof (many longitudinal traces + stable sampled sections).
   if(aspect<1.55)return null;
-  const longEdges=best.members.filter(e=>e.length>=length*0.55);if(longEdges.length<5)return null;
+  const longEdges=best.members.filter(e=>e.length>=length*0.55);if(longEdges.length<4)return null;
   const traceStep=Math.max(tol*20,crossSpan*1e-5,1e-6),traceKeys=new Set();
   for(const e of longEdges){const p=V3.scale(V3.add(e.a,e.b),0.5),u=V3.dot(p,basis.u),v=V3.dot(p,basis.v);traceKeys.add(`${Math.round(u/traceStep)},${Math.round(v/traceStep)}`);}
   if(traceKeys.size<4)return null;
@@ -662,7 +662,7 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   }
   const sideAreaRatio=totalArea>EPS?longitudinalArea/totalArea:1;if(sideAreaRatio<0.52)return null;
   const coverage=median(longEdges.map(e=>Math.min(1,e.length/length)))||0;
-  const confidence=clamp(0.45+Math.min((aspect-2.45)/6,0.25)+Math.min((longEdges.length-5)/20,0.15)+Math.min(Math.max(sideAreaRatio-0.52,0)*0.35,0.15),0,1);
+  const confidence=clamp(0.45+Math.min((aspect-2.45)/6,0.25)+Math.min(Math.max(longEdges.length-4,0)/20,0.15)+Math.min(Math.max(sideAreaRatio-0.52,0)*0.35,0.15),0,1);
   const volume=triangulatedSolidVolume(geometry),averageSectionArea=volume&&length>EPS?volume/length:null;
   const section=profileStockSectionFingerprint(geometry,basis,lo,hi,crossSpan);
   if(aspect<2.45){
@@ -1066,6 +1066,11 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
 
   const planarThicknessPreflight=detectPlanarThickness(planarGroups,tol);
   const pairedBendEvidence=structuralProfile?strongPairedBendEvidence(candidateBends,cylinders,planarThicknessPreflight?.value,tol):{ok:false,pairs:0};
+  // Structural-angle rule: a rolled L/angle commonly has only the concave root
+  // fillet (plus unrelated toe radii), while a genuinely bent sheet has an
+  // inner/outer cylindrical pair on the SAME axis whose radius delta is T.
+  // The constant-section proof is therefore authoritative whenever that true
+  // paired-surface evidence is absent. This is geometry, not a filename rule.
   if(structuralProfile&&!pairedBendEvidence.ok){
     return{ok:false,code:'structural-profile',message:'A long constant-section profile/extrusion was detected; sheet-metal unfolding is intentionally suppressed.',profile:true,profileType:structuralProfile.kind,profile:structuralProfile,diagnostics:{structuralProfile,pairedBendEvidence}};
   }
