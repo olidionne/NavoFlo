@@ -1836,7 +1836,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
               result={ok:false,code:'machined-round-stock',message:'Round stock + turning is proven independently from the sheet-metal hypothesis; false bend interpretation is suppressed.',diagnostics:{manufacturingGate:gate,independentManufacturing:{stockType:independentManufacturing.stock?.stockType,confidence:independentManufacturing.confidence,processes:independentManufacturing.processes}}};
             }
           }
-        }catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
+        }catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};console.log('%c[NAVOFLO V8.24 DEBUG] EXCEPTION','color:#ff5555;font-weight:bold',{part:componentName||String(geometry?.id),error:error?.message||String(error),stack:error?.stack});continue;}
         let manufacturing=independentManufacturing;
         // Full descriptors are now safe to use on bent sheet because the machining
         // AAG explicitly excludes panel↔bend concavity from negative volumes. This
@@ -1866,6 +1866,9 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
             classification:manufacturing?.classification||null,
             processes:manufacturing?.processes||null,
             features:(manufacturing?.featureInstances||[]).map(f=>`${f.type}${f.parameters?.advisoryOnly?'(adv)':''}`),
+            featureDetail:(manufacturing?.featureInstances||[]).map(f=>({type:f.type,proc:f.process,faces:f.faceIds,adv:Boolean(f.parameters?.advisoryOnly),topo:f.parameters?.topologyProven,conc:f.parameters?.concavityProven,exactChamfer:f.parameters?.exactChamfer,axisPat:f.parameters?.axisPatternProven})),
+            negVolDetail:manufacturing?.diagnostics?.machiningEvidence?.negativeVolumes?.components?.map(v=>({id:v.id,faces:v.faceIds,fams:v.families}))||null,
+            skinFaceCount:manufacturing?.diagnostics?.machiningEvidence?.negativeVolumes?.externalPlateSkinFaceCount,
             turning:manufacturing?.diagnostics?.machiningEvidence?.turning
               ?{recognized:manufacturing.diagnostics.machiningEvidence.turning.recognized,
                 fraction:manufacturing.diagnostics.machiningEvidence.turning.collinearFraction,
