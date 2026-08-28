@@ -373,7 +373,7 @@ function detectRolledPlateSlit(geometry,ctx,tol,diag){
     // Holes can remove a meaningful amount of cylindrical skin, so coverage is a
     // confidence term rather than a hard full-area requirement.
     const confidence=clamp(0.90+Math.min(0.07,coverageEvidence*0.07)+Math.min(0.02,axial/Math.max(outer.radius,EPS)*0.01),0,0.995);
-    const candidate={kind:'rolled-slit-plate',axis:outer.axis,axisCenter:outer.center,outerRadiusMm:outer.radius,innerRadiusMm:inner.radius,outerDiameterMm:outer.radius*2,innerDiameterMm:inner.radius*2,thicknessMm:t,axialLengthMm:axial,developedLengthMm:developed,gapAngleRad:seamPair.gap,gapAngleDeg:seamPair.gap*180/Math.PI,coverageAngleRad:coverage,coverageAngleDeg:coverage*180/Math.PI,seamFaceIds:[seamPair.a.id,seamPair.b.id],outerFaceIds:outer.faceIds.slice(),innerFaceIds:inner.faceIds.slice(),confidence,source:'coaxial-cylinder-pair+radial-slit-seams'};
+    const candidate={kind:'rolled-slit-plate',axis:outer.axis,axisCenter:outer.center,outerRadiusMm:outer.radius,innerRadiusMm:inner.radius,outerDiameterMm:outer.radius*2,innerDiameterMm:inner.radius*2,thicknessMm:t,axialLengthMm:axial,axialMinAlongAxis:lo,developedLengthMm:developed,gapAngleRad:seamPair.gap,gapAngleDeg:seamPair.gap*180/Math.PI,coverageAngleRad:coverage,coverageAngleDeg:coverage*180/Math.PI,seamFaceIds:[seamPair.a.id,seamPair.b.id],outerFaceIds:outer.faceIds.slice(),innerFaceIds:inner.faceIds.slice(),confidence,source:'coaxial-cylinder-pair+radial-slit-seams'};
     if(!best||candidate.confidence>best.confidence)best=candidate;
   }
   return best;
@@ -394,6 +394,11 @@ function detectRolledPlateSlit(geometry,ctx,tol,diag){
 // flange leaves the cap slab and/or the two cap boundaries stop being translated
 // copies.
 function canonicalDirection(v){
+  // V8.24 — guard against null/malformed input. Some STEP exporters emit a
+  // planar face whose localNormal is null; V3.unit(null) → V3.len(null) then
+  // crashed on null[0], aborting detectRolledPlateSlit and forcing a whole
+  // rolled/slit plate (e.g. ST13-0011) to fall back to "Solid STEP".
+  if(!Array.isArray(v)||v.length<3||!v.slice(0,3).every(Number.isFinite))return null;
   let n=V3.unit(v);if(!n)return null;
   let k=0;for(let i=1;i<3;i++)if(Math.abs(n[i])>Math.abs(n[k]))k=i;
   if(n[k]<0)n=V3.scale(n,-1);return n;
@@ -1067,6 +1072,98 @@ export function flatPatternToDxf(result,{partName='NavoFlo_Flat_Pattern',units='
   for(const bend of result.bendLines)lineEntity('BEND',bend.a,bend.b);
 
   return wrapR2000Dxf({entitiesText:lines.join('\n'),insunits:unitDef.insunits,measurement:unitDef.measurement});
+}
+
+// V8.24 — rolled / slit shell developed flat pattern.
+//
+// A rolled plate is a constant-thickness shell wrapped around one axis over a
+// coverage angle. Its true developed blank is a rectangle
+//   developedLength (= meanRadius × coverage)  ×  axialLength.
+// Radial through-holes are unrolled: their angular position around the roll axis
+// maps to a developed X = meanRadius × angleFromSeam, and their axial position
+// maps directly to developed Y. The result is compatible with both
+// buildFlatPatternScene (3D flat view) and flatPatternToDxf (CAM export).
+export function buildRolledFlatPattern(rolled,faceInfo=[],geometry=null){
+  if(!rolled)return{ok:false,code:'no-rolled-data',message:'Rolled plate data unavailable.'};
+  const axis=canonicalDirection(rolled.axis),center=Array.isArray(rolled.axisCenter)?rolled.axisCenter.map(Number).slice(0,3):null;
+  const outerR=Number(rolled.outerRadiusMm),innerR=Number(rolled.innerRadiusMm),t=Number(rolled.thicknessMm);
+  const axialLen=Number(rolled.axialLengthMm),developedLen=Number(rolled.developedLengthMm),coverage=Number(rolled.coverageAngleRad);
+  if(!axis||!center||!(outerR>0)||!(innerR>0)||!(axialLen>0)||!(developedLen>0)||!(coverage>0))
+    return{ok:false,code:'rolled-flat-incomplete',message:'Rolled plate geometry is incomplete.'};
+  const meanR=(outerR+innerR)/2;
+  const axialMin=Number.isFinite(Number(rolled.axialMinAlongAxis))?Number(rolled.axialMinAlongAxis):0;
+
+  // Orthonormal basis (u,v) in the plane perpendicular to the roll axis.
+  const ref=Math.abs(axis[0])<0.9?[1,0,0]:[0,1,0];
+  const u=V3.unit(V3.cross(axis,ref)),v=u?V3.unit(V3.cross(axis,u)):null;
+  if(!u||!v)return{ok:false,code:'rolled-flat-basis',message:'Could not build a developing basis.'};
+  const angleOf=p=>{const rel=V3.sub(p,center),ax=V3.dot(rel,axis),perp=V3.sub(rel,V3.scale(axis,ax));return Math.atan2(V3.dot(perp,v),V3.dot(perp,u));};
+  const norm2pi=a=>{let x=a%TAU;if(x<0)x+=TAU;return x;};
+
+  // Angular reference: centre the material arc opposite the slit gap so every
+  // developed X lands inside [0, developedLength].
+  const byId=new Map((faceInfo||[]).map(f=>[Number(f.id),f]));
+  const seamAngles=(rolled.seamFaceIds||[]).map(id=>byId.get(Number(id))).filter(Boolean)
+    .map(f=>{const c=Array.isArray(f.localCentroid)?f.localCentroid.map(Number).slice(0,3):(Array.isArray(f.localCenter)?f.localCenter.map(Number).slice(0,3):null);return c&&c.every(Number.isFinite)?angleOf(c):null;}).filter(a=>a!=null);
+  let seamStart;
+  if(seamAngles.length>=2){
+    const a1=seamAngles[0],a2=seamAngles[1],dGap=norm2pi(a2-a1);
+    // Gap is the shorter arc between the two seams; material is the complement.
+    const gapMid=dGap<=Math.PI?a1+dGap/2:a2+norm2pi(a1-a2)/2;
+    const materialMid=gapMid+Math.PI;
+    seamStart=materialMid-coverage/2;
+  }else{
+    seamStart=-coverage/2; // fallback: material centred on the basis zero
+  }
+
+  const holes=[];
+  for(const f of faceInfo||[]){
+    if(!isCyl(f?.family))continue;
+    const cAxis=canonicalDirection(Array.isArray(f.axisDirection)?f.axisDirection.map(Number).slice(0,3):null);
+    const cCenter=Array.isArray(f.localCenter)?f.localCenter.map(Number).slice(0,3):null;
+    const r=Number(f.radius);
+    if(!cAxis||!cCenter?.every(Number.isFinite)||!(r>0))continue;
+    if(Math.abs(V3.dot(cAxis,axis))>0.20)continue;      // not a radial hole (shell axis-aligned)
+    if(r>meanR*0.9)continue;                            // shell/large cylinder, not a hole
+    const rel=V3.sub(cCenter,center),ax=V3.dot(rel,axis);
+    const perp=V3.sub(rel,V3.scale(axis,ax)),rr=V3.len(perp);
+    if(rr<innerR-t||rr>outerR+t)continue;               // not on the shell wall
+    const theta=angleOf(cCenter),delta=norm2pi(theta-seamStart);
+    if(delta>coverage+1e-6)continue;                    // hole sits in the slit gap → ignore
+    const x=meanR*delta,y=ax-axialMin;
+    // V8.24b — one physical hole is often several coaxial cylindrical B-Rep faces
+    // (inner/outer shell intersection, thread relief, split seam). Merge them so a
+    // single DXF circle is emitted instead of stacked duplicates.
+    const dup=holes.find(h=>Math.hypot(h.center[0]-x,h.center[1]-y)<=Math.max(r,t)*0.6);
+    if(dup){dup.radius=Math.max(dup.radius,r);dup.sourceFaceIds.push(Number(f.id));continue;}
+    holes.push({kind:'circle',center:[x,y],radius:r,edgeId:`rolled-hole-${holes.length+1}`,sourceFaceIds:[Number(f.id)]});
+  }
+
+  const W=developedLen,H=axialLen;
+  const corners=[[0,0],[W,0],[W,H],[0,H]];
+  const outline=[
+    {kind:'line',a:corners[0],b:corners[1]},
+    {kind:'line',a:corners[1],b:corners[2]},
+    {kind:'line',a:corners[2],b:corners[3]},
+    {kind:'line',a:corners[3],b:corners[0]}
+  ];
+  const boundaryPrimitives=[...outline,...holes];
+  const boundaryEdges=[[corners[0],corners[1]],[corners[1],corners[2]],[corners[2],corners[3]],[corners[3],corners[0]]];
+  const triangles=[[corners[0],corners[1],corners[2]],[corners[0],corners[2],corners[3]]];
+  const bounds={min:[0,0],max:[W,H],width:W,height:H};
+  return{
+    ok:true,version:'NavoUnfold Rolled 1.0',rolledFlat:true,flatPlate:false,
+    geometryId:geometry?.id!=null?String(geometry.id):String(rolled.geometryId||''),
+    thickness:t,bendCount:0,panelCount:1,
+    triangles,
+    selectionFaces:[{id:'rolled-panel-1',kind:'panel',sourceFaceIds:(rolled.outerFaceIds||[]).map(Number),triangles}],
+    boundaryEdges,boundaryPrimitives,boundaryPrimitivesClosed:true,
+    bendLines:[],bounds,
+    holes2D:holes.map(h=>({center:[...h.center],radius:h.radius})),
+    warnings:seamAngles.length>=2?[]:['Slit seam faces not resolved; hole angular reference is approximate.'],
+    developed:{meanRadiusMm:meanR,developedLengthMm:developedLen,axialLengthMm:axialLen,thicknessMm:t,holeCount:holes.length,coverageAngleDeg:coverage*180/Math.PI},
+    diagnostics:{rolledFlat:true,holeCount:holes.length}
+  };
 }
 
 function chooseAutomaticFixedPanel(planarGroups,candidateBends,ctx){

@@ -5,13 +5,14 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.23.1';
-import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.23.1';
+import { analyzeAndUnfold, flatPatternToDxf, buildRolledFlatPattern } from './sheetmetal-engine.js?v=8.24.3';
+import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.24.3';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
 import { matchAiscProfile, matchAiscProfileWithName, aiscDesignationHint } from './profile-standard-matcher.js?v=8.21.2';
 import { fastenerNameHint } from './fastener-recognition.js?v=8.21.1';
-import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.23.1';
+import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.24.2';
 import { shouldUseFullClassificationDescriptors, strongGeometryHypothesis, choosePreservedGeometryHypothesis } from './manufacturing-analysis-policy.js?v=8.23.1';
+import { detectMcMasterPN, mcMasterProductUrl } from './mcmaster-pn.js?v=8.24.4';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -69,6 +70,7 @@ const E = {
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
   stepDate:$('step-date'), stepAuthor:$('step-author'), stepOrg:$('step-org'),
   stepOrigin:$('step-origin'), stepTree:$('step-tree'), stepCustomSection:$('step-custom-section'), stepCustomProperties:$('step-custom-properties'), stepCustomNote:$('step-custom-note'),
+  mcMasterSection:$('mcmaster-section'), mcMasterPnDisplay:$('mcmaster-pn-display'), mcMasterSourceDisplay:$('mcmaster-source-display'), mcMasterLink:$('mcmaster-link'),
   floatingActions:$('cad-floating-actions'), sheetMetal:$('sheetmetal-toggle'), dxfExportFloat:$('dxf-export-float'), sheetMetalSection:$('sheetmetal-section'),
   smMaterial:$('sm-material-class'), smThickness:$('sm-thickness'), smThicknessUnit:$('sm-thickness-unit'),
   smRadius:$('sm-radius'), smRadiusUnit:$('sm-radius-unit'), smAngle:$('sm-angle'),
@@ -191,6 +193,7 @@ let sectionCapRoot=null,sectionCapPlaneMesh=null;
 let cameraProjectionMode='orthographic';
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
 let currentStats = null, currentStepHeader = null, currentStepResult = null, currentStepProperties = [];
+let currentMcMasterPN = null;  // { pn, source, field? } or null
 let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
 let flatSurfaceMeshes = [], flatEdgeObjects = [], flatVertexObjects = [];
 let selectionMode = 'auto', measureEnabled = false, multiMeasureEnabled=false, selected = [], currentMeasureResult = null, selectionHighlightMap = new Map();
@@ -238,7 +241,7 @@ let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
 const assemblyHighlightedMeshes=new Set();
 const assemblyExpandedKeys=new Set();
 
-const MODEL_ANALYSIS_CACHE_VERSION=15;
+const MODEL_ANALYSIS_CACHE_VERSION=18;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -1550,18 +1553,23 @@ async function captureSheetMetalRadius() {
 
 function syncSheetMetalUnfoldUI(){
   const recognized=Boolean(currentStepResult&&sheetMetalCapability.recognized);
+  const rolledFlat=recognized&&Boolean(sheetMetalCapability.rolledFlat);
   const hasBends=recognized&&sheetMetalCapability.bendCount>0;
+  // A rolled/slit shell unrolls to a developed rectangle, so it behaves like a
+  // bent part for the unfold button (fold/unfold) and like a plate for DXF.
+  const canUnfold=hasBends||rolledFlat;
   const flatPlate=recognized&&sheetMetalCapability.flatPlate;
   const busyUnfold=Boolean(sheetMetalUnfoldPromise);
 
   if(E.sheetMetalSection)E.sheetMetalSection.hidden=!recognized;
   if(E.sheetMetal){
-    E.sheetMetal.hidden=!hasBends;
-    E.sheetMetal.disabled=!hasBends||busyUnfold;
+    E.sheetMetal.hidden=!canUnfold;
+    E.sheetMetal.disabled=!canUnfold||busyUnfold;
     E.sheetMetal.classList.toggle('active',Boolean(flatPatternActive));
     const label=E.sheetMetal.querySelector('span:last-child');
-    if(label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Déplier':'Unfold');
-    E.sheetMetal.title=flatPatternActive?(FR?'Revenir à la pièce pliée':'Return to folded part'):(FR?'Déplier automatiquement la tôle':'Automatically unfold sheet metal');
+    if(label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Dérouler':'Unroll');
+    if(!rolledFlat&&label)label.textContent=flatPatternActive?(FR?'Replier':'Fold'):(FR?'Déplier':'Unfold');
+    E.sheetMetal.title=flatPatternActive?(FR?'Revenir à la pièce':'Return to the part'):(rolledFlat?(FR?'Dérouler la plaque roulée':'Unroll the rolled plate'):(FR?'Déplier automatiquement la tôle':'Automatically unfold sheet metal'));
   }
 
   // V8.17.3 — DXF is a first-class quick action. As soon as the automatic
@@ -1571,18 +1579,20 @@ function syncSheetMetalUnfoldUI(){
   if(E.dxfExportFloat){
     E.dxfExportFloat.hidden=!recognized;
     E.dxfExportFloat.disabled=!recognized||busyUnfold;
-    E.dxfExportFloat.title=flatPlate
-      ? (FR?'Exporter le contour 1:1 en DXF':'Export the 1:1 contour as DXF')
+    E.dxfExportFloat.title=(flatPlate||rolledFlat)
+      ? (FR?'Exporter le contour développé 1:1 en DXF':'Export the 1:1 developed contour as DXF')
       : (FR?'Déplier automatiquement si nécessaire puis exporter le DXF':'Automatically unfold if needed, then export DXF');
   }
 
-  if(E.smSectionTitle)E.smSectionTitle.textContent=flatPlate?(FR?'DXF':'DXF'):(FR?'TÔLERIE':'SHEET METAL');
-  if(E.smEngineNote)E.smEngineNote.textContent=flatPlate
+  if(E.smSectionTitle)E.smSectionTitle.textContent=rolledFlat?(FR?'DÉROULAGE':'UNROLL'):flatPlate?(FR?'DXF':'DXF'):(FR?'TÔLERIE':'SHEET METAL');
+  if(E.smEngineNote)E.smEngineNote.textContent=rolledFlat
+    ? (FR?'Plaque roulée détectée. Le développé est un rectangle (circonférence développée × largeur); le DXF reprend le contour et les trous déroulés.':'Rolled plate detected. The developed blank is a rectangle (developed circumference × width); the DXF includes the unrolled contour and holes.')
+    : flatPlate
     ? (FR?'Plaque plane détectée automatiquement. Le DXF reprend directement le contour exact de la pièce.':'Flat plate detected automatically. DXF uses the exact part contour directly.')
     : (FR?'Face fixe, épaisseur, rayon de pliage et facteur K détectés automatiquement. Utilisez les paramètres avancés seulement pour forcer une valeur.':'Fixed face, thickness, bend radius and K-factor are detected automatically. Use advanced settings only to override a value.');
-  if(E.smAdvanced)E.smAdvanced.hidden=flatPlate;
-  if(E.smKRow)E.smKRow.hidden=flatPlate;
-  if(E.smBendsRow)E.smBendsRow.hidden=flatPlate;
+  if(E.smAdvanced)E.smAdvanced.hidden=flatPlate||rolledFlat;
+  if(E.smKRow)E.smKRow.hidden=flatPlate||rolledFlat;
+  if(E.smBendsRow)E.smBendsRow.hidden=flatPlate||rolledFlat;
 
   if(E.smFixedFace)E.smFixedFace.textContent=sheetMetalState.fixedFace?`Face #${sheetMetalState.fixedFace.elementId}`:(FR?'AUTO':'AUTO');
   if(E.smDetectedThickness){
@@ -1836,7 +1846,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
               result={ok:false,code:'machined-round-stock',message:'Round stock + turning is proven independently from the sheet-metal hypothesis; false bend interpretation is suppressed.',diagnostics:{manufacturingGate:gate,independentManufacturing:{stockType:independentManufacturing.stock?.stockType,confidence:independentManufacturing.confidence,processes:independentManufacturing.processes}}};
             }
           }
-        }catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
+        }catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};console.log('%c[NAVOFLO V8.24 DEBUG] EXCEPTION','color:#ff5555;font-weight:bold',{part:componentName||String(geometry?.id),error:error?.message||String(error),stack:error?.stack});continue;}
         let manufacturing=independentManufacturing;
         // Full descriptors are now safe to use on bent sheet because the machining
         // AAG explicitly excludes panel↔bend concavity from negative volumes. This
@@ -1854,6 +1864,32 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
             });
           }catch(error){console.warn('[NavoFlo Manufacturing Recognition Engine]',error);}
         }
+        // V8.24 DEBUG — full per-geometry diagnostic dump. Remove once tuned.
+        try{
+          const dbg={
+            part:componentName||String(geometry.id),
+            resultOk:result?.ok,resultCode:result?.code,bendCount:Number(result?.bendCount)||0,
+            flatPlate:Boolean(result?.flatPlate),
+            stockType:manufacturing?.stock?.stockType||manufacturing?.stockType||null,
+            aspect:Number(manufacturing?.stock?.aspect ?? manufacturing?.aspect),
+            machined:Boolean(manufacturing?.machined),
+            classification:manufacturing?.classification||null,
+            processes:manufacturing?.processes||null,
+            features:(manufacturing?.featureInstances||[]).map(f=>`${f.type}${f.parameters?.advisoryOnly?'(adv)':''}`),
+            featureDetail:(manufacturing?.featureInstances||[]).map(f=>({type:f.type,proc:f.process,faces:f.faceIds,adv:Boolean(f.parameters?.advisoryOnly),topo:f.parameters?.topologyProven,conc:f.parameters?.concavityProven,exactChamfer:f.parameters?.exactChamfer,axisPat:f.parameters?.axisPatternProven})),
+            negVolDetail:manufacturing?.diagnostics?.machiningEvidence?.negativeVolumes?.components?.map(v=>({id:v.id,faces:v.faceIds,fams:v.families}))||null,
+            skinFaceCount:manufacturing?.diagnostics?.machiningEvidence?.negativeVolumes?.externalPlateSkinFaceCount,
+            turning:manufacturing?.diagnostics?.machiningEvidence?.turning
+              ?{recognized:manufacturing.diagnostics.machiningEvidence.turning.recognized,
+                fraction:manufacturing.diagnostics.machiningEvidence.turning.collinearFraction,
+                revFaces:manufacturing.diagnostics.machiningEvidence.turning.revolutionFaceCount}
+              :null,
+            negVolumes:manufacturing?.diagnostics?.machiningEvidence?.negativeVolumes?.count,
+            manufacturingIsNull:!manufacturing
+          };
+          console.log('%c[NAVOFLO V8.24 DEBUG]','color:#35d39a;font-weight:bold',dbg);
+          window.__navofloDebug=window.__navofloDebug||{};window.__navofloDebug[dbg.part]=dbg;
+        }catch(e){console.warn('[NAVOFLO V8.24 DEBUG] log failed',e);}
         if(manufacturing?.stockType==='fastener'){
           result={ok:false,code:'fastener',message:'Standard fastener / hardware component detected; sheet-metal and machining classification are suppressed.',diagnostics:{fastener:manufacturing.fastener||null}};
         }
@@ -1872,7 +1908,7 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
         if(!result?.ok){
           if(result?.code==='rolled-plate'&&result?.rolledPlateData){
             const confidence=Number(result.rolledPlateData.confidence)||0;
-            if(!bestRolled||confidence>(Number(bestRolled?.rolledPlateData?.confidence)||0))bestRolled={...result,geometryId:String(geometry.id),manufacturing};
+            if(!bestRolled||confidence>(Number(bestRolled?.rolledPlateData?.confidence)||0))bestRolled={...result,geometryId:String(geometry.id),manufacturing,faceInfo:exact?.faces||[],geometry};
             continue;
           }
           if(result?.code==='structural-profile'){
@@ -1909,10 +1945,22 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
         if(bestRolled){
           clearProfileStandardMatch();
           manufacturingCapability=bestRolled.manufacturing||null;
-          sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:true,rolledPlateData:bestRolled.rolledPlateData||null,profile:false,profileType:null,profileData:null};
+          // V8.24 — build the developed flat pattern for the rolled/slit shell so
+          // it can be viewed unrolled and exported to DXF like a sheet-metal flat.
+          let rolledFlat=null;
+          try{
+            rolledFlat=buildRolledFlatPattern(bestRolled.rolledPlateData,bestRolled.faceInfo||[],bestRolled.geometry||null);
+          }catch(error){console.warn('[NavoFlo rolled unfold]',error);}
+          if(rolledFlat?.ok){
+            flatPatternResult=rolledFlat;
+            buildFlatPatternScene(rolledFlat);
+            sheetMetalCapability={recognized:true,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:true,rolledFlat:true,rolledPlateData:bestRolled.rolledPlateData||null,profile:false,profileType:null,profileData:null};
+          }else{
+            sheetMetalCapability={recognized:false,bendCount:0,flatPlate:false,cuttablePlate:false,rolledPlate:true,rolledFlat:false,rolledPlateData:bestRolled.rolledPlateData||null,profile:false,profileType:null,profileData:null};
+          }
           modelAnalysisReady=true;
           syncSheetMetalUnfoldUI();updateGeometryTypeIndicator();updateSheetMetalDimensionsUI();updateProfileStandardUI();updateManufacturingUI();captureActiveModelDocumentState();
-          if(!quiet)console.info('[NavoFlo rolled plate detection]',bestRolled);
+          if(!quiet)console.info('[NavoFlo rolled plate detection]',{rolled:bestRolled.rolledPlateData,flat:rolledFlat?.developed||null});
           return null;
         }
         if(bestProfile){
@@ -2028,11 +2076,50 @@ function flatWallGeometryChains(chains,thickness){
   if(!pos.length)return null;const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.computeVertexNormals();return g;
 }
 
+function rolledFlatTrianglePositions(result){
+  // Developed rolled blank: rectangle with circular hole cut-outs, closed by
+  // through-thickness hole walls, so the flat view shows complete holes.
+  const t=Math.max(Number(result.thickness)||0,1e-6);
+  const W=Number(result.bounds?.width)||0,H=Number(result.bounds?.height)||0;
+  const shape=new THREE.Shape();
+  shape.moveTo(0,0);shape.lineTo(W,0);shape.lineTo(W,H);shape.lineTo(0,H);shape.lineTo(0,0);
+  for(const h of result.holes2D||[]){
+    const path=new THREE.Path();
+    path.absarc(Number(h.center[0]),Number(h.center[1]),Math.max(Number(h.radius)||0,1e-6),0,Math.PI*2,true);
+    shape.holes.push(path);
+  }
+  const geo=new THREE.ShapeGeometry(shape,24),pos=geo.attributes.position,idx=geo.index;
+  const top=[],bottom=[];
+  if(idx){
+    for(let i=0;i<idx.count;i+=3){
+      const a=idx.getX(i),b=idx.getX(i+1),c=idx.getX(i+2);
+      const ax=pos.getX(a),ay=pos.getY(a),bx=pos.getX(b),by=pos.getY(b),cx=pos.getX(c),cy=pos.getY(c);
+      top.push(ax,ay,0,bx,by,0,cx,cy,0);
+      bottom.push(cx,cy,-t,bx,by,-t,ax,ay,-t);
+    }
+  }
+  const walls=[];
+  for(const h of result.holes2D||[]){
+    const cx=Number(h.center[0]),cy=Number(h.center[1]),r=Math.max(Number(h.radius)||0,1e-6),steps=40;
+    for(let i=0;i<steps;i++){
+      const a0=i/steps*Math.PI*2,a1=(i+1)/steps*Math.PI*2;
+      const x0=cx+Math.cos(a0)*r,y0=cy+Math.sin(a0)*r,x1=cx+Math.cos(a1)*r,y1=cy+Math.sin(a1)*r;
+      walls.push(x0,y0,0,x1,y1,0,x1,y1,-t, x0,y0,0,x1,y1,-t,x0,y0,-t);
+    }
+  }
+  return new Float32Array([...top,...bottom,...walls]);
+}
 function buildFlatPatternScene(result){
   if(flatPatternRoot){scene.remove(flatPatternRoot);disposeObject(flatPatternRoot);}
   flatSurfaceMeshes=[];flatEdgeObjects=[];flatVertexObjects=[];
   flatPatternRoot=new THREE.Group();flatPatternRoot.name='NavoFlo Flat Pattern';
-  const positions=flatPatternTrianglePositions(result),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));geometry.computeVertexNormals();
+  // V8.24 — a rolled/slit shell develops to a rectangle with real hole cut-outs.
+  // Triangulate the blank WITH holes so the openings render complete (edge to
+  // edge), not as overlays on a solid rectangle.
+  const positions=(result.rolledFlat&&Array.isArray(result.holes2D)&&result.holes2D.length)
+    ?rolledFlatTrianglePositions(result)
+    :flatPatternTrianglePositions(result);
+  const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));geometry.computeVertexNormals();
   const material=new THREE.MeshStandardMaterial({color:0xc7ced1,metalness:0.05,roughness:0.58,side:THREE.DoubleSide});
   const mesh=new THREE.Mesh(geometry,material);mesh.userData.flatPattern=true;flatPatternRoot.add(mesh);
 
@@ -2361,6 +2448,9 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restor
         if(currentFile!==main)return;
         currentStepProperties=properties;
         renderStepCustomProperties();
+        // McMaster PN detection: run after both filename and properties are available
+        currentMcMasterPN=detectMcMasterPN(main.name,currentStepProperties);
+        renderMcMasterSection();
       }).catch(error=>console.warn('[NavoFlo STEP metadata]',error));
       buildExactStepScene(result);
       restoreAssemblyTreeState(restoreAssembly);
@@ -2374,6 +2464,9 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restor
       E.unitSelect.value='u';
       currentStepProperties=[];
       await buildMeshScene(main,files);
+      // McMaster PN: filename-only detection for non-STEP formats
+      currentMcMasterPN=detectMcMasterPN(main.name,[]);
+      renderMcMasterSection();
     }
 
     finalizeLoadedModel();
@@ -4696,6 +4789,24 @@ function renderStepCustomProperties() {
   E.stepCustomNote.textContent=`${currentStepProperties.length} ${T.metadataFound} · ${T.metadataScan}`;
 }
 
+function renderMcMasterSection() {
+  if(!E.mcMasterSection)return;
+  if(!currentMcMasterPN){
+    E.mcMasterSection.hidden=true;
+    return;
+  }
+  const {pn,source,field}=currentMcMasterPN;
+  E.mcMasterSection.hidden=false;
+  if(E.mcMasterPnDisplay) E.mcMasterPnDisplay.textContent=pn;
+  if(E.mcMasterSourceDisplay){
+    E.mcMasterSourceDisplay.textContent=source==='filename'?(FR?'Nom de fichier':'Filename'):field||source;
+  }
+  if(E.mcMasterLink){
+    E.mcMasterLink.href=mcMasterProductUrl(pn);
+    E.mcMasterLink.hidden=false;
+  }
+}
+
 async function parseStepHeader(file) {
   try {
     const text=await file.slice(0,2*1024*1024).text();
@@ -4732,14 +4843,14 @@ async function clearModel(showMessage=true) {
   }
   modelRoot.position.set(0,0,0);
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();logicalEdgeGroupCache=new Map();logicalHiddenEdgeKeys.clear();
-  currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];manufacturingCapability=null;
+  currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];currentMcMasterPN=null;manufacturingCapability=null;
   currentAssemblyFocus=null;currentAssemblyMode=false;currentAssemblyHierarchyAvailable=false;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();assemblyTreeRecords=new Map();assemblySyntheticGroups.clear();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblyHighlightedMeshes.clear();assemblySelectedKey=null;assemblyContextKey=null;
   resetSheetMetalForModel();
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;multiMeasureEnabled=false;
   cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;
   cadNav.pivot.set(0,0,0);cadNav.wheelFocus.set(0,0,0);updateCadCursor();
   E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.toggle('active',edgesVisible);E.gridToggle.classList.toggle('active',navo3dPreferences.gridVisible);E.measure.classList.remove('active');E.multiMeasure?.classList.remove('active');E.multiMeasure?.setAttribute('aria-pressed','false');
-  E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.sheetMetalSection.hidden=true;E.empty.classList.remove('hidden');
+  E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.sheetMetalSection.hidden=true;if(E.mcMasterSection)E.mcMasterSection.hidden=true;E.empty.classList.remove('hidden');
   if(E.assemblyTreePanel)E.assemblyTreePanel.hidden=true;if(E.assemblyTreeList)E.assemblyTreeList.replaceChildren();setAssemblyTreeStatus('');setAssemblyBatchBusy(false);
   E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';E.unitSelect.value='u';
   enableTools(false);revokeObjectUrls();
@@ -4768,8 +4879,8 @@ function enableTools(on) {
   if(E.save)E.save.disabled=!on||Boolean(currentAssemblyFocus);if(E.saveAs)E.saveAs.disabled=!on||Boolean(currentAssemblyFocus);
   document.querySelectorAll('[data-select-mode]').forEach(el=>el.disabled=!on);
   E.measureType.disabled=!on||!measureEnabled;
-  E.sheetMetal.disabled=!on||!currentStepResult||!sheetMetalCapability.recognized||sheetMetalCapability.bendCount<=0;
-  E.sheetMetal.hidden=!on||!sheetMetalCapability.recognized||sheetMetalCapability.bendCount<=0;
+  E.sheetMetal.disabled=!on||!currentStepResult||!sheetMetalCapability.recognized||(sheetMetalCapability.bendCount<=0&&!sheetMetalCapability.rolledFlat);
+  E.sheetMetal.hidden=!on||!sheetMetalCapability.recognized||(sheetMetalCapability.bendCount<=0&&!sheetMetalCapability.rolledFlat);
   if(E.smSetFixedFace)E.smSetFixedFace.disabled=!on||!currentStepResult;
   if(E.smUnfold)E.smUnfold.disabled=!on||!currentStepResult;
   syncSheetMetalUnfoldUI();

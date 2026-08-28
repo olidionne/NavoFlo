@@ -40,12 +40,35 @@ function dominantPlateSkinFaceSet(faceInfo,stock,sheetResult,scaleMm=100){
   // Those skins are material that remains, never a negative-volume floor.
   // Identify the two extreme same-domain planar skins independently from the
   // sheet-metal panel list because exporters often return only one skin there.
-  const flatContext=Boolean(sheetResult?.flatPlate||stock?.stockType==='plate-blank'||(stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45));
-  if(!flatContext)return new Set();
+  //
+  // V8.24: geometry-only fallback — when stock is null (failed identification)
+  // or sheetResult did not detect a flat plate, a pair of large, parallel,
+  // congruent planar faces still proves a plate-like geometry and the skins
+  // must be excluded from the machining concavity graph.  Without this, large
+  // frames / obround washers trigger false pocket-floor detection because their
+  // inner perimeter concavities are not suppressed.
+  let flatContext=Boolean(sheetResult?.flatPlate||stock?.stockType==='plate-blank'||(stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45));
+  if(!flatContext){
+    // Pure geometry probe: two dominant, parallel, area-matched planar faces.
+    const gPlanes=(faceInfo||[]).filter(f=>fam(f.family)==='plane').map(f=>({id:Number(f.id),n:planeNormal(f),c:faceCenter(f),area:Number(f.area)||0})).filter(x=>x.n&&x.c&&x.area>EPS);
+    if(gPlanes.length>=2){
+      const maxA=Math.max(...gPlanes.map(p=>p.area));
+      outer:for(let i=0;i<gPlanes.length;i++){
+        if(gPlanes[i].area<maxA*0.28)continue;
+        for(let j=i+1;j<gPlanes.length;j++){
+          if(gPlanes[j].area<maxA*0.28)continue;
+          if(Math.abs(dot(gPlanes[i].n,gPlanes[j].n))<0.997)continue;
+          if(Math.min(gPlanes[i].area,gPlanes[j].area)/Math.max(gPlanes[i].area,gPlanes[j].area)>=0.38){flatContext=true;break outer;}
+        }
+      }
+    }
+  }
+  const EMPTY={combined:new Set(),low:new Set(),high:new Set()};
+  if(!flatContext)return EMPTY;
   const planes=(faceInfo||[]).filter(f=>fam(f.family)==='plane').map(f=>({
     f,id:Number(f.id),n:planeNormal(f),c:faceCenter(f),area:Number(f.area)||0
   })).filter(x=>Number.isFinite(x.id)&&x.n&&x.c&&x.c.every(Number.isFinite)&&x.area>EPS);
-  if(planes.length<2)return new Set();
+  if(planes.length<2)return EMPTY;
   const candidates=[];
   const pushAxis=a=>{a=canonicalAxis(a);if(a&&candidates.every(x=>Math.abs(dot(x,a))<0.9995))candidates.push(a);};
   if(stock?.stockType==='plate-blank')pushAxis(stock.axis);
@@ -67,12 +90,16 @@ function dominantPlateSkinFaceSet(faceInfo,stock,sheetResult,scaleMm=100){
     const score=Math.min(lowArea,highArea)*(0.65+0.35*areaRatio)/(1+thicknessError*4);
     if(!best||score>best.score)best={axis,low,high,span,areaRatio,score};
   }
-  if(!best||best.areaRatio<0.35)return new Set();
+  if(!best||best.areaRatio<0.35)return EMPTY;
   const ids=new Set([...best.low,...best.high].map(x=>Number(x.id)));
   // Expand the physical planes through OCCT same-domain healing so a cosmetic
   // SolidWorks/Inventor seam cannot become a fake milling pocket.
   let changed=true;while(changed){changed=false;for(const f of faceInfo||[]){const id=Number(f.id),domain=(f.sameDomainFaceIds||[]).map(Number);if(ids.has(id)||domain.some(x=>ids.has(x))){if(!ids.has(id)){ids.add(id);changed=true;}for(const x of domain)if(!ids.has(x)){ids.add(x);changed=true;}}}}
-  return ids;
+  // Return both the combined suppression set and the individual low/high skin
+  // sets so detectPocketFloors can reject through-connectivity components.
+  const lowIds=new Set([...best.low].map(x=>Number(x.id))),highIds=new Set([...best.high].map(x=>Number(x.id)));
+  let ch=true;while(ch){ch=false;for(const f of faceInfo||[]){const id=Number(f.id),domain=(f.sameDomainFaceIds||[]).map(Number);if(lowIds.has(id)||domain.some(x=>lowIds.has(x))){if(!lowIds.has(id)){lowIds.add(id);ch=true;}for(const x of domain)if(!lowIds.has(x)){lowIds.add(x);ch=true;}}if(highIds.has(id)||domain.some(x=>highIds.has(x))){if(!highIds.has(id)){highIds.add(id);ch=true;}for(const x of domain)if(!highIds.has(x)){highIds.add(x);ch=true;}}}}
+  return{combined:ids,low:lowIds,high:highIds};
 }
 
 function sheetNativeFaceSet(sheetResult){
@@ -116,7 +143,7 @@ function otherOwner(edge,faceId){return(edge?.owners||[]).map(Number).find(id=>i
 function planeNormal(face){return fam(face?.family)==='plane'?canonicalAxis(face?.localNormal):null;}
 function wallPerpendicularToFloor(wall,floor){const fn=planeNormal(floor);if(!fn)return false;const wf=fam(wall?.family);if(wf==='plane'){const wn=planeNormal(wall);return Boolean(wn&&Math.abs(dot(fn,wn))<=0.20);}if(CYL_FAMILIES.has(wf)||CONE_FAMILIES.has(wf)||TORUS_FAMILIES.has(wf))return true;return false;}
 
-function detectPocketFloors(aag,faceInfo,negativeVolumes,sheetNativeFaceIds=null,allowedFloorNormals=null){
+function detectPocketFloors(aag,faceInfo,negativeVolumes,sheetNativeFaceIds=null,allowedFloorNormals=null,plateSkinPair=null){
   const faceById=new Map((faceInfo||[]).map(f=>[Number(f.id),f])),out=[];
   for(const floor of faceInfo||[]){
     if(fam(floor.family)!=='plane')continue;if(sheetNativeFaceIds?.has(Number(floor.id)))continue;const fn=planeNormal(floor);if(!fn)continue;
@@ -131,6 +158,37 @@ function detectPocketFloors(aag,faceInfo,negativeVolumes,sheetNativeFaceIds=null
     // transitions. Three/four walls increase confidence, but slots with two
     // straight walls + curved ends remain valid.
     const volume=negativeVolumes.components.find(v=>v.faceIds.includes(Number(floor.id)))||null;
+    // V8.24b — split-skin rejection. A genuine blind pocket floor lies STRICTLY
+    // between the two physical plate skins. A floor coplanar with either skin is
+    // a SolidWorks/Inventor "separation line" (one physical skin split into
+    // several B-Rep faces whose sameDomain flags were not exported), never a
+    // pocket. This is the 502-00-01 picture-frame false-positive.
+    if(plateSkinPair?.low?.size&&plateSkinPair?.high?.size&&Array.isArray(allowedFloorNormals)&&allowedFloorNormals.length){
+      const pn=allowedFloorNormals[0];
+      const depthOf=set=>{let s=0,n=0;for(const id of set){const c=faceCenter(faceById.get(Number(id)));if(c&&c.every(Number.isFinite)){s+=dot(c,pn);n++;}}return n?s/n:null;};
+      const loD=depthOf(plateSkinPair.low),hiD=depthOf(plateSkinPair.high),fc=faceCenter(floor);
+      if(loD!=null&&hiD!=null&&fc&&fc.every(Number.isFinite)){
+        const d=dot(fc,pn),lo=Math.min(loD,hiD),hi=Math.max(loD,hiD),span=hi-lo,tol=Math.max(span*0.08,1e-3);
+        // Must be strictly interior to the slab; coplanar-with-skin or outside → skip.
+        if(!(d>lo+tol&&d<hi-tol))continue;
+      }
+    }
+    // V8.24 — through-connectivity guard: a negative-volume component that
+    // reaches BOTH physical plate skins is a through-cut (laser/plasma cut),
+    // not a blind pocket.  Rejecting it prevents large frames, obround washers
+    // and rectangular windows from being promoted to milled parts.
+    if(plateSkinPair?.low?.size&&plateSkinPair?.high?.size&&volume){
+      let touchesLow=false,touchesHigh=false;
+      for(const fid of volume.faceIds){
+        for(const nid of aag.nodes?.get?.(Number(fid))?.neighbors||[]){
+          if(plateSkinPair.low.has(Number(nid)))touchesLow=true;
+          if(plateSkinPair.high.has(Number(nid)))touchesHigh=true;
+          if(touchesLow&&touchesHigh)break;
+        }
+        if(touchesLow&&touchesHigh)break;
+      }
+      if(touchesLow&&touchesHigh)continue;
+    }
     const confidence=clamp(0.91+Math.min(walls.length,4)*0.018+Math.min(edges.length,5)*0.008);
     out.push(feature('pocket-floor','milling',[Number(floor.id),...walls.map(w=>Number(w.id))],confidence,{topologyProven:true,concavityProven:true,negativeVolume:true,negativeVolumeId:volume?.id||null,strictConcaveEdgeIds:edges.map(e=>Number(e.id)),wallFaceIds:walls.map(w=>Number(w.id)),enclosedWallCount:walls.length}));
   }
@@ -220,15 +278,23 @@ export function analyzeMachiningEvidence({aag,faceInfo=[],geometry=null,structur
   // panel↔bend transitions are stock-forming geometry, not removed material.
   // Remove only edges whose TWO owners belong to the proven sheet skin; an edge
   // from a sheet skin to a hole/pocket wall remains eligible machining evidence.
-  const nativeSheetFaces=sheetNativeFaceSet(sheetResult),externalPlateSkins=dominantPlateSkinFaceSet(faceInfo,stock,sheetResult,scaleMm),faceById=new Map((faceInfo||[]).map(f=>[Number(f.id),f]));
+  const nativeSheetFaces=sheetNativeFaceSet(sheetResult),externalPlateSkinResult=dominantPlateSkinFaceSet(faceInfo,stock,sheetResult,scaleMm),externalPlateSkins=externalPlateSkinResult.combined,faceById=new Map((faceInfo||[]).map(f=>[Number(f.id),f]));
   for(const id of externalPlateSkins)nativeSheetFaces.add(Number(id));
+  // plateSkinPair carries the separate low/high skin face sets for the
+  // through-connectivity guard in detectPocketFloors.
+  const plateSkinPair={low:externalPlateSkinResult.low,high:externalPlateSkinResult.high};
   let allowedFloorNormals=Number(sheetResult?.bendCount)>0?[...new Set((sheetResult?.panelFaceIds||[]).map(id=>faceById.get(Number(id))).map(planeNormal).filter(Boolean).map(n=>n.map(v=>Math.round(v*1e6)/1e6).join(',')))].map(k=>k.split(',').map(Number)):[];
   if(!allowedFloorNormals.length&&Boolean(sheetResult?.flatPlate||stock?.stockType==='plate-blank'||(stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45))){
     const n=canonicalAxis(stock?.axis)||planeNormal(faceById.get(Number(sheetResult?.fixedFaceId)));if(n)allowedFloorNormals=[n];
   }
+  // V8.24 — geometry-only fallback: if stock type is unknown but the geometry
+  // probe detected plate skins, use their normal to constrain pocket floor normals.
+  if(!allowedFloorNormals.length&&externalPlateSkins.size){
+    const firstSkinFace=faceById.get([...externalPlateSkins][0]);const n=planeNormal(firstSkinFace)||canonicalAxis(stock?.axis);if(n)allowedFloorNormals=[n];
+  }
   const negativeVolumes=buildNegativeVolumeComponents(aag,faceInfo,{sheetNativeFaceIds:nativeSheetFaces}),turning=detectTurningByGpAx1(faceInfo,scaleMm,stock),features=[];
   features.push(...detectBlindAndCompoundDrilling(aag,faceInfo,negativeVolumes,scaleMm,nativeSheetFaces));
-  features.push(...detectPocketFloors(aag,faceInfo,negativeVolumes,nativeSheetFaces,allowedFloorNormals));
+  features.push(...detectPocketFloors(aag,faceInfo,negativeVolumes,nativeSheetFaces,allowedFloorNormals,plateSkinPair));
   features.push(...detectConcaveGrooves(aag,faceInfo,negativeVolumes,turning,nativeSheetFaces,stock,sheetResult));
   // A structural section may contain stock root fillets that are geometrically
   // concave. Structural-profile authority therefore suppresses a global turning

@@ -129,7 +129,10 @@ function hasHardMachiningProof(feature,{plateContext=false}={}){
     if(type==='counterbore'||type==='countersink')return true;
   }
   if(p.topologyProven===true){
-    if(['pocket-floor','blind-pocket','blind-slot','one-sided-recess','annular-groove','groove-fillet','countersink-chamfer','edge-chamfer','oring-groove'].includes(type))return true;
+    // V8.24b — edge-chamfer removed from the plate hard-machining list: a bevel
+    // on a proven flat-plate perimeter is a laser/plasma cut condition, not a
+    // milled chamfer (502-00-08). countersink-chamfer (drilled) stays machining.
+    if(['pocket-floor','blind-pocket','blind-slot','one-sided-recess','annular-groove','groove-fillet','countersink-chamfer','oring-groove'].includes(type))return true;
     if(['counterbore','countersink','blind-hole','cross-hole'].includes(type))return true;
   }
   // Backward-compatible deterministic escape hatch for legacy recognizers that
@@ -142,6 +145,12 @@ function hasHardMachiningProof(feature,{plateContext=false}={}){
 export function requiresSecondaryMachining(feature,{plateContext=false}={}){
   const type=normalizeType(feature?.type);if(!type)return false;
   if(THROUGH_CUT_TYPES.has(type))return false;
+  // V8.24b — a through-hole in a proven flat plate is part of the 2D laser/plasma
+  // cut profile, never machining. The recognizer sometimes labels a normal
+  // through-hole as "cross-hole" when the exported plate normal is a few degrees
+  // off; on plate stock that hole is still a cut (502-01-06 / 502-01-10 / ST01-0009).
+  // A genuinely blind cross-hole keeps its own blind-hole proof and is unaffected.
+  if(type==='cross-hole'&&plateContext&&feature?.parameters?.through!==false)return false;
   if(type==='cross-hole'&&plateContext&&feature?.parameters?.throughCutEquivalent)return false;
   if(type==='pocket-floor'&&plateContext&&feature?.parameters?.throughCutEquivalent)return false;
   return hasHardMachiningProof(feature,{plateContext});

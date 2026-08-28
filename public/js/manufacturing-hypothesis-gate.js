@@ -1,4 +1,4 @@
-import { detectTurningByGpAx1 } from './manufacturing-machining-evidence.js?v=8.23.1';
+import { detectTurningByGpAx1 } from './manufacturing-machining-evidence.js?v=8.24.2';
 
 // NavoFlo V8.23.1 — deterministic manufacturing hypothesis gate.
 //
