@@ -1854,6 +1854,29 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
             });
           }catch(error){console.warn('[NavoFlo Manufacturing Recognition Engine]',error);}
         }
+        // V8.24 DEBUG — full per-geometry diagnostic dump. Remove once tuned.
+        try{
+          const dbg={
+            part:componentName||String(geometry.id),
+            resultOk:result?.ok,resultCode:result?.code,bendCount:Number(result?.bendCount)||0,
+            flatPlate:Boolean(result?.flatPlate),
+            stockType:manufacturing?.stock?.stockType||manufacturing?.stockType||null,
+            aspect:Number(manufacturing?.stock?.aspect ?? manufacturing?.aspect),
+            machined:Boolean(manufacturing?.machined),
+            classification:manufacturing?.classification||null,
+            processes:manufacturing?.processes||null,
+            features:(manufacturing?.featureInstances||[]).map(f=>`${f.type}${f.parameters?.advisoryOnly?'(adv)':''}`),
+            turning:manufacturing?.diagnostics?.machiningEvidence?.turning
+              ?{recognized:manufacturing.diagnostics.machiningEvidence.turning.recognized,
+                fraction:manufacturing.diagnostics.machiningEvidence.turning.collinearFraction,
+                revFaces:manufacturing.diagnostics.machiningEvidence.turning.revolutionFaceCount}
+              :null,
+            negVolumes:manufacturing?.diagnostics?.machiningEvidence?.negativeVolumes?.count,
+            manufacturingIsNull:!manufacturing
+          };
+          console.log('%c[NAVOFLO V8.24 DEBUG]','color:#35d39a;font-weight:bold',dbg);
+          window.__navofloDebug=window.__navofloDebug||{};window.__navofloDebug[dbg.part]=dbg;
+        }catch(e){console.warn('[NAVOFLO V8.24 DEBUG] log failed',e);}
         if(manufacturing?.stockType==='fastener'){
           result={ok:false,code:'fastener',message:'Standard fastener / hardware component detected; sheet-metal and machining classification are suppressed.',diagnostics:{fastener:manufacturing.fastener||null}};
         }
