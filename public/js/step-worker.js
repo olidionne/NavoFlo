@@ -1,7 +1,7 @@
 import OcctJS from 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.mjs';
 
 const WASM_URL = 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.wasm';
-const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.20.2';
+const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.22.0';
 
 let occtPromise = null;
 let exactModelId = null;
@@ -135,6 +135,50 @@ function sameCylinder(a,b){
   const perp=Math.hypot(d[0]-proj*ua[0],d[1]-proj*ua[1],d[2]-proj*ua[2]);
   return perp<=tol*2;
 }
+
+function clampNumber(v,a=-1,b=1){return Math.max(a,Math.min(b,Number(v)||0));}
+function unit3(v){const a=vec3(v);if(!a)return null;const l=Math.hypot(...a);return l>1e-12?a.map(x=>x/l):null;}
+function dot3(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function sub3(a,b){return[a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function midpoint3(a,b){return[(a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2];}
+function edgeMidpoint(edge,topoEdge){
+  const a=vec3(edge?.localStartPoint),b=vec3(edge?.localEndPoint);if(a&&b)return midpoint3(a,b);
+  const pts=Array.from(topoEdge?.points||[]).map(Number);if(pts.length>=6){
+    const n=Math.floor((pts.length/3-1)/2)*3;const p=pts.slice(n,n+3),q=pts.slice(Math.min(n+3,pts.length-3),Math.min(n+6,pts.length));
+    if(p.length===3&&q.length===3&&p.every(Number.isFinite)&&q.every(Number.isFinite))return midpoint3(p,q);
+  }
+  return null;
+}
+function exactNormalAtEdge(occt,gid,face,point){
+  if(!face||!point)return null;
+  try{
+    const r=occt.EvaluateExactFaceNormal(exactModelId,shapeHandle(gid),'face',Number(face.id),point);
+    const n=unit3(r?.localNormal);if(r?.ok&&n)return n;
+  }catch{}
+  if(String(face.family||'').toLowerCase()==='plane')return unit3(face.localNormal);
+  return null;
+}
+// Strict local transition sense used by the manufacturing AAG.  The test is
+// intentionally conservative and ordering-independent. With outward B-Rep
+// normals, a concave cavity corner places each adjacent face centroid on the
+// positive side of the other face at their shared edge; an exterior convex
+// corner places both on the negative side. Mixed/near-zero cases stay unknown.
+function classifyStrictEdgeTransition(occt,gid,edge,topoEdge,faceById){
+  const owners=(edge?.ownerFaceIds||[]).map(Number).filter(Number.isFinite);
+  if(owners.length!==2)return{transition:'boundary',strictConcave:false,strictConvex:false};
+  const a=faceById.get(owners[0]),b=faceById.get(owners[1]);if(!a||!b)return{transition:'unknown',strictConcave:false,strictConvex:false};
+  const mid=edgeMidpoint(edge,topoEdge),ca=vec3(a.localCentroid)||vec3(a.localCenter),cb=vec3(b.localCentroid)||vec3(b.localCenter);
+  if(!mid||!ca||!cb)return{transition:'unknown',strictConcave:false,strictConvex:false};
+  const na=exactNormalAtEdge(occt,gid,a,mid),nb=exactNormalAtEdge(occt,gid,b,mid);
+  if(!na||!nb)return{transition:'unknown',strictConcave:false,strictConvex:false};
+  const normalDot=clampNumber(dot3(na,nb));
+  if(normalDot>=0.9997)return{transition:'smooth',strictConcave:false,strictConvex:false,normalDot,normalAngleDeg:Math.acos(normalDot)*180/Math.PI};
+  const sideAB=dot3(na,sub3(cb,mid)),sideBA=dot3(nb,sub3(ca,mid));
+  const scale=Math.max(Number(edge?.length)||0,Math.sqrt(Math.max(Number(a.area)||0,Number(b.area)||0,1)),1),tol=Math.max(scale*2e-5,2e-5);
+  const strictConcave=sideAB>tol&&sideBA>tol,strictConvex=sideAB<-tol&&sideBA<-tol;
+  return{transition:strictConcave?'concave':strictConvex?'convex':'unknown',strictConcave,strictConvex,normalDot,normalAngleDeg:Math.acos(normalDot)*180/Math.PI,sideAB,sideBA,tolerance:tol};
+}
+
 function exactGeometrySignature(occt,selection){
   const r=exactRef(selection),out={family:'other'};
   const type=occt.GetExactGeometryType(r.exactModelId,r.exactShapeHandle,r.kind,r.elementId);if(type?.ok)out.family=type.family;
@@ -328,7 +372,7 @@ function buildManufacturingFaceInfo(occt,geometryId){
       try{const chamfer=occt.DescribeExactChamfer(exactModelId,shapeHandle(gid),'face',id);if(chamfer?.ok)out.chamfer={profile:String(chamfer.profile||''),variant:String(chamfer.variant||''),distanceA:Number(chamfer.distanceA),distanceB:Number(chamfer.distanceB),supportAngle:Number(chamfer.supportAngle)};}catch{}
     }
   }
-  const edges=[];
+  const edges=[],faceById=new Map(faces.map(f=>[Number(f.id),f]));
   for(const edge of topo.edges||[]){
     const id=Number(edge.id),selection={geometryId:gid,kind:'edge',elementId:id},sig=exactGeometrySignature(occt,selection),topoEdge=topoEdgeById.get(id);
     const out={id,family:String(sig?.family||'other'),ownerFaceIds:Array.from(topoEdge?.ownerFaceIds||[]).map(Number)};
@@ -342,6 +386,7 @@ function buildManufacturingFaceInfo(occt,geometryId){
       if(a?.length===3&&a.every(Number.isFinite))out.localStartPoint=a;if(b?.length===3&&b.every(Number.isFinite))out.localEndPoint=b;
       if(!out.localStartPoint||!out.localEndPoint){const pts=Array.from(topoEdge?.points||[]).map(Number);if(pts.length>=6){const sa=pts.slice(0,3),sb=pts.slice(-3);if(!out.localStartPoint&&sa.every(Number.isFinite))out.localStartPoint=sa;if(!out.localEndPoint&&sb.every(Number.isFinite))out.localEndPoint=sb;}}
     }
+    Object.assign(out,classifyStrictEdgeTransition(occt,gid,out,topoEdge,faceById));
     edges.push(out);
   }
   const neighbors=new Map(faces.map(f=>[Number(f.id),new Set()]));

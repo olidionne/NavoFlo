@@ -1,4 +1,6 @@
-// NavoFlo V8.21.2 — deterministic manufacturing hypothesis gate.
+import { detectTurningByGpAx1 } from './manufacturing-machining-evidence.js?v=8.22.0';
+
+// NavoFlo V8.22.0 — deterministic manufacturing hypothesis gate.
 //
 // Sheet-metal, structural-stock and machining recognition are independent
 // hypotheses.  A lightweight sheet-metal pass is allowed to be fast, but it is
@@ -19,32 +21,8 @@ function lineDistance(centerA,axis,centerB){const d=sub(centerB,centerA),p=scale
 function family(v){return String(v||'').toLowerCase();}
 
 export function rotationalMachiningSignature(faceInfo=[]){
-  const records=[];
-  for(const f of faceInfo||[]){
-    const fam=family(f?.family);if(!['cylinder','cylindrical','cone','conical','torus','toroidal'].includes(fam))continue;
-    const axis=canonicalAxis(f?.axisDirection),center=vec(f?.localCenter);if(!axis||!center?.every(Number.isFinite))continue;
-    records.push({id:Number(f.id),family:fam,axis,center,radius:Number(f?.radius),area:Number(f?.area)||0});
-  }
-  if(records.length<4)return{recognized:false,confidence:0,analyticCount:records.length,dominantCount:0,distinctRadii:0,coneCount:0,torusCount:0};
-  const radii=records.map(r=>r.radius).filter(v=>Number.isFinite(v)&&v>0),scaleMm=Math.max(...radii,1),axisTol=Math.max(scaleMm*0.008,0.08),groups=[];
-  for(const r of records){
-    let g=groups.find(x=>Math.abs(dot(x.axis,r.axis))>=0.999&&lineDistance(x.center,x.axis,r.center)<=axisTol);
-    if(!g){g={axis:r.axis,center:r.center,members:[]};groups.push(g);}g.members.push(r);
-  }
-  groups.sort((a,b)=>b.members.length-a.members.length);const best=groups[0];if(!best)return{recognized:false,confidence:0,analyticCount:records.length,dominantCount:0,distinctRadii:0,coneCount:0,torusCount:0};
-  const radialStep=Math.max(scaleMm*0.004,0.04),unique=[];
-  for(const r of best.members.map(m=>m.radius).filter(v=>Number.isFinite(v)&&v>0).sort((a,b)=>a-b)){if(!unique.length||Math.abs(unique.at(-1)-r)>radialStep)unique.push(r);}
-  const coneCount=best.members.filter(m=>['cone','conical'].includes(m.family)).length,torusCount=best.members.filter(m=>['torus','toroidal'].includes(m.family)).length,cylinderCount=best.members.filter(m=>['cylinder','cylindrical'].includes(m.family)).length;
-  const dominantFraction=best.members.length/records.length;
-  // A normal press-brake bend contributes roughly one inner + one outer
-  // cylinder on one axis.  A turned shaft contributes several coaxial radii and
-  // commonly cones/tori/shoulders on that SAME axis.  Perforated sheet holes do
-  // not pass because their axes are parallel but not the same axis line.
-  const complexRadii=unique.length>=3;
-  const rotationalDetail=coneCount+torusCount>=2;
-  const recognized=best.members.length>=5&&dominantFraction>=0.58&&cylinderCount>=3&&(complexRadii||rotationalDetail);
-  const confidence=recognized?clamp(0.72+Math.min((best.members.length-5)*0.018,0.12)+Math.min((unique.length-3)*0.025,0.08)+Math.min((coneCount+torusCount)*0.012,0.07)+Math.max(0,dominantFraction-0.58)*0.12):0;
-  return{recognized,confidence,analyticCount:records.length,dominantCount:best.members.length,dominantFraction,cylinderCount,coneCount,torusCount,distinctRadii:unique.length,axis:best.axis,axisCenter:best.center,axisToleranceMm:axisTol};
+  const r=detectTurningByGpAx1(faceInfo);
+  return{recognized:Boolean(r.recognized),confidence:Number(r.confidence)||0,analyticCount:Number(r.revolutionFaceCount)||0,dominantCount:Number(r.dominantFaceCount)||0,dominantFraction:Number(r.collinearFraction)||0,cylinderCount:Number(r.cylinderCount)||0,coneCount:Number(r.coneCount)||0,torusCount:Number(r.torusCount)||0,distinctRadii:Number(r.distinctRadii)||0,axis:r.axis||null,axisCenter:r.axisCenter||null,axisToleranceMm:Number(r.axisToleranceMm)||null};
 }
 
 export function requiresIndependentManufacturingReview({faceInfo=[],sheetResult=null,structuralNameHint=null,fastenerHint=null}={}){
@@ -59,9 +37,10 @@ export function requiresIndependentManufacturingReview({faceInfo=[],sheetResult=
 export function hasRoundStockMachiningAuthority(knowledge){
   if(!knowledge||knowledge?.stock?.stockType!=='round-bar')return false;
   const stock=knowledge.stock||{},confidence=Math.max(Number(stock.confidence)||0,Number(knowledge.confidence)||0),aspect=Number(stock.aspect)||0,turning=Boolean(knowledge?.processes?.turning);
-  const turns=(knowledge.featureInstances||[]).filter(f=>String(f?.process||'')==='turning').length;
+  const turnFeatures=(knowledge.featureInstances||[]).filter(f=>String(f?.process||'')==='turning'&&!f?.parameters?.advisoryOnly),turns=turnFeatures.length;
+  const gpAx1=turnFeatures.find(f=>f?.parameters?.gpAx1Proof===true&&Number(f?.parameters?.gpAx1CollinearFraction)>0.80&&Number(f?.confidence)>=0.88);
   const envelopeError=Number(stock.envelopeError),coverage=Number(stock.stockSurfaceCoverage);
-  return turning&&turns>=2&&aspect>=0.75&&confidence>=0.76&&(!Number.isFinite(envelopeError)||envelopeError<=0.06)&&(!Number.isFinite(coverage)||coverage>=0.003);
+  return turning&&(turns>=2||Boolean(gpAx1))&&aspect>=0.75&&confidence>=0.76&&(!Number.isFinite(envelopeError)||envelopeError<=0.06)&&(!Number.isFinite(coverage)||coverage>=0.003);
 }
 
-export const MANUFACTURING_HYPOTHESIS_GATE_VERSION='8.21.2';
+export const MANUFACTURING_HYPOTHESIS_GATE_VERSION='8.22.0';

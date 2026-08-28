@@ -1,4 +1,4 @@
-/* NavoFlo V8.21.1 — Manufacturing Recognition Engine (MRE)
+/* NavoFlo V8.22.0 — Manufacturing Recognition Engine (MRE)
  *
  * Architecture:
  *   exact B-Rep/AAG -> stock hypothesis -> virtual delta/removal features
@@ -11,8 +11,9 @@
  */
 import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.20.0';
 import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.20.0';
-import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.21.1';
+import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.22.0';
 import { detectFastenerComponent, FASTENER_RECOGNIZER_VERSION } from './fastener-recognition.js?v=8.21.1';
+import { analyzeMachiningEvidence, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.22.0';
 
 const EPS=1e-8;
 const V={
@@ -45,7 +46,12 @@ export function buildAttributedAdjacencyGraph(faceInfo=[],edgeInfo=[]){
   });
   const arcs=[];
   for(const e of edgeInfo||[]){
-    const owners=(e.ownerFaceIds||[]).map(Number).filter(Number.isFinite);const edge={id:Number(e.id),family:fam(e.family),length:Number(e.length)||0,owners};
+    const owners=(e.ownerFaceIds||[]).map(Number).filter(Number.isFinite);const edge={
+      id:Number(e.id),family:fam(e.family),length:Number(e.length)||0,owners,
+      transition:String(e.transition||'unknown').toLowerCase(),strictConcave:e.strictConcave===true,strictConvex:e.strictConvex===true,
+      normalDot:Number.isFinite(Number(e.normalDot))?Number(e.normalDot):null,normalAngleDeg:Number.isFinite(Number(e.normalAngleDeg))?Number(e.normalAngleDeg):null,
+      sideAB:Number.isFinite(Number(e.sideAB))?Number(e.sideAB):null,sideBA:Number.isFinite(Number(e.sideBA))?Number(e.sideBA):null
+    };
     arcs.push(edge);
     for(let i=0;i<owners.length;i++)for(let j=i+1;j<owners.length;j++){
       nodes.get(owners[i])?.neighbors.add(owners[j]);nodes.get(owners[j])?.neighbors.add(owners[i]);
@@ -512,18 +518,19 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
     const processes={cutting:false,bending:false,rolling:false,turning:false,drilling:false,milling:false,machining:false,profile:false,fastener:true};
     const stock={stockType:'fastener',fastenerType:fastener.type,lengthMm:Number(fastener.lengthMm)||null,diameterMm:Number(fastener.diameterMm)||null,confidence:Number(fastener.confidence)||0.95,source:fastener.source||'deterministic-fastener',fastener};
     return{
-      kind:'manufacturing-knowledge',knowledgeVersion:6,classification:'fastener',stockType:'fastener',fastenerType:fastener.type,fastener,stock,
+      kind:'manufacturing-knowledge',knowledgeVersion:7,classification:'fastener',stockType:'fastener',fastenerType:fastener.type,fastener,stock,
       lengthMm:stock.lengthMm,diameterMm:stock.diameterMm,confidence:stock.confidence,machined:false,process:'fastener',processes,
       capabilities:{unfold:false,export2dDxf:false,directFlatDxf:false,structuralProfile:false,rolledPlate:false,fastener:true},
       featureInstances:[],features:{recognizedInstances:0,secondaryMachining:false,definiteMachiningInstances:0,throughCutInstances:0},
       evidence:['fastener',...(fastener.evidence||[])],delta:{method:'not-applicable-fastener',estimatedRemovedVolumeMm3:null,featureCount:0,featureFaceIds:[]},
-      aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount},materialRemoval:null,
+      aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount,strictConcaveEdgeCount:0,negativeVolumeCount:0},materialRemoval:null,
       diagnostics:{mre:true,fastener:true,needsMlReview:false,analysisPipeline:['brep-aag','fastener-metadata-prior','fastener-brep-signature','manufacturing-exclusion'],fastenerRecognizerVersion:FASTENER_RECOGNIZER_VERSION}
     };
   }
   let legacy=null;try{legacy=classifyManufacturingGeometry({geometry,faceInfo,edgeInfo});}catch{}
   const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile});
-  let features=[];
+  const machiningEvidence=analyzeMachiningEvidence({aag,faceInfo,geometry,structuralProfile});
+  let features=[...(machiningEvidence.features||[])];
   const roundPlateContext=Boolean(sheetResult?.flatPlate&&stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45);
   if(!roundPlateContext&&stock?.stockType!=='rolled-plate')features.push(...recognizeRoundFeatures({geometry,faceInfo,aag,stock}));
   features.push(...recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}));
@@ -563,20 +570,22 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   const localConfidence=clamp(Math.max(stockConfidence,machineConfidence*0.96));
   const base={
     ...compat,
-    kind:'manufacturing-knowledge',knowledgeVersion:6,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
-    aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount},
+    kind:'manufacturing-knowledge',knowledgeVersion:7,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
+    aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount,strictConcaveEdgeCount:Number(machiningEvidence?.negativeVolumes?.strictConcaveEdgeCount)||0,negativeVolumeCount:Number(machiningEvidence?.negativeVolumes?.count)||0},
     confidence:localConfidence,
     diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,surfaceSignals:signals,
-      analysisPipeline:['brep-aag','same-domain-healing','commercial-stock-prior','stock-hypothesis','instance-through-cut-proof','removal-feature-decomposition','critical-manufacturing-arbitration'],
+      analysisPipeline:['brep-aag','strict-concave-transition-proof','virtual-negative-volumes','same-domain-healing','commercial-stock-prior','stock-hypothesis','instance-through-cut-proof','blind-hole-pocket-groove-proof','gp-ax1-turning-proof','removal-feature-decomposition','canonical-manufacturing-arbitration'],
+      machiningEvidence:{negativeVolumes:machiningEvidence?.negativeVolumes||null,turning:machiningEvidence?.turning||null},machiningEvidenceVersion:MACHINING_EVIDENCE_VERSION,
       rawStockKnowledgeVersion:RAW_STOCK_KNOWLEDGE_VERSION,criticalArbitratorVersion:CRITICAL_ARBITRATOR_VERSION}
   };
   base.diagnostics.needsMlReview=computeNeedsMlReview({classification,capabilities,processes,features,signals,stock,confidence:localConfidence});
-  const finalKnowledge=arbitrateManufacturingKnowledge(base,{sheetResult,mlPrediction});
+  const finalKnowledge=arbitrateManufacturingKnowledge(base,{sheetResult,mlPrediction,machiningEvidence});
   finalKnowledge.classification=finalKnowledge.capabilities?.structuralProfile?'structural-profile':
     finalKnowledge.capabilities?.unfold?'sheet-metal':
     finalKnowledge.capabilities?.directFlatDxf&&finalKnowledge.processes?.machining?'cuttable-plate-machined':
     finalKnowledge.capabilities?.directFlatDxf?'cuttable-plate':
     finalKnowledge.stock?.stockType==='rolled-plate'?(finalKnowledge.processes?.machining?'rolled-plate-machined':'rolled-plate'):
+    finalKnowledge.stock?.stockType==='plate-blank'&&finalKnowledge.processes?.machining?'plate-machined':
     finalKnowledge.processes?.machining?'machined-part':
     finalKnowledge.stock?'stock-profile':'solid';
   finalKnowledge.diagnostics={...(finalKnowledge.diagnostics||{}),needsMlReview:Boolean(base.diagnostics.needsMlReview&&!mlPrediction?.ok)};
@@ -585,8 +594,8 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
 
 export function applyManufacturingMlPrediction(knowledge,{sheetResult=null,mlPrediction=null}={}){
   if(!knowledge||!mlPrediction?.ok)return knowledge;
-  const out=arbitrateManufacturingKnowledge(knowledge,{sheetResult,mlPrediction});
-  out.classification=out.capabilities?.structuralProfile?'structural-profile':out.capabilities?.unfold?'sheet-metal':out.capabilities?.directFlatDxf&&out.processes?.machining?'cuttable-plate-machined':out.capabilities?.directFlatDxf?'cuttable-plate':out.stock?.stockType==='rolled-plate'?(out.processes?.machining?'rolled-plate-machined':'rolled-plate'):out.processes?.machining?'machined-part':out.stock?'stock-profile':'solid';
+  const out=arbitrateManufacturingKnowledge(knowledge,{sheetResult,mlPrediction,machiningEvidence:knowledge?.diagnostics?.machiningEvidence||null});
+  out.classification=out.capabilities?.structuralProfile?'structural-profile':out.capabilities?.unfold?'sheet-metal':out.capabilities?.directFlatDxf&&out.processes?.machining?'cuttable-plate-machined':out.capabilities?.directFlatDxf?'cuttable-plate':out.stock?.stockType==='rolled-plate'?(out.processes?.machining?'rolled-plate-machined':'rolled-plate'):out.stock?.stockType==='plate-blank'&&out.processes?.machining?'plate-machined':out.processes?.machining?'machined-part':out.stock?'stock-profile':'solid';
   out.confidence=clamp(Math.max(Number(out.confidence)||0,Number(mlPrediction.confidence)||0));
   out.diagnostics={...(out.diagnostics||{}),needsMlReview:false,mlReviewed:true};
   return out;

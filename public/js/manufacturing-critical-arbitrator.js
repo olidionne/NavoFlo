@@ -1,4 +1,4 @@
-/* NavoFlo V8.21.1 — Critical Manufacturing Arbitrator
+/* NavoFlo V8.22.0 — Canonical Manufacturing Arbitrator
  *
  * The recognizers produce geometric feature hypotheses.  This module answers a
  * different question: does a recognized feature actually REQUIRE secondary
@@ -17,9 +17,9 @@ const THROUGH_CUT_TYPES=new Set([
 const DEFINITE_MACHINING_TYPES=new Set([
   'blind-hole','blind-axial-bore','counterbore','countersink','annular-groove','groove-fillet','pocket-floor','blind-pocket',
   'blind-slot','one-sided-recess','edge-chamfer','countersink-chamfer','turned-step','turned-groove','turned-groove-fillet',
-  'turned-chamfer-taper','turned-shoulder','axial-bore','offset-bore','cross-hole','thread','oring-groove'
+  'turned-chamfer-taper','turned-shoulder','turning-axis-proof','axial-bore','offset-bore','cross-hole','thread','oring-groove'
 ]);
-const TURNING_TYPES=new Set(['turned-step','turned-groove','turned-groove-fillet','turned-chamfer-taper','turned-shoulder']);
+const TURNING_TYPES=new Set(['turned-step','turned-groove','turned-groove-fillet','turned-chamfer-taper','turned-shoulder','turning-axis-proof']);
 const DRILLING_TYPES=new Set(['blind-hole','blind-axial-bore','counterbore','countersink','countersink-chamfer','axial-bore','offset-bore','cross-hole','thread']);
 const MILLING_TYPES=new Set(['annular-groove','groove-fillet','pocket-floor','blind-pocket','blind-slot','one-sided-recess','edge-chamfer','oring-groove']);
 
@@ -99,6 +99,12 @@ function hasHardMachiningProof(feature,{plateContext=false}={}){
   // descriptors or topology that proves a one-sided cavity may promote it.
   // ML, surface-family guesses and area deltas remain advisory.
   if(p.ml===true||p.analyticFloor===true)return false;
+  // V8.22: a virtual negative-volume feature bounded by STRICTLY CONCAVE AAG
+  // transitions is manufacturing proof. This is stronger than surface-family
+  // heuristics and remains valid even when the STEP exporter omitted a compound
+  // hole descriptor.
+  if(p.concavityProven===true&&p.negativeVolume===true&&p.topologyProven===true)return true;
+  if(p.gpAx1Proof===true&&Number(p.gpAx1CollinearFraction)>0.80&&String(feature?.process||'')==='turning')return true;
   if(p.exactCompoundHole===true)return true;
   if(p.exactHole===true){
     if(type==='cross-hole')return true;
@@ -124,30 +130,51 @@ export function requiresSecondaryMachining(feature,{plateContext=false}={}){
   return hasHardMachiningProof(feature,{plateContext});
 }
 
-export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPrediction=null}={}){
+export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPrediction=null,machiningEvidence=null}={}){
   if(!knowledge)return knowledge;
   const out={...knowledge};
   const plateContext=Boolean(out?.capabilities?.directFlatDxf||sheetResult?.flatPlate||out?.stock?.stockType==='plate-blank'||(out?.stock?.stockType==='round-bar'&&Number(out?.stock?.aspect)<0.45));
+  const structuralAuthority=Boolean(out?.capabilities?.structuralProfile||out?.stock?.stockType==='structural-profile');
   const localFeatures=[...(out.featureInstances||[])];
   const merged=mergeFeaturePredictions(localFeatures,mlPrediction,{plateContext});
-  const definite=merged.filter(f=>requiresSecondaryMachining(f,{plateContext}));
+  let definite=merged.filter(f=>requiresSecondaryMachining(f,{plateContext}));
+  // Root fillets of W/C/L/U structural stock are legitimate concave geometry.
+  // They are not negative manufacturing volumes by themselves. Under proven
+  // structural authority, retain only exact drilled/compound-hole features as
+  // secondary machining; gp_Ax1/concavity-only stock-shape proofs become advisory.
+  if(structuralAuthority)definite=definite.filter(f=>Boolean(f?.parameters?.exactHole||f?.parameters?.exactCompoundHole));
   const definiteSet=new Set(definite);
   const ambiguous=merged.filter(f=>!definiteSet.has(f)&&DEFINITE_MACHINING_TYPES.has(normalizeType(f.type)));
   // Preserve hypotheses for diagnostics/ML review, but mark them advisory so the
   // UI and manufacturing decision cannot present an unproven pocket as fact.
   const features=merged.map(f=>definiteSet.has(f)||THROUGH_CUT_TYPES.has(normalizeType(f.type))?f:{...f,parameters:{...(f.parameters||{}),advisoryOnly:true}});
   const throughCuts=features.filter(f=>THROUGH_CUT_TYPES.has(normalizeType(f.type)));
-  const turning=definite.some(f=>TURNING_TYPES.has(normalizeType(f.type))||f.process==='turning');
-  const drilling=definite.some(f=>DRILLING_TYPES.has(normalizeType(f.type))||f.process==='drilling');
-  const milling=definite.some(f=>MILLING_TYPES.has(normalizeType(f.type))||f.process==='milling');
+  let turning=definite.some(f=>TURNING_TYPES.has(normalizeType(f.type))||f.process==='turning');
+  let drilling=definite.some(f=>DRILLING_TYPES.has(normalizeType(f.type))||f.process==='drilling');
+  let milling=definite.some(f=>MILLING_TYPES.has(normalizeType(f.type))||f.process==='milling');
+  const constantThickness=Boolean(sheetResult?.ok&&Number(sheetResult?.thickness)>0&&(sheetResult?.flatPlate||Number(sheetResult?.bendCount)>0));
+  const concavityProofs=definite.filter(f=>f?.parameters?.concavityProven===true&&f?.parameters?.negativeVolume===true);
+  const turningProof=definite.find(f=>f?.parameters?.gpAx1Proof===true&&Number(f?.parameters?.gpAx1CollinearFraction)>0.80);
+  // Canonical fallback requested for V8.22: if sheet thickness is NOT proven
+  // constant and a strict concave negative-volume proof exists, "solid / unknown"
+  // is no longer an acceptable terminal state. Structural stock remains the one
+  // authority that can contain concave root fillets as part of the raw section.
+  let forcedByConcavity=false;
+  if(!structuralAuthority&&!constantThickness&&concavityProofs.length){
+    forcedByConcavity=true;
+    if(turningProof||machiningEvidence?.turning?.recognized)turning=true;
+    else if(concavityProofs.some(f=>f.process==='drilling'))drilling=true;
+    else milling=true;
+  }
   const machining=turning||drilling||milling;
   const cutting=Boolean(out?.processes?.cutting||out?.capabilities?.directFlatDxf||throughCuts.length);
   out.featureInstances=features;
   out.processes={...(out.processes||{}),cutting,turning,drilling,milling,machining,possibleMachining:!machining&&ambiguous.length>0};
   out.machined=machining;
-  out.process=machining?'machining':'stock-profile';
+  out.process=turning?'turning':machining?'machining':'stock-profile';
+  out.canonicalDecision=structuralAuthority?'structural-profile':turning?'turning':machining&&(out?.stock?.stockType==='plate-blank'||out?.capabilities?.directFlatDxf)?'plate-machining':machining?'machining':out?.process||'stock-profile';
   out.features={...(out.features||{}),recognizedInstances:features.length,secondaryMachining:machining,definiteMachiningInstances:definite.length,ambiguousMachiningInstances:ambiguous.length,throughCutInstances:throughCuts.length};
-  out.diagnostics={...(out.diagnostics||{}),criticalArbitrator:true,mlUsed:Boolean(mlPrediction?.ok),mlEngine:mlPrediction?.engine||null,definiteMachiningCount:definite.length,ambiguousMachiningCount:ambiguous.length,throughCutCount:throughCuts.length,proofPolicy:'hard-geometry-before-machining'};
+  out.diagnostics={...(out.diagnostics||{}),criticalArbitrator:true,mlUsed:Boolean(mlPrediction?.ok),mlEngine:mlPrediction?.engine||null,definiteMachiningCount:definite.length,ambiguousMachiningCount:ambiguous.length,throughCutCount:throughCuts.length,proofPolicy:'strict-concavity-negative-volume-before-ml',constantThickness,strictConcavityProofCount:concavityProofs.length,forcedByConcavity,turningGpAx1Fraction:Number(machiningEvidence?.turning?.collinearFraction)||null,canonicalDecision:out.canonicalDecision};
 
   const evidence=new Set(out.evidence||[]);
   // Rebuild manufacturing evidence from the final feature set, otherwise stale
@@ -166,4 +193,4 @@ export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPr
   return out;
 }
 
-export const CRITICAL_ARBITRATOR_VERSION='8.21.1';
+export const CRITICAL_ARBITRATOR_VERSION='8.22.0';
