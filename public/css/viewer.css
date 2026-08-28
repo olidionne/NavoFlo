@@ -650,6 +650,27 @@
   margin-top:4px;
 }
 
+/* McMaster-Carr link */
+.mcmaster-link-row{
+  margin-top:10px;
+}
+.mcmaster-link-btn{
+  display:inline-block;
+  padding:6px 11px;
+  background:rgba(53,211,154,.12);
+  border:1px solid rgba(53,211,154,.35);
+  border-radius:6px;
+  color:#35d39a;
+  font:700 9px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  text-decoration:none;
+  letter-spacing:.06em;
+  transition:background .15s,border-color .15s;
+}
+.mcmaster-link-btn:hover{
+  background:rgba(53,211,154,.22);
+  border-color:rgba(53,211,154,.6);
+}
+
 .cad-workspace.is-fullscreen .custom-properties-list dt,
 .cad-workspace.is-fullscreen .custom-properties-list dd{
   font-size:11px;

@@ -12,6 +12,7 @@ import { matchAiscProfile, matchAiscProfileWithName, aiscDesignationHint } from 
 import { fastenerNameHint } from './fastener-recognition.js?v=8.21.1';
 import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.24.2';
 import { shouldUseFullClassificationDescriptors, strongGeometryHypothesis, choosePreservedGeometryHypothesis } from './manufacturing-analysis-policy.js?v=8.23.1';
+import { detectMcMasterPN, mcMasterProductUrl } from './mcmaster-pn.js?v=8.24.4';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -69,6 +70,7 @@ const E = {
   stepMeta:$('step-meta-section'), stepName:$('step-name'), stepSchema:$('step-schema'),
   stepDate:$('step-date'), stepAuthor:$('step-author'), stepOrg:$('step-org'),
   stepOrigin:$('step-origin'), stepTree:$('step-tree'), stepCustomSection:$('step-custom-section'), stepCustomProperties:$('step-custom-properties'), stepCustomNote:$('step-custom-note'),
+  mcMasterSection:$('mcmaster-section'), mcMasterPnDisplay:$('mcmaster-pn-display'), mcMasterSourceDisplay:$('mcmaster-source-display'), mcMasterLink:$('mcmaster-link'),
   floatingActions:$('cad-floating-actions'), sheetMetal:$('sheetmetal-toggle'), dxfExportFloat:$('dxf-export-float'), sheetMetalSection:$('sheetmetal-section'),
   smMaterial:$('sm-material-class'), smThickness:$('sm-thickness'), smThicknessUnit:$('sm-thickness-unit'),
   smRadius:$('sm-radius'), smRadiusUnit:$('sm-radius-unit'), smAngle:$('sm-angle'),
@@ -191,6 +193,7 @@ let sectionCapRoot=null,sectionCapPlaneMesh=null;
 let cameraProjectionMode='orthographic';
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
 let currentStats = null, currentStepHeader = null, currentStepResult = null, currentStepProperties = [];
+let currentMcMasterPN = null;  // { pn, source, field? } or null
 let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
 let flatSurfaceMeshes = [], flatEdgeObjects = [], flatVertexObjects = [];
 let selectionMode = 'auto', measureEnabled = false, multiMeasureEnabled=false, selected = [], currentMeasureResult = null, selectionHighlightMap = new Map();
@@ -2445,6 +2448,9 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restor
         if(currentFile!==main)return;
         currentStepProperties=properties;
         renderStepCustomProperties();
+        // McMaster PN detection: run after both filename and properties are available
+        currentMcMasterPN=detectMcMasterPN(main.name,currentStepProperties);
+        renderMcMasterSection();
       }).catch(error=>console.warn('[NavoFlo STEP metadata]',error));
       buildExactStepScene(result);
       restoreAssemblyTreeState(restoreAssembly);
@@ -2458,6 +2464,9 @@ async function loadFileSet(files,{restoreView=null,restoreSheetMetal=null,restor
       E.unitSelect.value='u';
       currentStepProperties=[];
       await buildMeshScene(main,files);
+      // McMaster PN: filename-only detection for non-STEP formats
+      currentMcMasterPN=detectMcMasterPN(main.name,[]);
+      renderMcMasterSection();
     }
 
     finalizeLoadedModel();
@@ -4780,6 +4789,24 @@ function renderStepCustomProperties() {
   E.stepCustomNote.textContent=`${currentStepProperties.length} ${T.metadataFound} · ${T.metadataScan}`;
 }
 
+function renderMcMasterSection() {
+  if(!E.mcMasterSection)return;
+  if(!currentMcMasterPN){
+    E.mcMasterSection.hidden=true;
+    return;
+  }
+  const {pn,source,field}=currentMcMasterPN;
+  E.mcMasterSection.hidden=false;
+  if(E.mcMasterPnDisplay) E.mcMasterPnDisplay.textContent=pn;
+  if(E.mcMasterSourceDisplay){
+    E.mcMasterSourceDisplay.textContent=source==='filename'?(FR?'Nom de fichier':'Filename'):field||source;
+  }
+  if(E.mcMasterLink){
+    E.mcMasterLink.href=mcMasterProductUrl(pn);
+    E.mcMasterLink.hidden=false;
+  }
+}
+
 async function parseStepHeader(file) {
   try {
     const text=await file.slice(0,2*1024*1024).text();
@@ -4816,14 +4843,14 @@ async function clearModel(showMessage=true) {
   }
   modelRoot.position.set(0,0,0);
   surfaceMeshes=[];edgeObjects=[];vertexObjects=[];visualEdges=[];baseMaterials=new Set();logicalFaceGroupCache=new Map();logicalEdgeGroupCache=new Map();logicalHiddenEdgeKeys.clear();
-  currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];manufacturingCapability=null;
+  currentModel=null;currentFile=null;currentFormat='';currentUnit='u';displayUnit='u';currentStats=null;currentStepHeader=null;currentStepResult=null;currentStepProperties=[];currentMcMasterPN=null;manufacturingCapability=null;
   currentAssemblyFocus=null;currentAssemblyMode=false;currentAssemblyHierarchyAvailable=false;currentHierarchyRootSpecs=[];currentActiveGeometryIds=new Set();assemblyTreeRecords=new Map();assemblySyntheticGroups.clear();assemblyOccurrenceRecords=[];assemblyExpandedKeys.clear();assemblyHighlightedMeshes.clear();assemblySelectedKey=null;assemblyContextKey=null;
   resetSheetMetalForModel();
   modelBounds=null;modelSize=1;clipEnabled=false;edgesVisible=navo3dPreferences.edgesVisible;blackEdgeMaterial.visible=edgesVisible;measureEnabled=false;multiMeasureEnabled=false;
   cadNav.active=false;cadNav.pointerId=null;cadNav.button=-1;cadNav.mode=null;
   cadNav.pivot.set(0,0,0);cadNav.wheelFocus.set(0,0,0);updateCadCursor();
   E.section.classList.remove('active');E.sectionPanel.hidden=true;E.edges.classList.toggle('active',edgesVisible);E.gridToggle.classList.toggle('active',navo3dPreferences.gridVisible);E.measure.classList.remove('active');E.multiMeasure?.classList.remove('active');E.multiMeasure?.setAttribute('aria-pressed','false');
-  E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.sheetMetalSection.hidden=true;E.empty.classList.remove('hidden');
+  E.measureCard.hidden=true;E.propsDrawer.hidden=true;E.workspace.classList.remove('properties-open');E.stepMeta.hidden=true;E.sheetMetalSection.hidden=true;if(E.mcMasterSection)E.mcMasterSection.hidden=true;E.empty.classList.remove('hidden');
   if(E.assemblyTreePanel)E.assemblyTreePanel.hidden=true;if(E.assemblyTreeList)E.assemblyTreeList.replaceChildren();setAssemblyTreeStatus('');setAssemblyBatchBusy(false);
   E.statusFile.textContent=showMessage?T.noModel:'—';E.statusFormat.textContent='—';E.statusUnits.textContent='—';E.unitSelect.value='u';
   enableTools(false);revokeObjectUrls();
