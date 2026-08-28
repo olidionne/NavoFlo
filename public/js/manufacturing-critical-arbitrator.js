@@ -1,4 +1,4 @@
-/* NavoFlo V8.23.0 — Canonical Manufacturing Arbitrator
+/* NavoFlo V8.23.1 — Canonical Manufacturing Arbitrator
  *
  * The recognizers produce geometric feature hypotheses.  This module answers a
  * different question: does a recognized feature actually REQUIRE secondary
@@ -91,6 +91,19 @@ export function mergeFeaturePredictions(deterministic=[],mlPrediction=null,{plat
   const seen=new Set();return out.filter(f=>{const k=`${normalizeType(f.type)}:${keyFaces(f.faceIds)}`;if(seen.has(k))return false;seen.add(k);return true;});
 }
 
+function suppressGenericFragmentsExplainedByThroughCuts(features,{plateContext=false}={}){
+  if(!plateContext)return features;
+  const through=(features||[]).filter(f=>THROUGH_CUT_TYPES.has(normalizeType(f.type))&&f?.parameters?.topologyProven!==false);
+  if(!through.length)return features;
+  const weak=new Set(['cross-hole','pocket-floor','one-sided-recess','offset-bore']);
+  return(features||[]).filter(f=>{
+    const type=normalizeType(f.type);if(!weak.has(type))return true;
+    const A=new Set((f.faceIds||[]).map(Number));if(!A.size)return true;
+    for(const t of through){const B=new Set((t.faceIds||[]).map(Number));let n=0;for(const id of A)if(B.has(id))n++;if(n/A.size>=0.50||n>=Math.min(2,A.size))return false;}
+    return true;
+  });
+}
+
 function hasHardMachiningProof(feature,{plateContext=false}={}){
   const type=normalizeType(feature?.type),p=feature?.parameters||{};
   if(!type||THROUGH_CUT_TYPES.has(type))return false;
@@ -140,7 +153,8 @@ export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPr
   const plateContext=Boolean(out?.capabilities?.directFlatDxf||sheetResult?.flatPlate||out?.stock?.stockType==='plate-blank'||(out?.stock?.stockType==='round-bar'&&Number(out?.stock?.aspect)<0.45));
   const structuralAuthority=Boolean(out?.capabilities?.structuralProfile||out?.stock?.stockType==='structural-profile');
   const localFeatures=[...(out.featureInstances||[])];
-  const merged=mergeFeaturePredictions(localFeatures,mlPrediction,{plateContext});
+  const mergedRaw=mergeFeaturePredictions(localFeatures,mlPrediction,{plateContext});
+  const merged=suppressGenericFragmentsExplainedByThroughCuts(mergedRaw,{plateContext});
   let definite=merged.filter(f=>requiresSecondaryMachining(f,{plateContext}));
   // Root fillets of W/C/L/U structural stock are legitimate concave geometry.
   // They are not negative manufacturing volumes by themselves. Under proven
@@ -197,4 +211,4 @@ export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPr
   return out;
 }
 
-export const CRITICAL_ARBITRATOR_VERSION='8.23.0';
+export const CRITICAL_ARBITRATOR_VERSION='8.23.1';

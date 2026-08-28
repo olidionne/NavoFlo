@@ -1,4 +1,4 @@
-/* NavoFlo V8.23.0 — Manufacturing Recognition Engine (MRE)
+/* NavoFlo V8.23.1 — Manufacturing Recognition Engine (MRE)
  *
  * Architecture:
  *   exact B-Rep/AAG -> stock hypothesis -> virtual delta/removal features
@@ -11,9 +11,9 @@
  */
 import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.20.0';
 import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.20.0';
-import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.23.0';
+import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.23.1';
 import { detectFastenerComponent, FASTENER_RECOGNIZER_VERSION } from './fastener-recognition.js?v=8.21.1';
-import { analyzeMachiningEvidence, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.23.0';
+import { analyzeMachiningEvidence, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.23.1';
 
 const EPS=1e-8;
 const V={
@@ -313,6 +313,24 @@ function mergeThroughCutComponents(features){
   });
 }
 
+function suppressGenericMachiningFragmentsCoveredByThroughCuts(features,{plateContext=false}={}){
+  if(!plateContext)return features;
+  const throughTypes=new Set(['through-slot','through-profile','through-pocket','through-passage','through-step','through-polygon','through-hole']);
+  const genericTypes=new Set(['cross-hole','pocket-floor','one-sided-recess','offset-bore']);
+  const through=(features||[]).filter(f=>throughTypes.has(f.type)&&f?.parameters?.topologyProven!==false);
+  if(!through.length)return features;
+  return(features||[]).filter(f=>{
+    if(!genericTypes.has(f.type))return true;
+    // Never erase a genuinely one-sided/exact manufacturing feature. Compound
+    // holes, blind holes and grooves use other feature types and therefore do
+    // not enter this branch. Generic fragments lose only when their own B-Rep
+    // faces are already explained by one proven full-thickness cut component.
+    const A=new Set((f.faceIds||[]).map(Number));if(!A.size)return true;
+    for(const t of through){const B=new Set((t.faceIds||[]).map(Number));let overlap=0;for(const id of A)if(B.has(id))overlap++;const ratio=overlap/Math.max(1,A.size);if(ratio>=0.50||overlap>=Math.min(2,A.size))return false;}
+    return true;
+  });
+}
+
 function recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}){
   const ctx0=plateContext(stock,sheetResult,faceInfo);if(!ctx0)return[];const {normal,thickness}=ctx0,ctx=plateMachiningContext(faceInfo,aag,normal,thickness),features=[];
   const used=new Set();
@@ -482,6 +500,24 @@ function recognizeRolledPlateFeatures({faceInfo,stock}){
   return dedupeFeatures(features);
 }
 
+function sheetFormingFaceIds(sheetResult){
+  const ids=new Set();for(const id of sheetResult?.panelFaceIds||[])ids.add(Number(id));for(const b of sheetResult?.bendLines||[])for(const id of b?.sourceFaceIds||[])ids.add(Number(id));for(const sf of sheetResult?.selectionFaces||[])if(sf?.kind==='panel'||sf?.kind==='bend')for(const id of sf?.sourceFaceIds||[])ids.add(Number(id));return ids;
+}
+function recognizeExactChamfers({faceInfo,sheetResult,structuralProfile}={}){
+  // DescribeExactChamfer is an OCCT topological feature descriptor, not a guess
+  // from a sloped planar face. Keep forming panels/bend skins out of the feature
+  // set so a press-brake wall cannot become a machined bevel.
+  const forming=sheetFormingFaceIds(sheetResult),out=[];
+  for(const f of faceInfo||[]){
+    const id=Number(f.id);if(!Number.isFinite(id)||!f.chamfer||forming.has(id))continue;
+    // On proven structural stock a catalog end bevel can be a cut condition; keep
+    // it advisory unless the component is otherwise non-structural.
+    const confidence=structuralProfile?0.90:0.995;
+    out.push(feature('edge-chamfer','milling',[id],confidence,{exactChamfer:true,topologyProven:true,profile:String(f.chamfer.profile||''),variant:String(f.chamfer.variant||''),distanceA:Number(f.chamfer.distanceA)||null,distanceB:Number(f.chamfer.distanceB)||null,supportAngle:Number(f.chamfer.supportAngle)||null}));
+  }
+  return dedupeFeatures(out);
+}
+
 function recognizeGenericBarFeatures({faceInfo,stock,sheetResult}){
   if(!stock||['round-bar','plate-blank','sheet-metal','rolled-plate','structural-profile'].includes(stock.stockType)||sheetResult?.flatPlate)return[];const axis=canonicalAxis(stock.axis),features=[];if(!axis)return features;
   for(const f of faceInfo||[]){const family=fam(f.family),a=canonicalAxis(f.axisDirection);if(['cylinder','cylindrical'].includes(family)&&f.hole){const align=a?Math.abs(V.dot(a,axis)):0;features.push(feature(align<0.98?'cross-hole':'axial-bore','drilling',[Number(f.id)],f.hole.isThrough===false?0.99:0.97,{diameterMm:Number(f.radius)*2,exactHole:true,through:f.hole.isThrough}));}else if(f.compoundHole){const type=fam(f.compoundHole.family)==='countersink'?'countersink':'counterbore';features.push(feature(type,'drilling',[Number(f.id)],0.995,{exactCompoundHole:true}));}}
@@ -570,7 +606,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
     const processes={cutting:false,bending:false,rolling:false,turning:false,drilling:false,milling:false,machining:false,profile:false,fastener:true};
     const stock={stockType:'fastener',fastenerType:fastener.type,lengthMm:Number(fastener.lengthMm)||null,diameterMm:Number(fastener.diameterMm)||null,confidence:Number(fastener.confidence)||0.95,source:fastener.source||'deterministic-fastener',fastener};
     return{
-      kind:'manufacturing-knowledge',knowledgeVersion:8,classification:'fastener',stockType:'fastener',fastenerType:fastener.type,fastener,stock,
+      kind:'manufacturing-knowledge',knowledgeVersion:9,classification:'fastener',stockType:'fastener',fastenerType:fastener.type,fastener,stock,
       lengthMm:stock.lengthMm,diameterMm:stock.diameterMm,confidence:stock.confidence,machined:false,process:'fastener',processes,
       capabilities:{unfold:false,export2dDxf:false,directFlatDxf:false,structuralProfile:false,rolledPlate:false,fastener:true},
       featureInstances:[],features:{recognizedInstances:0,secondaryMachining:false,definiteMachiningInstances:0,throughCutInstances:0},
@@ -580,8 +616,14 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
     };
   }
   let legacy=null;try{legacy=classifyManufacturingGeometry({geometry,faceInfo,edgeInfo});}catch{}
-  const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile});
-  const machiningEvidence=analyzeMachiningEvidence({aag,faceInfo,geometry,structuralProfile,sheetResult,stock});
+  const physicalSheetShell=Boolean(sheetResult?.ok&&Number(sheetResult?.bendCount)>0&&sheetResult?.diagnostics?.pairedBendEvidence?.ok&&sheetResult?.diagnostics?.pairedBendEvidence?.radiusThicknessClosure!==false);
+  // A structural-profile object left in sheet diagnostics is a rejected competing
+  // hypothesis, not manufacturing authority. Once Rext-Rint=T is proven on the
+  // same gp_Ax1 over a topological bend, do not let that rejected profile leak
+  // back into stock normalization and relabel the formed part as U/C/W/L.
+  const effectiveStructuralProfile=physicalSheetShell?null:structuralProfile;
+  const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile:effectiveStructuralProfile});
+  const machiningEvidence=analyzeMachiningEvidence({aag,faceInfo,geometry,structuralProfile:effectiveStructuralProfile,sheetResult,stock});
   let features=[...(machiningEvidence.features||[])];
   const roundPlateContext=Boolean(sheetResult?.flatPlate&&stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45);
   if(roundPlateContext)features.push(...recognizeRoundPlateSecondaryFeatures({faceInfo,stock}));
@@ -589,10 +631,16 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   features.push(...recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}));
   features.push(...recognizeRolledPlateFeatures({geometry,faceInfo,aag,stock,sheetResult}));
   features.push(...recognizeGenericBarFeatures({geometry,faceInfo,aag,stock,sheetResult}));
+  features.push(...recognizeExactChamfers({faceInfo,sheetResult,structuralProfile:effectiveStructuralProfile}));
+  const plateLikeContext=Boolean(sheetResult?.flatPlate||stock?.stockType==='plate-blank'||(stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45));
+  // Arbitration occurs AFTER all local recognizers have spoken. A topologically
+  // proven through-cut owns its wall faces and suppresses lower-level pocket /
+  // cross-hole fragments generated from the same concave perimeter.
+  features=suppressGenericMachiningFragmentsCoveredByThroughCuts(features,{plateContext:plateLikeContext});
   features=dedupeFeatures(features);
-  const processes=processSummary(features,{sheetResult,structuralProfile});
+  const processes=processSummary(features,{sheetResult,structuralProfile:effectiveStructuralProfile});
   const suppressFlatDxf=strongRoundShaft(stock,processes,features);
-  const structural=Boolean(structuralProfile);
+  const structural=Boolean(effectiveStructuralProfile);
   const capabilities={
     // A proven structural profile has authority over local fillet cylinders that
     // happen to look like press-brake bend pairs.  Never expose unfold/DXF for it.
@@ -605,7 +653,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   const evidence=evidenceFromFeatures(features,legacy,{stock}),compat=compatibilityProjection(stock,legacy,processes,features,evidence);
   const machineConfidence=featureConfidence(features),stockConfidence=Number(stock?.confidence)||0;
   let classification='solid';
-  if(structuralProfile)classification='structural-profile';
+  if(effectiveStructuralProfile)classification='structural-profile';
   else if(capabilities.unfold)classification='sheet-metal';
   else if(capabilities.directFlatDxf&&processes.machining)classification='cuttable-plate-machined';
   else if(capabilities.directFlatDxf)classification='cuttable-plate';
@@ -623,13 +671,13 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   const localConfidence=clamp(Math.max(stockConfidence,machineConfidence*0.96));
   const base={
     ...compat,
-    kind:'manufacturing-knowledge',knowledgeVersion:8,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
+    kind:'manufacturing-knowledge',knowledgeVersion:9,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
     aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount,strictConcaveEdgeCount:Number(machiningEvidence?.negativeVolumes?.strictConcaveEdgeCount)||0,negativeVolumeCount:Number(machiningEvidence?.negativeVolumes?.count)||0},
     confidence:localConfidence,
     diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,surfaceSignals:signals,
       analysisPipeline:['brep-aag','strict-concave-transition-proof','virtual-negative-volumes','same-domain-healing','commercial-stock-prior','stock-hypothesis','instance-through-cut-proof','blind-hole-pocket-groove-proof','gp-ax1-turning-proof','removal-feature-decomposition','canonical-manufacturing-arbitration'],
       machiningEvidence:{negativeVolumes:machiningEvidence?.negativeVolumes||null,turning:machiningEvidence?.turning||null},machiningEvidenceVersion:MACHINING_EVIDENCE_VERSION,
-      rawStockKnowledgeVersion:RAW_STOCK_KNOWLEDGE_VERSION,criticalArbitratorVersion:CRITICAL_ARBITRATOR_VERSION}
+      rawStockKnowledgeVersion:RAW_STOCK_KNOWLEDGE_VERSION,criticalArbitratorVersion:CRITICAL_ARBITRATOR_VERSION,physicalSheetShellAuthority:physicalSheetShell}
   };
   base.diagnostics.needsMlReview=computeNeedsMlReview({classification,capabilities,processes,features,signals,stock,confidence:localConfidence});
   const finalKnowledge=arbitrateManufacturingKnowledge(base,{sheetResult,mlPrediction,machiningEvidence});

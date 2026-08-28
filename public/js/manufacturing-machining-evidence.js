@@ -1,4 +1,4 @@
-/* NavoFlo V8.23.0 — deterministic machining evidence from the exact AAG.
+/* NavoFlo V8.23.1 — deterministic machining evidence from the exact AAG.
  *
  * This module does NOT guess a process from a surface family. It consumes
  * exact B-Rep adjacency plus the worker's strict transition classification and
@@ -34,6 +34,47 @@ function faceCenter(f){return vec(f?.localCentroid)||vec(f?.localCenter);}
 function axisRecord(f){const axis=canonicalAxis(f?.axisDirection),center=vec(f?.localCenter);return axis&&center&&center.every(Number.isFinite)?{id:Number(f.id),face:f,family:fam(f.family),axis,center,radius:Number(f.radius),area:Number(f.area)||0}:null;}
 function uniqueRadii(records,scaleMm){const tol=Math.max(scaleMm*0.002,0.03),out=[];for(const r of records.map(x=>x.radius).filter(x=>Number.isFinite(x)&&x>0).sort((a,b)=>a-b)){if(!out.length||Math.abs(out.at(-1)-r)>tol)out.push(r);}return out;}
 
+
+function dominantPlateSkinFaceSet(faceInfo,stock,sheetResult,scaleMm=100){
+  // A through-cut perimeter is concave against BOTH physical support skins.
+  // Those skins are material that remains, never a negative-volume floor.
+  // Identify the two extreme same-domain planar skins independently from the
+  // sheet-metal panel list because exporters often return only one skin there.
+  const flatContext=Boolean(sheetResult?.flatPlate||stock?.stockType==='plate-blank'||(stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45));
+  if(!flatContext)return new Set();
+  const planes=(faceInfo||[]).filter(f=>fam(f.family)==='plane').map(f=>({
+    f,id:Number(f.id),n:planeNormal(f),c:faceCenter(f),area:Number(f.area)||0
+  })).filter(x=>Number.isFinite(x.id)&&x.n&&x.c&&x.c.every(Number.isFinite)&&x.area>EPS);
+  if(planes.length<2)return new Set();
+  const candidates=[];
+  const pushAxis=a=>{a=canonicalAxis(a);if(a&&candidates.every(x=>Math.abs(dot(x,a))<0.9995))candidates.push(a);};
+  if(stock?.stockType==='plate-blank')pushAxis(stock.axis);
+  if(stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45)pushAxis(stock.axis);
+  const fixed=(faceInfo||[]).find(f=>Number(f.id)===Number(sheetResult?.fixedFaceId));pushAxis(fixed?.localNormal);
+  for(const pl of [...planes].sort((a,b)=>b.area-a.area).slice(0,8))pushAxis(pl.n);
+  const expectedT=Number(sheetResult?.thickness)||Number(stock?.thicknessMm)||Number(stock?.lengthMm)||null;
+  let best=null;
+  for(const axis of candidates){
+    const parallel=planes.filter(pl=>Math.abs(dot(pl.n,axis))>=0.997);if(parallel.length<2)continue;
+    const vals=parallel.map(pl=>dot(pl.c,axis)),lo=Math.min(...vals),hi=Math.max(...vals),span=hi-lo;if(!(span>EPS))continue;
+    const tol=Math.max((Number.isFinite(expectedT)&&expectedT>EPS?expectedT:span)*0.045,scaleMm*1e-5,1e-4);
+    const low=parallel.filter(pl=>Math.abs(dot(pl.c,axis)-lo)<=tol),high=parallel.filter(pl=>Math.abs(dot(pl.c,axis)-hi)<=tol);
+    if(!low.length||!high.length)continue;
+    const lowArea=low.reduce((sum,x)=>sum+x.area,0),highArea=high.reduce((sum,x)=>sum+x.area,0),areaRatio=Math.min(lowArea,highArea)/Math.max(lowArea,highArea,EPS);
+    const thicknessError=Number.isFinite(expectedT)&&expectedT>EPS?Math.abs(span-expectedT)/Math.max(expectedT,EPS):0;
+    // Prefer the axis that has two large congruent physical skins and agrees with
+    // the independently inferred plate thickness. This rejects pocket floors.
+    const score=Math.min(lowArea,highArea)*(0.65+0.35*areaRatio)/(1+thicknessError*4);
+    if(!best||score>best.score)best={axis,low,high,span,areaRatio,score};
+  }
+  if(!best||best.areaRatio<0.35)return new Set();
+  const ids=new Set([...best.low,...best.high].map(x=>Number(x.id)));
+  // Expand the physical planes through OCCT same-domain healing so a cosmetic
+  // SolidWorks/Inventor seam cannot become a fake milling pocket.
+  let changed=true;while(changed){changed=false;for(const f of faceInfo||[]){const id=Number(f.id),domain=(f.sameDomainFaceIds||[]).map(Number);if(ids.has(id)||domain.some(x=>ids.has(x))){if(!ids.has(id)){ids.add(id);changed=true;}for(const x of domain)if(!ids.has(x)){ids.add(x);changed=true;}}}}
+  return ids;
+}
+
 function sheetNativeFaceSet(sheetResult){
   const ids=new Set();
   for(const id of sheetResult?.panelFaceIds||[])ids.add(Number(id));
@@ -44,7 +85,11 @@ function sheetNativeFaceSet(sheetResult){
 function edgeIsSuppressedSheetTransition(edge,sheetNativeFaceIds){
   if(!sheetNativeFaceIds?.size)return false;
   const owners=(edge?.owners||[]).map(Number).filter(Number.isFinite);
-  return owners.length===2&&owners.every(id=>sheetNativeFaceIds.has(id));
+  // A physical sheet support skin is the boundary of a removed volume, not part
+  // of that negative volume. Exclude every strict-concavity arc that touches a
+  // proven support/forming skin. Otherwise one large top skin becomes a graph
+  // bridge joining every laser-cut opening into one fake pocket/counterbore.
+  return owners.some(id=>sheetNativeFaceIds.has(id));
 }
 function machiningConcaveEdge(edge,sheetNativeFaceIds){return edgeIsStrictConcave(edge)&&!edgeIsSuppressedSheetTransition(edge,sheetNativeFaceIds);}
 
@@ -74,7 +119,7 @@ function wallPerpendicularToFloor(wall,floor){const fn=planeNormal(floor);if(!fn
 function detectPocketFloors(aag,faceInfo,negativeVolumes,sheetNativeFaceIds=null,allowedFloorNormals=null){
   const faceById=new Map((faceInfo||[]).map(f=>[Number(f.id),f])),out=[];
   for(const floor of faceInfo||[]){
-    if(fam(floor.family)!=='plane')continue;const fn=planeNormal(floor);if(!fn)continue;
+    if(fam(floor.family)!=='plane')continue;if(sheetNativeFaceIds?.has(Number(floor.id)))continue;const fn=planeNormal(floor);if(!fn)continue;
     // On a proven bent sheet, a milling-pocket floor must be parallel to one of
     // the actual panel skins. Perimeter/thickness walls can form perfectly
     // concave planar corners but are not pocket floors (503-00-01 regression).
@@ -144,10 +189,19 @@ export function detectTurningByGpAx1(faceInfo=[],scaleMm=100){
   return{recognized,confidence,revolutionFaceCount:records.length,dominantFaceCount:best?.members.length||0,collinearFraction:fraction,axis:best?.axis||null,axisCenter:best?.center||null,axisToleranceMm:axisTol,distinctRadii:unique.length,cylinderCount,coneCount,torusCount,faceIds:best?.members.map(m=>m.id)||[]};
 }
 
-function detectConcaveGrooves(aag,faceInfo,negativeVolumes,turning,sheetNativeFaceIds=null){
+function detectConcaveGrooves(aag,faceInfo,negativeVolumes,turning,sheetNativeFaceIds=null,stock=null,sheetResult=null){
   const byId=new Map((faceInfo||[]).map(f=>[Number(f.id),f])),out=[];
   for(const face of faceInfo||[]){
     const family=fam(face.family);if(!CYL_FAMILIES.has(family)&&!TORUS_FAMILIES.has(family))continue;
+    // On an ordinary laser-cut plate, every rounded external corner / obround
+    // wall is cylindrical and may have two concave corner transitions. That is
+    // NOT an annular groove. Cylindrical groove evidence on flat plate requires
+    // a partial-depth radial face; full-thickness cylinders are left to the
+    // through-cut classifier. Toroidal groove floors remain valid evidence.
+    if(CYL_FAMILIES.has(family)&&Boolean(sheetResult?.flatPlate||stock?.stockType==='plate-blank')){
+      const span=Number(face.axisSpan),t=Number(sheetResult?.thickness)||Number(stock?.thicknessMm);
+      if(!(Number.isFinite(span)&&Number.isFinite(t)&&t>EPS&&span<t*0.90))continue;
+    }
     const edges=incidentConcaveEdges(aag,Number(face.id),sheetNativeFaceIds);if(edges.length<2)continue;
     const neighbors=edges.map(e=>byId.get(otherOwner(e,face.id))).filter(Boolean),planes=neighbors.filter(n=>fam(n.family)==='plane');
     if(planes.length<2&&family!=='torus')continue;
@@ -166,12 +220,16 @@ export function analyzeMachiningEvidence({aag,faceInfo=[],geometry=null,structur
   // panel↔bend transitions are stock-forming geometry, not removed material.
   // Remove only edges whose TWO owners belong to the proven sheet skin; an edge
   // from a sheet skin to a hole/pocket wall remains eligible machining evidence.
-  const nativeSheetFaces=sheetNativeFaceSet(sheetResult),faceById=new Map((faceInfo||[]).map(f=>[Number(f.id),f]));
-  const panelNormals=Number(sheetResult?.bendCount)>0?[...new Set((sheetResult?.panelFaceIds||[]).map(id=>faceById.get(Number(id))).map(planeNormal).filter(Boolean).map(n=>n.map(v=>Math.round(v*1e6)/1e6).join(',')))].map(k=>k.split(',').map(Number)):null;
+  const nativeSheetFaces=sheetNativeFaceSet(sheetResult),externalPlateSkins=dominantPlateSkinFaceSet(faceInfo,stock,sheetResult,scaleMm),faceById=new Map((faceInfo||[]).map(f=>[Number(f.id),f]));
+  for(const id of externalPlateSkins)nativeSheetFaces.add(Number(id));
+  let allowedFloorNormals=Number(sheetResult?.bendCount)>0?[...new Set((sheetResult?.panelFaceIds||[]).map(id=>faceById.get(Number(id))).map(planeNormal).filter(Boolean).map(n=>n.map(v=>Math.round(v*1e6)/1e6).join(',')))].map(k=>k.split(',').map(Number)):[];
+  if(!allowedFloorNormals.length&&Boolean(sheetResult?.flatPlate||stock?.stockType==='plate-blank'||(stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45))){
+    const n=canonicalAxis(stock?.axis)||planeNormal(faceById.get(Number(sheetResult?.fixedFaceId)));if(n)allowedFloorNormals=[n];
+  }
   const negativeVolumes=buildNegativeVolumeComponents(aag,faceInfo,{sheetNativeFaceIds:nativeSheetFaces}),turning=detectTurningByGpAx1(faceInfo,scaleMm,stock),features=[];
   features.push(...detectBlindAndCompoundDrilling(aag,faceInfo,negativeVolumes,scaleMm,nativeSheetFaces));
-  features.push(...detectPocketFloors(aag,faceInfo,negativeVolumes,nativeSheetFaces,panelNormals));
-  features.push(...detectConcaveGrooves(aag,faceInfo,negativeVolumes,turning,nativeSheetFaces));
+  features.push(...detectPocketFloors(aag,faceInfo,negativeVolumes,nativeSheetFaces,allowedFloorNormals));
+  features.push(...detectConcaveGrooves(aag,faceInfo,negativeVolumes,turning,nativeSheetFaces,stock,sheetResult));
   // A structural section may contain stock root fillets that are geometrically
   // concave. Structural-profile authority therefore suppresses a global turning
   // promotion. Real secondary features can still be retained by their local
@@ -181,7 +239,7 @@ export function analyzeMachiningEvidence({aag,faceInfo=[],geometry=null,structur
     const axisConcave=turning.faceIds.some(id=>concaveOnAxis.has(Number(id)));
     features.push(feature('turning-axis-proof','turning',turning.faceIds,turning.confidence,{gpAx1Proof:true,gpAx1CollinearFraction:turning.collinearFraction,revolutionFaceCount:turning.revolutionFaceCount,dominantFaceCount:turning.dominantFaceCount,distinctRadii:turning.distinctRadii,concavityCorroborated:axisConcave,topologyProven:true}));
   }
-  return{features:dedupe(features),negativeVolumes:{count:negativeVolumes.components.length,strictConcaveEdgeCount:negativeVolumes.strictConcaveEdgeCount,suppressedSheetNativeFaceCount:nativeSheetFaces.size,components:negativeVolumes.components.map(v=>({id:v.id,faceIds:v.faceIds,edgeIds:v.edgeIds,families:v.families,strictConcaveEdgeCount:v.strictConcaveEdgeCount,totalFaceAreaMm2:v.totalFaceAreaMm2}))},turning};
+  return{features:dedupe(features),negativeVolumes:{count:negativeVolumes.components.length,strictConcaveEdgeCount:negativeVolumes.strictConcaveEdgeCount,suppressedSheetNativeFaceCount:nativeSheetFaces.size,externalPlateSkinFaceCount:externalPlateSkins.size,components:negativeVolumes.components.map(v=>({id:v.id,faceIds:v.faceIds,edgeIds:v.edgeIds,families:v.families,strictConcaveEdgeCount:v.strictConcaveEdgeCount,totalFaceAreaMm2:v.totalFaceAreaMm2}))},turning};
 }
 
-export const MACHINING_EVIDENCE_VERSION='8.23.0';
+export const MACHINING_EVIDENCE_VERSION='8.23.1';

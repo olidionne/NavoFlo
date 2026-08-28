@@ -1,7 +1,7 @@
 import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.7';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.23.0
+ * NavoFlo Sheet Metal Engine — V8.23.1
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -685,17 +685,63 @@ function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
 // same constant-section envelope.  When a profile-like body contains a true
 // inner/outer bend pair whose radius delta equals the sheet thickness, that is
 // much stronger evidence of unfoldable sheet-metal topology than aspect ratio.
-function strongPairedBendEvidence(candidateBends,cylinders,thickness,tol){
-  const t=Number(thickness);if(!(t>tol*20))return{ok:false,pairs:0};
-  const candidateIds=new Set((candidateBends||[]).map(c=>c.id)),seen=new Set();let pairs=0;
-  const allowed=Math.max(t*0.06,tol*80);
+// V8.23.1 — physical sheet-shell bend proof.
+//
+// Rext - Rint = T is a very strong sheet-metal invariant, but it is NOT used
+// alone.  The inner/outer cylindrical skins must also be coaxial and at least one
+// member of the pair must already be a topologically valid bend cylinder joining
+// two distinct tangent planar panels.  This protects W/C/L/U rolled sections:
+// root/toe fillets may be cylindrical, but they normally do not form a concentric
+// two-skin shell separated by the material thickness over the same physical bend.
+//
+// Important: the opposite skin does not need to itself survive candidateBends.
+// STEP exporters commonly split/trim one side of a bend around holes or seams.
+// V8.23.0 incorrectly required BOTH cylinders to be candidates, which allowed a
+// genuine press-brake U/tray to fall through to the structural-profile matcher.
+function strongPairedBendEvidence(candidateBends,cylinders,planarThickness,tol){
+  const raw=[];
   for(const a of candidateBends||[])for(const b of cylinders||[]){
-    if(a===b||!candidateIds.has(b.id)||!sameAxisLine(a,b,tol))continue;
-    const key=[String(a.id),String(b.id)].sort().join('|');if(seen.has(key))continue;seen.add(key);
-    const delta=Math.abs(Number(a.radius)-Number(b.radius));
-    if(Math.abs(delta-t)<=allowed)pairs++;
+    if(a===b||!sameAxisLine(a,b,tol))continue;
+    const delta=Math.abs(Number(a.radius)-Number(b.radius));if(!(delta>tol*8))continue;
+    const key=[String(a.id),String(b.id)].sort().join('|');
+    if(raw.some(x=>x.key===key))continue;
+    const geom=a.pairGeometry||null;
+    // a is already a valid candidate bend, therefore its two tangent panel
+    // boundaries are independent proof that this cylinder is not merely a hole.
+    if(!geom?.ok||!Array.isArray(a.boundaries)||a.boundaries.length<2)continue;
+    raw.push({key,a,b,delta,angleRad:Math.abs(Number(geom.angle)||0),source:geom.source||'candidate-bend'});
   }
-  return{ok:pairs>0,pairs,thickness:t,tolerance:allowed};
+  if(!raw.length)return{ok:false,pairs:0,thickness:Number.isFinite(Number(planarThickness))?Number(planarThickness):null};
+
+  const tPlanar=Number(planarThickness),planarValid=tPlanar>tol*20;
+  // Cluster radius deltas. Repeated equal deltas at independent bends are a
+  // thickness measurement in their own right and are much safer than selecting
+  // an arbitrary parallel-plane spacing from a constant-section profile.
+  const ordered=raw.map(x=>x.delta).sort((a,b)=>a-b),clusters=[];
+  for(const d of ordered){
+    let c=clusters.find(x=>Math.abs(d-x.value)<=Math.max(x.value*0.045,tol*80));
+    if(!c){c={values:[],value:d};clusters.push(c);}c.values.push(d);c.value=median(c.values);
+  }
+  clusters.sort((a,b)=>b.values.length-a.values.length||a.value-b.value);
+  const repeated=clusters.find(c=>c.values.length>=2)||null;
+  let t=null,source=null;
+  if(planarValid){
+    const compatible=clusters.find(c=>Math.abs(c.value-tPlanar)<=Math.max(tPlanar*0.07,tol*100));
+    if(compatible){t=tPlanar;source='parallel-skins+paired-radii';}
+    else if(repeated){t=repeated.value;source='repeated-paired-radii';}
+  }else if(repeated){t=repeated.value;source='repeated-paired-radii';}
+  // A single bend pair can still be accepted when the planar skin thickness
+  // independently agrees with it. Without either repetition or planar support,
+  // one accidental pair of fillet radii is not enough to overrule a profile.
+  if(!(t>tol*20))return{ok:false,pairs:0,thickness:null,source:null,candidatePairCount:raw.length};
+
+  const allowed=Math.max(t*0.07,tol*100),pairs=[];
+  for(const r of raw){
+    const err=Math.abs(r.delta-t);if(err>allowed)continue;
+    const inner=Math.min(Number(r.a.radius),Number(r.b.radius)),outer=Math.max(Number(r.a.radius),Number(r.b.radius));
+    pairs.push({candidateId:r.a.id,partnerId:r.b.id,innerRadius:inner,outerRadius:outer,delta:r.delta,error:err,angleDeg:r.angleRad*180/Math.PI,source:r.source});
+  }
+  return{ok:pairs.length>0,pairs:pairs.length,thickness:t,tolerance:allowed,source,candidatePairCount:raw.length,pairDetails:pairs,radiusThicknessClosure:pairs.length>0};
 }
 
 function cylinderPartner(cyl,cylinders,thickness,tol){
@@ -1071,7 +1117,10 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   }).filter(Boolean);
 
   const planarThicknessPreflight=detectPlanarThickness(planarGroups,tol);
-  const pairedBendEvidence=structuralProfile?strongPairedBendEvidence(candidateBends,cylinders,planarThicknessPreflight?.value,tol):{ok:false,pairs:0};
+  // Always evaluate the two-skin bend shell, not only when a profile hypothesis
+  // already exists.  The same proof is later reused for thickness resolution and
+  // by the canonical UI/profile arbitrator.
+  const pairedBendEvidence=strongPairedBendEvidence(candidateBends,cylinders,planarThicknessPreflight?.value,tol);
   // Structural-angle rule: a rolled L/angle commonly has only the concave root
   // fillet (plus unrelated toe radii), while a genuinely bent sheet has an
   // inner/outer cylindrical pair on the SAME axis whose radius delta is T.
@@ -1107,8 +1156,12 @@ export function analyzeAndUnfold({geometry,faceInfo,edgeInfo=[],logicalGroups=[]
   // even though the part is simply a flat plate ready for DXF.
   const planarThickness=planarThicknessPreflight;
   const cylindricalThickness=detectThickness(cylinders,tol);
+  const pairedShellThickness=pairedBendEvidence?.ok?{value:Number(pairedBendEvidence.thickness),count:Number(pairedBendEvidence.pairs)||1,samples:Number(pairedBendEvidence.candidatePairCount)||Number(pairedBendEvidence.pairs)||1,confidence:0.995,source:'paired-inner-outer-bend-shell'}:null;
   const exactFlatThickness=flatPlateProof?{value:flatPlateProof.value,count:2,samples:2,confidence:Number(flatPlateProof.confidence)||1,source:flatPlateProof.source,groups:flatPlateProof.groups}:null;
-  const autoThickness=exactFlatThickness||((candidateBends.length===0&&planarThickness)?planarThickness:(cylindricalThickness||planarThickness));
+  // A proven inner/outer shell pair is the most direct material-thickness
+  // measurement on a formed part. Prefer it over generic cylinder-delta clusters,
+  // which may be polluted by holes/chamfers.
+  const autoThickness=exactFlatThickness||pairedShellThickness||((candidateBends.length===0&&planarThickness)?planarThickness:(cylindricalThickness||planarThickness));
   let resolvedThickness=Number(thickness);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)resolvedThickness=Number(autoThickness?.value);
   if(!Number.isFinite(resolvedThickness)||resolvedThickness<=0)return{ok:false,code:'thickness-unresolved',message:'Sheet thickness could not be detected. Enter T and try again.',detectedThickness:autoThickness,fixedFaceId:fixed};

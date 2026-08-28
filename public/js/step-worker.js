@@ -1,7 +1,7 @@
 import OcctJS from 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.mjs';
 
 const WASM_URL = 'https://cdn.jsdelivr.net/gh/tx-code/occt-js@ad8ffb6007eb3fd25179232f291b626d6e78a195/dist/occt-js.wasm';
-const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.23.0';
+const ENGINE_REV = 'occt-js 0.1.14-dev @ ad8ffb6 · navo-analysis 8.23.1';
 
 let occtPromise = null;
 let exactModelId = null;

@@ -5,13 +5,13 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.23.0';
-import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.23.0';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.23.1';
+import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.23.1';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
 import { matchAiscProfile, matchAiscProfileWithName, aiscDesignationHint } from './profile-standard-matcher.js?v=8.21.2';
 import { fastenerNameHint } from './fastener-recognition.js?v=8.21.1';
-import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.23.0';
-import { shouldUseFullClassificationDescriptors, strongGeometryHypothesis, choosePreservedGeometryHypothesis } from './manufacturing-analysis-policy.js?v=8.23.0';
+import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.23.1';
+import { shouldUseFullClassificationDescriptors, strongGeometryHypothesis, choosePreservedGeometryHypothesis } from './manufacturing-analysis-policy.js?v=8.23.1';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -88,7 +88,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.23.0';
+const WORKER_URL = '/js/step-worker.js?v=8.23.1';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -238,7 +238,7 @@ let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
 const assemblyHighlightedMeshes=new Set();
 const assemblyExpandedKeys=new Set();
 
-const MODEL_ANALYSIS_CACHE_VERSION=14;
+const MODEL_ANALYSIS_CACHE_VERSION=15;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -711,7 +711,7 @@ async function analyzeAssemblyGeometryForDxf(target){
   let manufacturing=null;
   if(exact){
     try{
-      manufacturing=buildManufacturingKnowledge({geometry,faceInfo:exact.faces||[],edgeInfo:exact.edges||[],sheetResult:result?.ok?result:null,structuralProfile:result?.code==='structural-profile'?result.profile||null:(result?.diagnostics?.structuralProfile||null),componentName});
+      manufacturing=buildManufacturingKnowledge({geometry,faceInfo:exact.faces||[],edgeInfo:exact.edges||[],sheetResult:result?.ok?result:null,structuralProfile:structuralProfileForManufacturing(result),componentName});
     }catch{}
   }
   if(manufacturing?.stockType==='fastener')return{ok:false,reason:'fastener'};
@@ -1696,6 +1696,13 @@ function isStrongNamedStructuralAuthority(profile,match){
   // measured envelope must agree with the named AISC section.
   return aspect>=1.35&&side>=0.48&&samples>=3&&traces>=4&&Number.isFinite(dimError)&&dimError<=0.065&&(!Number.isFinite(areaRatio)||(areaRatio>=0.62&&areaRatio<=1.18));
 }
+function structuralProfileForManufacturing(result){
+  if(result?.code==='structural-profile')return result.profile||null;
+  const paired=Boolean(result?.ok&&Number(result?.bendCount)>0&&result?.diagnostics?.pairedBendEvidence?.ok&&result?.diagnostics?.pairedBendEvidence?.radiusThicknessClosure!==false);
+  if(paired)return null;
+  return result?.diagnostics?.structuralProfile||null;
+}
+
 async function enforceStructuralProfileAuthority(result,componentName=''){
   const profile=result?.code==='structural-profile'?(result.profile||null):(result?.diagnostics?.structuralProfile||null);
   if(!profile)return{result,match:null,authoritative:false};
@@ -1704,7 +1711,15 @@ async function enforceStructuralProfileAuthority(result,componentName=''){
     [match,namedMatch]=await Promise.all([matchAiscProfile(profile),matchAiscProfileWithName(profile,componentName)]);
   }catch(error){console.warn('[NavoFlo deterministic profile authority]',error);}
   const preferred=namedMatch||match;
-  const authoritative=Boolean(result?.ok&&Number(result?.bendCount)>0&&(isStrongNamedStructuralAuthority(profile,namedMatch)||isStrongStructuralProfileAuthority(profile,match)));
+  const pairedShell=Boolean(result?.ok&&Number(result?.bendCount)>0&&result?.diagnostics?.pairedBendEvidence?.ok&&result?.diagnostics?.pairedBendEvidence?.radiusThicknessClosure!==false);
+  const namedStructural=isStrongNamedStructuralAuthority(profile,namedMatch);
+  // V8.23.1: a physical sheet shell (same gp_Ax1, Rext-Rint=T, tangent to two
+  // flange panels) outranks a geometry-only AISC dimensional coincidence. This
+  // prevents a fabricated U/tray from being relabelled U/C merely because its
+  // envelope happens to match a catalog shape. Explicit Inventor/AISC metadata
+  // can still override because it carries manufacturing intent beyond geometry.
+  if(pairedShell&&!namedStructural)return{result,match:preferred,authoritative:false,sheetShellAuthority:true};
+  const authoritative=Boolean(result?.ok&&Number(result?.bendCount)>0&&(namedStructural||isStrongStructuralProfileAuthority(profile,match)));
   if(!authoritative)return{result:preferred&&result?.code==='structural-profile'?{...result,standardMatch:preferred}:result,match:preferred,authoritative:false};
   return{
     result:{
@@ -1771,12 +1786,23 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
         try{
           const preferFull=shouldUseFullClassificationDescriptors(geometry);
           if(preferFull){
-            // Normal parts: one exact descriptor set feeds every hypothesis. This
-            // eliminates the V8.21/V8.22 fast-vs-full disagreement that caused
-            // W/C/L/U stock to become sheet metal and later proofs to disappear.
+            // Normal parts: the full exact descriptor set remains the canonical
+            // source for manufacturing. However some exporters produce richer
+            // edge descriptors that can split a valid sheet topology differently
+            // from the lightweight sheet pass. If the full pass ends in a generic
+            // failure, run ONE independent sheet-topology fallback and preserve a
+            // stronger roll/profile/paired-bend proof instead of displaying Solid.
             exact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});fullDescriptors=true;
             const authority=await enforceStructuralProfileAuthority(analyzeWith(exact),componentName);
             result=authority.result;profileStandardMatch=authority.match||null;
+            if(!strongGeometryHypothesis(result)&&!result?.ok){
+              try{
+                const sheetExact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});
+                const sheetAuthority=await enforceStructuralProfileAuthority(analyzeWith(sheetExact),componentName);
+                const preserved=choosePreservedGeometryHypothesis(result,sheetAuthority.result);
+                if(preserved!==result){result=preserved;profileStandardMatch=sheetAuthority.match||profileStandardMatch;}
+              }catch(error){console.warn('[NavoFlo sheet topology fallback]',error);}
+            }
             gate=requiresIndependentManufacturingReview({faceInfo:exact?.faces||[],sheetResult:result,structuralNameHint,fastenerHint});
           }else{
             // Huge/perforated parts keep the lightweight sheet pass. Structural
@@ -4419,7 +4445,7 @@ function manufacturingFeatureText(c){
 }
 function ensureManufacturingSection(){
   const drawer=E.propsDrawer,anchor=drawer?.querySelector?.('.drawer-stats');if(!drawer||!anchor)return null;let section=$('manufacturing-section');if(!section){section=document.createElement('div');section.id='manufacturing-section';section.className='drawer-section';anchor.after(section);}
-  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.23.0 · preuves B-Rep unifiées / AAG / axes · ML consultatif':'MRE V8.23.0 · unified B-Rep / AAG / axis proofs · advisory ML'}</p>`;
+  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.23.1 · preuve coque pliée / through-cut / AAG · ML consultatif':'MRE V8.23.1 · sheet-shell / through-cut / AAG proofs · advisory ML'}</p>`;
   return section;
 }
 function updateManufacturingUI(){
