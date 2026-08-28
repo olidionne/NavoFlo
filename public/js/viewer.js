@@ -5,12 +5,13 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { loadUserPreferences, createPreferenceSaver } from './user-preferences.js?v=8.14';
 import { saveCadWorkspace, loadCadWorkspace, bindSuitePersistence } from './cad-session-store.js?v=8.15.4';
-import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.21.2';
-import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.22.0';
+import { analyzeAndUnfold, flatPatternToDxf } from './sheetmetal-engine.js?v=8.23.0';
+import { buildManufacturingKnowledge, applyManufacturingMlPrediction } from './manufacturing-recognition-engine.js?v=8.23.0';
 import { requestManufacturingMlReview } from './manufacturing-ml-client.js?v=8.20.0';
 import { matchAiscProfile, matchAiscProfileWithName, aiscDesignationHint } from './profile-standard-matcher.js?v=8.21.2';
 import { fastenerNameHint } from './fastener-recognition.js?v=8.21.1';
-import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.22.0';
+import { requiresIndependentManufacturingReview, hasRoundStockMachiningAuthority } from './manufacturing-hypothesis-gate.js?v=8.23.0';
+import { shouldUseFullClassificationDescriptors, strongGeometryHypothesis, choosePreservedGeometryHypothesis } from './manufacturing-analysis-policy.js?v=8.23.0';
 
 const FR = document.documentElement.lang.toLowerCase().startsWith('fr');
 const T = FR ? {
@@ -87,7 +88,7 @@ const E = {
 
 const MAX_FILE = 250*1024*1024;
 const MAX_TOTAL = 500*1024*1024;
-const WORKER_URL = '/js/step-worker.js?v=8.22.0';
+const WORKER_URL = '/js/step-worker.js?v=8.23.0';
 
 const AIR_BENDING_K_TABLE = Object.freeze({
   soft:Object.freeze({toThickness:0.33,to3Thickness:0.40,over3Thickness:0.50}),
@@ -237,7 +238,7 @@ let assemblySelectedKey=null,assemblyContextKey=null,assemblyBatchBusy=false;
 const assemblyHighlightedMeshes=new Set();
 const assemblyExpandedKeys=new Set();
 
-const MODEL_ANALYSIS_CACHE_VERSION=13;
+const MODEL_ANALYSIS_CACHE_VERSION=14;
 let modelAnalysisReady=false;
 const FSA3_OPEN_SUPPORTED=typeof window.showOpenFilePicker==='function';
 const FSA3_SAVE_SUPPORTED=typeof window.showSaveFilePicker==='function';
@@ -1675,6 +1676,7 @@ function componentNameForGeometry(geometry){
   const record=[...assemblyTreeRecords.values()].find(r=>(r.occurrences||[]).some(o=>String(o.geometryId)===geometryId));
   return record?.name||geometry?.name||currentFile?.name||'';
 }
+
 function isStrongStructuralProfileAuthority(profile,match){
   if(!profile||!match)return false;
   const level=String(match.level||''),confidence=Number(match.confidence)||0,aspect=Number(profile.aspect)||0,side=Number(profile.sideAreaRatio)||0;
@@ -1765,47 +1767,56 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
           fallbackInsideRadius:sheetMetalState.radius,
           kResolver:resolveUnfoldK
         });
+        let fullDescriptors=false,gate=null,fastResult=null;
         try{
-          // V8.20.3 — sheet metal keeps a lightweight first pass. A perforated
-          // bent part can contain hundreds of cylindrical hole faces and thousands
-          // of edges; none of those hole descriptors are needed to prove its bends.
-          exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});
-          const fastResult=analyzeWith(exact),fastAuthority=await enforceStructuralProfileAuthority(fastResult,componentName);
-          result=fastAuthority.result;profileStandardMatch=fastAuthority.match||null;
-          // Full exact manufacturing metadata is normally skipped for a proven
-          // perforated bent sheet.  We still request it for anything ambiguous,
-          // for a structural-profile candidate, or when Inventor metadata says
-          // the component is hardware.  This preserves UI responsiveness while
-          // keeping the deterministic classifier authoritative.
-          const gate=requiresIndependentManufacturingReview({faceInfo:exact?.faces||[],sheetResult:result,structuralNameHint,fastenerHint});
-          if(gate.required){
-            try{
-              const fullExact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});
-              exact=fullExact;
-              const fullAuthority=await enforceStructuralProfileAuthority(analyzeWith(fullExact),componentName);
-              result=fullAuthority.result;profileStandardMatch=fullAuthority.match||profileStandardMatch;
-
-              // V8.21.2: the sheet hypothesis is no longer allowed to short-circuit
-              // raw-stock recognition.  Build one independent manufacturing
-              // hypothesis WITHOUT feeding it the candidate sheet result. A
-              // proven round-stock + turning body (shaft, stepped pin, roller,
-              // etc.) outranks local cylindrical surfaces that resemble bends.
-              if(result?.code!=='structural-profile'){
-                independentManufacturing=buildManufacturingKnowledge({
-                  geometry,faceInfo:fullExact.faces||[],edgeInfo:fullExact.edges||[],sheetResult:null,structuralProfile:null,componentName
-                });
-                if(result?.ok&&Number(result?.bendCount)>0&&hasRoundStockMachiningAuthority(independentManufacturing)){
-                  result={ok:false,code:'machined-round-stock',message:'Round stock + turning is proven independently from the sheet-metal hypothesis; false bend interpretation is suppressed.',diagnostics:{manufacturingGate:gate,independentManufacturing:{stockType:independentManufacturing.stock?.stockType,confidence:independentManufacturing.confidence,processes:independentManufacturing.processes}}};
-                }
+          const preferFull=shouldUseFullClassificationDescriptors(geometry);
+          if(preferFull){
+            // Normal parts: one exact descriptor set feeds every hypothesis. This
+            // eliminates the V8.21/V8.22 fast-vs-full disagreement that caused
+            // W/C/L/U stock to become sheet metal and later proofs to disappear.
+            exact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});fullDescriptors=true;
+            const authority=await enforceStructuralProfileAuthority(analyzeWith(exact),componentName);
+            result=authority.result;profileStandardMatch=authority.match||null;
+            gate=requiresIndependentManufacturingReview({faceInfo:exact?.faces||[],sheetResult:result,structuralNameHint,fastenerHint});
+          }else{
+            // Huge/perforated parts keep the lightweight sheet pass. Structural
+            // profile detection itself no longer depends on exact edgeInfo and can
+            // therefore still veto false bends in this mode.
+            exact=await workerRequest('sheetmetal-face-info',{geometryId:String(geometry.id)});
+            const fastAuthority=await enforceStructuralProfileAuthority(analyzeWith(exact),componentName);
+            fastResult=fastAuthority.result;result=fastResult;profileStandardMatch=fastAuthority.match||null;
+            gate=requiresIndependentManufacturingReview({faceInfo:exact?.faces||[],sheetResult:result,structuralNameHint,fastenerHint});
+            if(gate.required){
+              try{
+                const fullExact=await workerRequest('manufacturing-face-info',{geometryId:String(geometry.id)});fullDescriptors=true;
+                const fullAuthority=await enforceStructuralProfileAuthority(analyzeWith(fullExact),componentName);
+                result=choosePreservedGeometryHypothesis(fastResult,fullAuthority.result);profileStandardMatch=fullAuthority.match||profileStandardMatch;exact=fullExact;
+              }catch(error){
+                if(!strongGeometryHypothesis(result)&&!result?.ok)throw error;
+                console.warn('[NavoFlo manufacturing enrichment fallback]',error);
               }
-            }catch(error){
-              if(!result?.ok)throw error;
-              console.warn('[NavoFlo manufacturing enrichment fallback]',error);
+            }
+          }
+
+          // A rotational-stock hypothesis is the one allowed challenger to a bend
+          // proof. It is evaluated independently so a stepped shaft cannot be
+          // locked into sheet metal merely because several coaxial cylinders look
+          // locally like bend surfaces.
+          if(fullDescriptors&&result?.ok&&Number(result?.bendCount)>0&&gate?.reason==='coaxial-rotational-complexity'&&result?.code!=='structural-profile'){
+            independentManufacturing=buildManufacturingKnowledge({
+              geometry,faceInfo:exact.faces||[],edgeInfo:exact.edges||[],sheetResult:null,structuralProfile:null,componentName
+            });
+            if(hasRoundStockMachiningAuthority(independentManufacturing)){
+              result={ok:false,code:'machined-round-stock',message:'Round stock + turning is proven independently from the sheet-metal hypothesis; false bend interpretation is suppressed.',diagnostics:{manufacturingGate:gate,independentManufacturing:{stockType:independentManufacturing.stock?.stockType,confidence:independentManufacturing.confidence,processes:independentManufacturing.processes}}};
             }
           }
         }catch(error){bestFailure=bestFailure||{message:error?.message||String(error)};continue;}
         let manufacturing=independentManufacturing;
-        if(!manufacturing&&(!(result?.ok&&(Number(result.bendCount)||0)>0)||Boolean(fastenerHint?.recognized))){
+        // Full descriptors are now safe to use on bent sheet because the machining
+        // AAG explicitly excludes panel↔bend concavity from negative volumes. This
+        // lets NavoFlo retain real secondary drilling/machining on formed parts
+        // instead of deleting the manufacturing result whenever bendCount > 0.
+        if(!manufacturing&&(fullDescriptors||!(result?.ok&&(Number(result.bendCount)||0)>0)||Boolean(fastenerHint?.recognized))){
           try{
             manufacturing=buildManufacturingKnowledge({
               geometry,
@@ -1910,7 +1921,6 @@ async function runSheetMetalUnfold({activate=true,quiet=false,force=false}={}){
       modelAnalysisReady=true;
       sheetMetalCapability={recognized:true,bendCount:Number(result.bendCount)||0,flatPlate:Boolean(result.flatPlate),cuttablePlate:Boolean(result.cuttablePlate),rolledPlate:false,rolledPlateData:null,profile:false,profileType:null,profileData:null};
       manufacturingCapability=manufacturingByGeometry.get(String(best.geometry.id))||null;
-      if((Number(result.bendCount)||0)>0)manufacturingCapability=null;
       sheetMetalState.fixedFace={geometryId:String(best.geometry.id),elementId:Number(result.fixedFaceId)};
       if((!Number.isFinite(sheetMetalState.thickness)||sheetMetalState.thickness<=0)&&Number.isFinite(result.thickness))sheetMetalState.thickness=result.thickness;
       const firstR=result.bendLines?.find(b=>Number.isFinite(b.insideRadius))?.insideRadius;
@@ -4409,17 +4419,18 @@ function manufacturingFeatureText(c){
 }
 function ensureManufacturingSection(){
   const drawer=E.propsDrawer,anchor=drawer?.querySelector?.('.drawer-stats');if(!drawer||!anchor)return null;let section=$('manufacturing-section');if(!section){section=document.createElement('div');section.id='manufacturing-section';section.className='drawer-section';anchor.after(section);}
-  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.22.0 · volumes négatifs AAG / concavité stricte · ML consultatif':'MRE V8.22.0 · AAG negative volumes / strict concavity · advisory ML'}</p>`;
+  if(!$('manufacturing-process'))section.innerHTML=`<div class="drawer-section-title">${FR?'FABRICATION DÉTECTÉE':'DETECTED MANUFACTURING'}</div><dl class="drawer-stats compact-stats"><div><dt>${FR?'Procédé probable':'Probable process'}</dt><dd id="manufacturing-process">—</dd></div><div><dt>${FR?'Brut probable':'Probable stock'}</dt><dd id="manufacturing-stock">—</dd></div><div><dt>${FR?'Longueur brut':'Stock length'}</dt><dd id="manufacturing-length">—</dd></div><div><dt>${FR?'Matière enlevée':'Material removed'}</dt><dd id="manufacturing-removal">—</dd></div><div><dt>${FR?'Features reconnues':'Recognized features'}</dt><dd id="manufacturing-features">—</dd></div><div><dt>${FR?'Indices géométriques':'Geometry evidence'}</dt><dd id="manufacturing-evidence">—</dd></div><div><dt>${FR?'Confiance':'Confidence'}</dt><dd id="manufacturing-confidence">—</dd></div></dl><p class="metadata-note">${FR?'MRE V8.23.0 · preuves B-Rep unifiées / AAG / axes · ML consultatif':'MRE V8.23.0 · unified B-Rep / AAG / axis proofs · advisory ML'}</p>`;
   return section;
 }
 function updateManufacturingUI(){
   const section=ensureManufacturingSection();if(!section)return;const c=manufacturingCapability;
-  section.hidden=!c||Boolean(sheetMetalCapability?.profile)||Boolean(sheetMetalCapability?.bendCount>0);if(section.hidden||!c)return;
+  section.hidden=!c||Boolean(sheetMetalCapability?.profile&&!c?.processes?.machining);if(section.hidden||!c)return;
   const process=$('manufacturing-process'),stock=$('manufacturing-stock'),length=$('manufacturing-length'),rem=$('manufacturing-removal'),features=$('manufacturing-features'),evidence=$('manufacturing-evidence'),conf=$('manufacturing-confidence');
   const directDxf=Boolean(c?.capabilities?.directFlatDxf||sheetMetalCapability?.flatPlate),plateMachining=directDxf&&Boolean(c?.processes?.machining||manufacturingHasPlateSecondaryMachining(c));
   let processText;
   if(c?.stockType==='fastener')processText=FR?'Composante standard / boulonnerie':'Standard hardware / fastener';
-  else if(c?.stockType==='rolled-plate'||sheetMetalCapability?.rolledPlate)processText=c?.processes?.drilling?(FR?'Roulage + perçage':'Rolling + drilling'):(FR?'Roulage de plaque':'Plate rolling');
+  else if(c?.stockType==='rolled-plate'||sheetMetalCapability?.rolledPlate)processText=c?.processes?.drilling?(FR?'Roulage + perçage':'Rolling + drilling'):(c?.processes?.machining?(FR?'Roulage + usinage':'Rolling + machining'):(FR?'Roulage de plaque':'Plate rolling'));
+  else if(Number(sheetMetalCapability?.bendCount)>0)processText=c?.processes?.machining?(FR?'Pliage + usinage':'Bending + machining'):(FR?'Pliage':'Bending');
   else if(directDxf)processText=plateMachining?(FR?'Découpe de plaque + usinage':'Plate cutting + machining'):(FR?'Découpe de plaque':'Plate cutting');
   else if(c?.processes?.turning)processText=c?.processes?.drilling?(FR?'Tournage + perçage/alésage':'Turning + drilling/boring'):(FR?'Tournage / usinage':'Turning / machining');
   else if(c?.stockType==='plate-blank'&&(c?.processes?.machining||c.machined))processText=FR?'Usinage de plaque':'Plate machining';
@@ -4466,7 +4477,7 @@ function updateGeometryTypeIndicator(){
     const aspect=Number(sheetMetalCapability.profileData?.aspect),suffix=Number.isFinite(aspect)?` · L/C ${aspect.toFixed(1)}`:'';
     E.propType.textContent=(FR?'Profilé / extrusion':'Profile / extrusion')+suffix;return;
   }
-  if(sheetMetalCapability.recognized&&sheetMetalCapability.bendCount>0){E.propType.textContent=FR?'Tôle pliée':'Sheet metal';return;}
+  if(sheetMetalCapability.recognized&&sheetMetalCapability.bendCount>0){const mach=Boolean(manufacturingCapability?.processes?.machining);E.propType.textContent=mach?(FR?'Tôle pliée · usinage':'Sheet metal · machining'):(FR?'Tôle pliée':'Sheet metal');return;}
   if(sheetMetalCapability.recognized&&sheetMetalCapability.flatPlate){
     if(manufacturingCapability?.stockType==='flat-bar'&&!manufacturingCapability.machined){E.propType.textContent=`${FR?'Profilé probable':'Probable profile'} · ${manufacturingLabel(manufacturingCapability)}`;return;}
     const plateMachining=manufacturingHasPlateSecondaryMachining(manufacturingCapability);

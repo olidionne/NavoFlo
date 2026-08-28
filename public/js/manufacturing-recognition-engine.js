@@ -1,4 +1,4 @@
-/* NavoFlo V8.22.0 — Manufacturing Recognition Engine (MRE)
+/* NavoFlo V8.23.0 — Manufacturing Recognition Engine (MRE)
  *
  * Architecture:
  *   exact B-Rep/AAG -> stock hypothesis -> virtual delta/removal features
@@ -11,9 +11,9 @@
  */
 import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.20.0';
 import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.20.0';
-import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.22.0';
+import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.23.0';
 import { detectFastenerComponent, FASTENER_RECOGNIZER_VERSION } from './fastener-recognition.js?v=8.21.1';
-import { analyzeMachiningEvidence, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.22.0';
+import { analyzeMachiningEvidence, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.23.0';
 
 const EPS=1e-8;
 const V={
@@ -416,6 +416,58 @@ function recognizeRoundFeatures({geometry,faceInfo,aag,stock}){
   return dedupeFeatures(features);
 }
 
+
+function revolutionAxisRecords(faceInfo=[]){
+  return(faceInfo||[]).filter(f=>['cylinder','cylindrical','cone','conical','torus','toroidal'].includes(fam(f.family))).map(f=>({
+    face:f,id:Number(f.id),family:fam(f.family),axis:canonicalAxis(f.axisDirection),center:vec(f.localCenter),radius:Number(f.radius),area:Number(f.area)||0,
+    min:Number.isFinite(Number(f.axisMin))?Number(f.axisMin):null,max:Number.isFinite(Number(f.axisMax))?Number(f.axisMax):null,span:Number.isFinite(Number(f.axisSpan))?Number(f.axisSpan):null
+  })).filter(r=>r.axis&&r.center&&r.center.every(Number.isFinite));
+}
+function groupRevolutionAxes(records,scale=1){
+  const groups=[],tol=Math.max(scale*0.0025,0.03);
+  for(const r of records){let g=groups.find(x=>sameAxisLine(x.axis,x.center,r.axis,r.center,tol));if(!g){g={axis:r.axis,center:r.center,members:[]};groups.push(g);}g.members.push(r);}
+  for(const g of groups){g.faceIds=g.members.map(m=>m.id);g.cylinders=g.members.filter(m=>['cylinder','cylindrical'].includes(m.family));g.cones=g.members.filter(m=>['cone','conical'].includes(m.family));g.tori=g.members.filter(m=>['torus','toroidal'].includes(m.family));g.radii=uniqueNumbers(g.members.map(m=>m.radius).filter(r=>r>EPS),Math.max(scale*0.001,0.02));g.area=g.members.reduce((sum,m)=>sum+(Number(m.area)||0),0);}
+  return groups;
+}
+
+// V8.23.0 — morphology proof for machined round plates/pucks.
+// The former `roundPlateContext` guard suppressed the complete round-feature
+// recognizer in order to keep a laser-cut disk from being called a turned part.
+// That also hid very real countersinks and annular grooves.  Here the raw OD is
+// ignored, while SECONDARY axis groups are evaluated independently:
+//   • off-axis Cylinder + Cone on one gp_Ax1 line => countersunk drilling;
+//   • off-axis stepped cylinders => counterbore;
+//   • toroidal / reduced-radius geometry on the stock axis => annular groove.
+// These are relational B-Rep patterns, never a surface-family-only guess.
+function recognizeRoundPlateSecondaryFeatures({faceInfo,stock}){
+  if(stock?.stockType!=='round-bar'||!(Number(stock.aspect)<0.45))return[];
+  const axis=canonicalAxis(stock.axis),center=vec(stock.axisCenter),R=Number(stock.diameterMm)/2,T=Number(stock.lengthMm);if(!axis||!center||!(R>EPS&&T>EPS))return[];
+  const groups=groupRevolutionAxes(revolutionAxisRecords(faceInfo),Math.max(R*2,T,1)),features=[],axisTol=Math.max(R*0.02,0.05);
+  for(const g of groups){
+    const align=Math.abs(V.dot(g.axis,axis)),offset=axisLineDistance(center,axis,g.center),central=align>=0.995&&offset<=axisTol;
+    if(!central){
+      // Normal-to-plate secondary holes stay parallel to the stock axis but are
+      // spatially offset from it.  A cone + cylinder sharing that offset axis is
+      // the canonical countersink signature exported by SolidWorks/Inventor.
+      if(align>=0.992&&g.cylinders.length&&g.cones.length){
+        const cylR=Math.min(...g.cylinders.map(c=>Number(c.radius)).filter(r=>r>EPS)),coneR=Math.max(...g.cones.map(c=>Number(c.radius)).filter(r=>r>EPS));
+        if(Number.isFinite(cylR)&&Number.isFinite(coneR)&&coneR>cylR*1.015){features.push(feature('countersink','drilling',g.faceIds,0.985,{axisPatternProven:true,topologyProven:true,coaxialCylinderCone:true,offAxisFromStock:true,diameterMm:cylR*2,countersinkDiameterMm:coneR*2,stockAxisOffsetMm:offset}));continue;}
+      }
+      const cylRadii=uniqueNumbers(g.cylinders.map(c=>Number(c.radius)).filter(r=>r>EPS),Math.max(R*0.001,0.02));
+      if(align>=0.992&&cylRadii.length>=2){features.push(feature('counterbore','drilling',g.faceIds,0.98,{axisPatternProven:true,topologyProven:true,coaxialSteppedCylinders:true,offAxisFromStock:true,radiiMm:cylRadii,stockAxisOffsetMm:offset}));continue;}
+      continue;
+    }
+    // The outer stock cylinder is intentionally ignored.  Toroidal faces or a
+    // compact family of reduced coaxial radii on the central axis imply material
+    // removal around the circumference (O-ring/annular groove or turned recess).
+    const torusIds=g.tori.map(t=>t.id),reducedCyl=g.cylinders.filter(c=>Number(c.radius)>EPS&&Number(c.radius)<R-Math.max(R*0.02,0.08));
+    if(torusIds.length>=1&&(reducedCyl.length>=1||g.tori.length>=2)){
+      features.push(feature('annular-groove','milling',[...torusIds,...reducedCyl.map(c=>c.id)],0.985,{axisPatternProven:true,topologyProven:true,coaxialWithStock:true,stockAxisOffsetMm:offset,torusFaceCount:torusIds.length,reducedCylinderCount:reducedCyl.length}));
+    }
+  }
+  return dedupeFeatures(features);
+}
+
 function recognizeRolledPlateFeatures({faceInfo,stock}){
   if(stock?.stockType!=='rolled-plate')return[];
   const axis=canonicalAxis(stock.axis),center=vec(stock.axisCenter),outer=Number(stock.outerDiameterMm)/2,inner=Number(stock.innerDiameterMm)/2,scale=Math.max(outer||0,inner||0,Number(stock.thicknessMm)||1,1);
@@ -518,7 +570,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
     const processes={cutting:false,bending:false,rolling:false,turning:false,drilling:false,milling:false,machining:false,profile:false,fastener:true};
     const stock={stockType:'fastener',fastenerType:fastener.type,lengthMm:Number(fastener.lengthMm)||null,diameterMm:Number(fastener.diameterMm)||null,confidence:Number(fastener.confidence)||0.95,source:fastener.source||'deterministic-fastener',fastener};
     return{
-      kind:'manufacturing-knowledge',knowledgeVersion:7,classification:'fastener',stockType:'fastener',fastenerType:fastener.type,fastener,stock,
+      kind:'manufacturing-knowledge',knowledgeVersion:8,classification:'fastener',stockType:'fastener',fastenerType:fastener.type,fastener,stock,
       lengthMm:stock.lengthMm,diameterMm:stock.diameterMm,confidence:stock.confidence,machined:false,process:'fastener',processes,
       capabilities:{unfold:false,export2dDxf:false,directFlatDxf:false,structuralProfile:false,rolledPlate:false,fastener:true},
       featureInstances:[],features:{recognizedInstances:0,secondaryMachining:false,definiteMachiningInstances:0,throughCutInstances:0},
@@ -529,10 +581,11 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   }
   let legacy=null;try{legacy=classifyManufacturingGeometry({geometry,faceInfo,edgeInfo});}catch{}
   const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile});
-  const machiningEvidence=analyzeMachiningEvidence({aag,faceInfo,geometry,structuralProfile});
+  const machiningEvidence=analyzeMachiningEvidence({aag,faceInfo,geometry,structuralProfile,sheetResult,stock});
   let features=[...(machiningEvidence.features||[])];
   const roundPlateContext=Boolean(sheetResult?.flatPlate&&stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45);
-  if(!roundPlateContext&&stock?.stockType!=='rolled-plate')features.push(...recognizeRoundFeatures({geometry,faceInfo,aag,stock}));
+  if(roundPlateContext)features.push(...recognizeRoundPlateSecondaryFeatures({faceInfo,stock}));
+  else if(stock?.stockType!=='rolled-plate')features.push(...recognizeRoundFeatures({geometry,faceInfo,aag,stock}));
   features.push(...recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}));
   features.push(...recognizeRolledPlateFeatures({geometry,faceInfo,aag,stock,sheetResult}));
   features.push(...recognizeGenericBarFeatures({geometry,faceInfo,aag,stock,sheetResult}));
@@ -570,7 +623,7 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   const localConfidence=clamp(Math.max(stockConfidence,machineConfidence*0.96));
   const base={
     ...compat,
-    kind:'manufacturing-knowledge',knowledgeVersion:7,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
+    kind:'manufacturing-knowledge',knowledgeVersion:8,classification,stock:stock||null,capabilities,processes,featureInstances:features,delta,
     aag:{nodeCount:aag.nodeCount,arcCount:aag.arcCount,strictConcaveEdgeCount:Number(machiningEvidence?.negativeVolumes?.strictConcaveEdgeCount)||0,negativeVolumeCount:Number(machiningEvidence?.negativeVolumes?.count)||0},
     confidence:localConfidence,
     diagnostics:{...(legacy?.diagnostics||{}),mre:true,suppressFlatDxf,stockConfidence,machiningConfidence:machineConfidence,surfaceSignals:signals,

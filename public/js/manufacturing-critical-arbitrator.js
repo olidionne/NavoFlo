@@ -1,4 +1,4 @@
-/* NavoFlo V8.22.0 — Canonical Manufacturing Arbitrator
+/* NavoFlo V8.23.0 — Canonical Manufacturing Arbitrator
  *
  * The recognizers produce geometric feature hypotheses.  This module answers a
  * different question: does a recognized feature actually REQUIRE secondary
@@ -104,6 +104,10 @@ function hasHardMachiningProof(feature,{plateContext=false}={}){
   // heuristics and remains valid even when the STEP exporter omitted a compound
   // hole descriptor.
   if(p.concavityProven===true&&p.negativeVolume===true&&p.topologyProven===true)return true;
+  // Relational axis morphology (e.g. an off-axis cylinder+cone countersink or a
+  // coaxial annular groove on a round puck) is also a hard geometric proof. It
+  // does not depend on the sign of one numerically fragile curved-edge dihedral.
+  if(p.axisPatternProven===true&&p.topologyProven===true&&['counterbore','countersink','annular-groove','groove-fillet','oring-groove'].includes(type))return true;
   if(p.gpAx1Proof===true&&Number(p.gpAx1CollinearFraction)>0.80&&String(feature?.process||'')==='turning')return true;
   if(p.exactCompoundHole===true)return true;
   if(p.exactHole===true){
@@ -193,4 +197,4 @@ export function arbitrateManufacturingKnowledge(knowledge,{sheetResult=null,mlPr
   return out;
 }
 
-export const CRITICAL_ARBITRATOR_VERSION='8.22.0';
+export const CRITICAL_ARBITRATOR_VERSION='8.23.0';

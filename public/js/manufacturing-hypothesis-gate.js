@@ -1,6 +1,6 @@
-import { detectTurningByGpAx1 } from './manufacturing-machining-evidence.js?v=8.22.0';
+import { detectTurningByGpAx1 } from './manufacturing-machining-evidence.js?v=8.23.0';
 
-// NavoFlo V8.22.0 — deterministic manufacturing hypothesis gate.
+// NavoFlo V8.23.0 — deterministic manufacturing hypothesis gate.
 //
 // Sheet-metal, structural-stock and machining recognition are independent
 // hypotheses.  A lightweight sheet-metal pass is allowed to be fast, but it is
@@ -43,4 +43,4 @@ export function hasRoundStockMachiningAuthority(knowledge){
   return turning&&(turns>=2||Boolean(gpAx1))&&aspect>=0.75&&confidence>=0.76&&(!Number.isFinite(envelopeError)||envelopeError<=0.06)&&(!Number.isFinite(coverage)||coverage>=0.003);
 }
 
-export const MANUFACTURING_HYPOTHESIS_GATE_VERSION='8.22.0';
+export const MANUFACTURING_HYPOTHESIS_GATE_VERSION='8.23.0';

@@ -1,7 +1,7 @@
 import { wrapR2000Dxf, R2000_MODELSPACE_HANDLE } from './dxf-r2000-template.js?v=8.17.7';
 
 /*
- * NavoFlo Sheet Metal Engine — V8.21.0
+ * NavoFlo Sheet Metal Engine — V8.23.0
  * Clean-room implementation using STEP tessellation/topology already produced by
  * occt-js plus exact surface metadata returned by the NavoFlo CAD worker.
  *
@@ -623,7 +623,13 @@ function profileStockSectionFingerprint(geometry,basis,lo,hi,crossSpan){
 function detectStructuralProfileExtrusion(geometry,ctx,tol,diag){
   const lines=[];
   for(const edge of geometry.edges||[]){
-    const info=ctx.edgeInfoById.get(Number(edge.id))||{};if(!['line','linear'].includes(family(info.family)))continue;
+    // V8.23.0: structural-profile recognition must also work during the lightweight
+    // sheet-metal preflight. That preflight deliberately omits exact edge
+    // descriptors on highly perforated parts, so requiring edgeInfo.family here
+    // disabled the entire W/C/L/U/HSS recognizer and let stock fillets masquerade
+    // as press-brake bends. exactStraightEdge() uses exact OCCT line metadata when
+    // available and safely falls back to the tessellated/topological edge trace.
+    if(!exactStraightEdge(ctx,edge,tol))continue;
     const length=exactStraightEdgeLength(ctx,edge),dir=canonicalAxis(exactStraightEdgeDirection(ctx,edge));if(!(length>tol*20)||!dir)continue;
     const pts=exactEdgePoints(ctx,edge);if(pts.length<2)continue;lines.push({edge,length,dir,a:pts[0],b:pts.at(-1)});
   }
