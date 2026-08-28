@@ -13,7 +13,7 @@ import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8
 import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.20.0';
 import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.23.1';
 import { detectFastenerComponent, FASTENER_RECOGNIZER_VERSION } from './fastener-recognition.js?v=8.21.1';
-import { analyzeMachiningEvidence, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.23.1';
+import { analyzeMachiningEvidence, detectTurningByGpAx1, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.23.1';
 
 const EPS=1e-8;
 const V={
@@ -137,11 +137,36 @@ function derivePlateStock(geometry,faceInfo,sheetResult,legacy){
   return{stockType:'plate-blank',axis:normal,lengthMm:major,widthMm:minor,thicknessMm:thickness,aspect:major/Math.max(minor,EPS),confidence:clamp(0.88+(pair?.areaRatio||0)*0.05),source:'mre-plate-slab'};
 }
 
-function normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile}){
+// V8.24 — synthesise a minimal round-bar stock record from a gp_Ax1 turning
+// proof when inferRoundStockFromFaces fails (e.g. tight envelope-error threshold
+// on heavily machined shafts whose tessellation jitters past the nominal OD).
+function syntheticRoundFromTurning(geometry,faceInfo,turning){
+  if(!turning?.recognized||!turning.axis||!turning.axisCenter)return null;
+  const axis=turning.axis,center=turning.axisCenter,points=pointsOf(geometry);
+  if(!points.length)return null;
+  const range=projectionRange(points,axis);if(!range||range.span<=EPS)return null;
+  let maxR=0;
+  for(const p of points){const d=V.sub(p,center),t=V.dot(d,axis),perp=V.sub(d,V.scale(axis,t));const r=V.len(perp);if(r>maxR)maxR=r;}
+  if(!(maxR>EPS))return null;
+  return{stockType:'round-bar',axis,axisCenter:center,lengthMm:range.span,diameterMm:maxR*2,
+    aspect:range.span/(maxR*2),stockSurfaceCoverage:0.001,envelopeError:0,
+    confidence:clamp(turning.confidence-0.04),source:'gp-ax1-revolution-solver'};
+}
+
+function normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile,revolutionHint}){
   if(structuralProfile)return{stockType:'structural-profile',profile:structuralProfile,confidence:Number(structuralProfile?.confidence)||0.9,source:'structural-profile'};
   if(sheetResult?.rolledPlate&&sheetResult?.rolledPlateData){const r=sheetResult.rolledPlateData;return{stockType:'rolled-plate',axis:canonicalAxis(r.axis),axisCenter:vec(r.axisCenter),thicknessMm:Number(r.thicknessMm)||null,widthMm:Number(r.axialLengthMm)||null,lengthMm:Number(r.developedLengthMm)||null,developedLengthMm:Number(r.developedLengthMm)||null,outerDiameterMm:Number(r.outerDiameterMm)||null,innerDiameterMm:Number(r.innerDiameterMm)||null,gapAngleDeg:Number(r.gapAngleDeg)||0,confidence:Number(r.confidence)||0.96,source:'rolled-slit-plate-brep'};}
   if(Number(sheetResult?.bendCount)>0)return{stockType:'sheet-metal',thicknessMm:Number(sheetResult.thickness)||null,confidence:0.99,source:'sheet-metal-brep'};
   const round=inferRoundStockFromFaces(geometry,faceInfo);
+  // V8.24 — gp_Ax1 Revolution Solver fallback: when the tessellation envelope
+  // check fails (e.g. noisy STEP or heavily machined OD), synthesise a round-bar
+  // stock record from the turning proof axis so recognizeRoundFeatures can run.
+  if(!round&&revolutionHint?.recognized){
+    const synth=syntheticRoundFromTurning(geometry,faceInfo,revolutionHint);
+    if(synth&&(!legacy||legacy.stockType==='plate-blank'||synth.confidence>(Number(legacy?.confidence)||0)-0.02)){
+      return{...legacy,...synth};
+    }
+  }
   // Prefer a strong round envelope over a weak plate/box hypothesis.  This is
   // essential for turned shafts with two planar end faces.
   if(round&&(!legacy||legacy.stockType==='plate-blank'||round.confidence>(Number(legacy.confidence)||0)-0.02)){
@@ -622,7 +647,15 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   // same gp_Ax1 over a topological bend, do not let that rejected profile leak
   // back into stock normalization and relabel the formed part as U/C/W/L.
   const effectiveStructuralProfile=physicalSheetShell?null:structuralProfile;
-  const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile:effectiveStructuralProfile});
+  // V8.24 — pre-stock Revolution Solver: compute gp_Ax1 turning proof BEFORE
+  // stock normalisation so the round-bar stock can be synthesised even when the
+  // tessellation envelope check in inferRoundStockFromFaces fails.  This is the
+  // key fix for turned shafts (ST01-0002, ST04-0026/27/30) that previously
+  // fell back to "Solide STEP" when coverage or envelopeError thresholds were
+  // not met.
+  const preStockTurning=(!effectiveStructuralProfile&&!sheetResult?.rolledPlate&&!(Number(sheetResult?.bendCount)>0))
+    ?detectTurningByGpAx1(faceInfo):{recognized:false};
+  const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile:effectiveStructuralProfile,revolutionHint:preStockTurning});
   const machiningEvidence=analyzeMachiningEvidence({aag,faceInfo,geometry,structuralProfile:effectiveStructuralProfile,sheetResult,stock});
   let features=[...(machiningEvidence.features||[])];
   const roundPlateContext=Boolean(sheetResult?.flatPlate&&stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45);

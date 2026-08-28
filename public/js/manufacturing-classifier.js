@@ -130,7 +130,10 @@ function roundCandidate(geometry,faceInfo,points,volume){
     const stockVolume=Math.PI*R*R*L,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1);
     const features=featureSummary(faceInfo,axis,center,R,L,'round');
     const featureMachining=features.cones>0||features.grooves>0||features.transverseCylinders>0||features.parallelOffAxisCylinders>0||features.coaxialOtherRadii>0||features.planes>2;features.secondaryMachining=featureMachining;
-    const machined=featureMachining||(Number.isFinite(removal)&&removal>0.003);
+    // materialRemoval alone is not proof of machining: a turned shaft can have
+    // 60%+ removal while remaining pure turning. Only surface-family evidence
+    // (cones, grooves, transverse cylinders) earns the machined flag here.
+    const machined=featureMachining;
     const confidence=clamp(0.90+Math.min(coverage,1)*0.08-envelopeError*2.2-(coverage<0.15?0.03:0));
     const c={stockType:'round-bar',axis,axisCenter:center,lengthMm:L,diameterMm:2*R,stockVolume,volumeRatio,materialRemoval:removal,machined,features,confidence,aspect:L/(2*R),envelopeError,stockSurfaceCoverage:coverage,volumeReliable:volumeRatio!=null};
     if(!best||score(c)>score(best))best=c;
@@ -222,7 +225,7 @@ function rectangularCandidate(geometry,faceInfo,edgeInfo,points,volume){
   const normals=planeNormalClusters(faceInfo,axis);if(normals.length<2)return null;const u=normals[0].n,vEntry=normals.slice(1).find(c=>Math.abs(V.dot(u,c.n))<0.12);if(!vEntry)return null;const v=vEntry.n,w=extent(points,u),h=extent(points,v);if(!(w>EPS&&h>EPS))return null;
   const stockVolume=L*w*h,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1);
   const major=Math.max(w,h),minor=Math.min(w,h),crossRatio=major/minor,aspect=L/major;let stockType='rectangular-bar';if(crossRatio<=1.08)stockType='square-bar';else if(crossRatio>=2.5)stockType='flat-bar';
-  const features=featureSummary(faceInfo,axis,null,null,L,'bar'),expectedPlaneCount=6,featureMachining=features.cylinders>0||features.cones>0||features.grooves>0||features.planes>expectedPlaneCount,machined=featureMachining||(Number.isFinite(removal)&&removal>0.003);features.secondaryMachining=featureMachining;
+  const features=featureSummary(faceInfo,axis,null,null,L,'bar'),expectedPlaneCount=6,featureMachining=features.cylinders>0||features.cones>0||features.grooves>0||features.planes>expectedPlaneCount,machined=featureMachining;features.secondaryMachining=featureMachining;
   let confidence=0.88+Math.min(aspect,5)*0.012+Math.min(fullLengthMembers.length,8)*0.006;
   if(volumeRatio!=null){if(volumeRatio<0.05)confidence-=0.15;else confidence+=Math.min(volumeRatio,1)*0.04;}
   confidence=clamp(confidence);
@@ -233,7 +236,7 @@ function hexCandidate(geometry,faceInfo,edgeInfo,points,volume){
   const dirs=[];for(const c of normals){if(dirs.every(d=>Math.abs(V.dot(d,c.n))<0.995))dirs.push(c.n);if(dirs.length===3)break;}if(dirs.length!==3)return null;
   const widths=dirs.map(n=>extent(points,n)),mean=widths.reduce((a,b)=>a+b,0)/3;if(!(mean>EPS))return null;const spread=(Math.max(...widths)-Math.min(...widths))/mean;if(spread>0.08)return null;
   const angles=[];for(let i=0;i<3;i++)for(let j=i+1;j<3;j++)angles.push(Math.acos(clamp(Math.abs(V.dot(dirs[i],dirs[j])),-1,1))*180/Math.PI);if(!angles.every(a=>a>50&&a<70))return null;
-  const area=Math.sqrt(3)/2*mean*mean,stockVolume=area*L,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1),features=featureSummary(faceInfo,axis,null,null,L,'bar'),machined=features.cylinders>0||features.cones>0||features.grooves>0||features.planes>8||(Number.isFinite(removal)&&removal>0.003);features.secondaryMachining=machined;
+  const area=Math.sqrt(3)/2*mean*mean,stockVolume=area*L,volumeRatio=usableVolumeRatio(volume,stockVolume),removal=volumeRatio==null?null:clamp(1-volumeRatio,0,1),features=featureSummary(faceInfo,axis,null,null,L,'bar'),machined=features.cylinders>0||features.cones>0||features.grooves>0||features.planes>8;features.secondaryMachining=machined;
   return{stockType:'hex-bar',axis,lengthMm:L,acrossFlatsMm:mean,stockVolume,volumeRatio,materialRemoval:removal,machined,features,confidence:clamp(0.90-spread*1.8+Math.min(L/mean,6)*0.006),aspect:L/mean,volumeReliable:volumeRatio!=null};
 }
 function partialBoreEvidence(best,faceInfo,points){
@@ -266,6 +269,6 @@ export function classifyManufacturingGeometry({geometry,faceInfo=[],edgeInfo=[]}
   const partialBores=partialBoreEvidence(best,faceInfo,points);
   if(best.features){best.features.partialAxialCylinders=partialBores;if(partialBores>0)best.features.secondaryMachining=true;}
   if(partialBores>0)best.machined=true;
-  const evidence=[];if(best.features?.hints?.length)evidence.push(...best.features.hints);if(partialBores>0)evidence.push('recess');if(Number.isFinite(best.materialRemoval)&&best.materialRemoval>0.003)evidence.push('material-removal');if(best.commercialStockReclassified)evidence.push('commercial-stock-plate');
+  const evidence=[];if(best.features?.hints?.length)evidence.push(...best.features.hints);if(partialBores>0)evidence.push('recess');if(best.commercialStockReclassified)evidence.push('commercial-stock-plate');
   return{...best,kind:'stock-shape',process:best.machined?'machining':'stock-profile',evidence:[...new Set(evidence)],volumeMm3:volume,diagnostics:{candidateCount:candidates.length,volumeReliable:Boolean(best.volumeReliable),stockSurfaceCoverage:Number.isFinite(best.stockSurfaceCoverage)?best.stockSurfaceCoverage:null,envelopeError:Number.isFinite(best.envelopeError)?best.envelopeError:null,partialAxialCylinders:partialBores}};
 }
