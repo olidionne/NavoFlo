@@ -9,11 +9,11 @@
  * contain a counterbore/groove; a shaft may be round stock AND heavily turned.
  * This module deliberately does not collapse those facts into one enum.
  */
-import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.20.0';
+import { classifyManufacturingGeometry } from './manufacturing-classifier.js?v=8.24.0';
 import { applyRawStockKnowledge, RAW_STOCK_KNOWLEDGE_VERSION } from './raw-stock-knowledge.js?v=8.20.0';
 import { arbitrateManufacturingKnowledge, CRITICAL_ARBITRATOR_VERSION } from './manufacturing-critical-arbitrator.js?v=8.23.1';
 import { detectFastenerComponent, FASTENER_RECOGNIZER_VERSION } from './fastener-recognition.js?v=8.21.1';
-import { analyzeMachiningEvidence, detectTurningByGpAx1, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.23.1';
+import { analyzeMachiningEvidence, detectTurningByGpAx1, MACHINING_EVIDENCE_VERSION } from './manufacturing-machining-evidence.js?v=8.24.0';
 
 const EPS=1e-8;
 const V={
