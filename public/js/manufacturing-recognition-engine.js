@@ -658,7 +658,18 @@ export function buildManufacturingKnowledge({geometry,faceInfo=[],edgeInfo=[],sh
   const stock=normalizeStock({geometry,faceInfo,sheetResult,legacy,structuralProfile:effectiveStructuralProfile,revolutionHint:preStockTurning});
   const machiningEvidence=analyzeMachiningEvidence({aag,faceInfo,geometry,structuralProfile:effectiveStructuralProfile,sheetResult,stock});
   let features=[...(machiningEvidence.features||[])];
-  const roundPlateContext=Boolean(sheetResult?.flatPlate&&stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45);
+  // V8.24 — puck/flange solver: a round-bar stock with aspect < 0.45 (short,
+  // fat disk) activates the secondary-feature recognizer that handles off-axis
+  // bolt holes, countersinks and annular grooves via relational axis morphology.
+  // Previously this was gated on sheetResult.flatPlate being true, which never
+  // fires for real flanges/pucks because their perimeter is cylindrical (not a
+  // laser-cut profile). The new condition accepts the puck context when either
+  // flatPlate is detected OR the sheet analysis simply returned ok:false — the
+  // round-bar + short-aspect proof is sufficient evidence of a puck geometry.
+  const roundPlateContext=Boolean(
+    stock?.stockType==='round-bar'&&Number(stock?.aspect)<0.45&&
+    (sheetResult?.flatPlate||!sheetResult?.ok)
+  );
   if(roundPlateContext)features.push(...recognizeRoundPlateSecondaryFeatures({faceInfo,stock}));
   else if(stock?.stockType!=='rolled-plate')features.push(...recognizeRoundFeatures({geometry,faceInfo,aag,stock}));
   features.push(...recognizePlateFeatures({geometry,faceInfo,aag,stock,sheetResult}));

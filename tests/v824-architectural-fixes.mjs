@@ -205,4 +205,57 @@ const concaveEdge=(id,a,b)=>({id,family:'line',ownerFaceIds:[a,b],length:10,
   assert.equal(m.machined,false,'large window frame must not be machined');
 }
 
+// ─── TEST 6: Puck / flange Solver — roundPlateContext activé sans flatPlate ───
+// Un puck (disque court) avec un lamage (counterbore) hors-axe.
+// Avant V8.24: roundPlateContext = false quand sheetResult.ok=false → le
+//   recognizer hors-axe (recognizeRoundPlateSecondaryFeatures) n'était jamais
+//   appelé → résultat: Solide STEP (machined=false, pas de features).
+// Après V8.24: round-bar + aspect<0.45 + sheetResult.ok=false → roundPlateContext
+//   = true → le recognizer hors-axe détecte le lamage → machined=true.
+{
+  // Puck: OD=127mm (r=63.5), hauteur=30mm, aspect≈0.24
+  // Lamage hors-axe: deux cylindres coaxiaux (r_large=10mm, r_small=6mm)
+  //   décalés de 44mm du centre → preuve de counterbore par morphologie d'axe.
+  const R=63.5,H=30,boltOffset=44;
+  const puckFaces=[
+    // Faces planes (top/bottom du puck)
+    {id:1,family:'plane',area:12000,localCenter:[0,0,H],localCentroid:[0,0,H],
+     localNormal:[0,0,1],neighborFaceIds:[2,3],sameDomainFaceIds:[]},
+    {id:2,family:'plane',area:12000,localCenter:[0,0,0],localCentroid:[0,0,0],
+     localNormal:[0,0,-1],neighborFaceIds:[1,3],sameDomainFaceIds:[]},
+    // OD cylindrique (coaxial, axe principal)
+    {id:3,family:'cylinder',area:2*Math.PI*R*H,localCenter:[0,0,H/2],
+     axisDirection:[0,0,1],radius:R,axisSpan:H,neighborFaceIds:[1,2],sameDomainFaceIds:[],hole:null},
+    // Counterbore hors-axe: grand cylindre (r=10) + petit cylindre (r=6)
+    // coaxiaux à [boltOffset,0,*] — preuves de perçage étagé par morphologie.
+    {id:4,family:'cylinder',area:2*Math.PI*10*12,localCenter:[boltOffset,0,H-6],
+     axisDirection:[0,0,1],radius:10,axisSpan:12,neighborFaceIds:[1],sameDomainFaceIds:[],hole:null},
+    {id:5,family:'cylinder',area:2*Math.PI*6*H,localCenter:[boltOffset,0,H/2],
+     axisDirection:[0,0,1],radius:6,axisSpan:H,neighborFaceIds:[1,2],sameDomainFaceIds:[],hole:null},
+  ];
+  // Tessellation: quelques points sur le contour OD du puck
+  const pts=[];
+  for(let a=0;a<2*Math.PI;a+=Math.PI/8)pts.push(R*Math.cos(a),R*Math.sin(a),0,R*Math.cos(a),R*Math.sin(a),H);
+  const geo={positions:new Float32Array(pts),indices:new Uint32Array([]),edges:[]};
+
+  // sheetResult.ok=false → puck pas détecté comme plaque laser (correct)
+  const sheetResult={ok:false,flatPlate:false,code:'no-bends',bendCount:0};
+  const m=buildManufacturingKnowledge({geometry:geo,faceInfo:puckFaces,edgeInfo:[],sheetResult});
+
+  // Stock doit être round-bar avec aspect court
+  assert.equal(m.stock?.stockType,'round-bar','puck: brut round-bar');
+  assert.ok(Number(m.stock?.aspect)<0.45,'puck: aspect < 0.45 (disque court)');
+
+  // V8.24: roundPlateContext activé → recognizeRoundPlateSecondaryFeatures
+  // détecte le counterbore hors-axe (deux cylindres coaxiaux → cylRadii.length>=2)
+  assert.equal(m.processes?.machining,true,'V8.24 puck solver: counterbore hors-axe → machining');
+  assert.equal(m.machined,true,'puck doit être machined');
+  assert.notEqual(m.classification,'solid','puck ne doit pas être Solide STEP');
+
+  const cbFeature=m.featureInstances.find(f=>
+    !f.parameters?.advisoryOnly&&f.type==='counterbore'&&f.parameters?.axisPatternProven===true
+  );
+  assert.ok(cbFeature,'puck: counterbore avec axisPatternProven doit exister');
+}
+
 console.log('V8.24 architectural fixes regression: PASS');
