@@ -1,0 +1,113 @@
+/* NavoFlo v8.25 — Company Settings page */
+
+.company-settings-shell { padding: 40px 0 80px; min-height: calc(100vh - 80px); }
+.cs-loading { color: #6b8fa6; padding: 40px 0; text-align: center; }
+
+/* ── Page header ── */
+.cs-header { margin-bottom: 32px; }
+.cs-header h1 { font-size: 26px; font-weight: 800; color: #eef6fa; margin: 0 0 6px; }
+.cs-header p { color: #6b8fa6; margin: 0; font-size: 14px; }
+
+/* ── Tab strip ── */
+.cs-tabs { display: flex; gap: 0; border-bottom: 1px solid #1e3040; margin-bottom: 32px; }
+.cs-tab {
+  padding: 10px 22px; border: none; background: none; cursor: pointer;
+  font-size: 14px; font-weight: 700; color: #6b8fa6; letter-spacing: .04em;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s, border-color .15s;
+}
+.cs-tab:hover { color: #adc0cc; }
+.cs-tab.active { color: #35d19f; border-bottom-color: #35d19f; }
+
+/* ── Panels ── */
+.cs-panel { display: none; }
+.cs-panel.active { display: block; }
+
+/* ── Section card ── */
+.cs-card {
+  background: #101b23; border: 1px solid #1e3040; border-radius: 14px;
+  padding: 24px; margin-bottom: 24px;
+}
+.cs-card-title { font-size: 15px; font-weight: 800; color: #eef6fa; margin: 0 0 4px; }
+.cs-card-desc { font-size: 13px; color: #6b8fa6; margin: 0 0 20px; }
+
+/* ── Capabilities grid ── */
+.cs-cap-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px;
+}
+.cs-cap-item {
+  display: flex; align-items: center; gap: 10px;
+  background: #0d1820; border: 1px solid #1e3040; border-radius: 9px;
+  padding: 10px 14px; cursor: pointer; transition: border-color .15s, background .15s;
+}
+.cs-cap-item:hover { border-color: #2c4351; background: #12212c; }
+.cs-cap-item input[type="checkbox"] { width: 16px; height: 16px; accent-color: #35d19f; cursor: pointer; flex-shrink: 0; }
+.cs-cap-item label { font-size: 13px; font-weight: 600; color: #c8dce8; cursor: pointer; user-select: none; }
+.cs-cap-item.checked { border-color: #35d19f44; background: #0b1e17; }
+.cs-cap-item.checked label { color: #35d19f; }
+
+/* ── Save button ── */
+.cs-save-row { margin-top: 18px; display: flex; align-items: center; gap: 14px; }
+.cs-btn {
+  padding: 10px 22px; border-radius: 9px; border: none; cursor: pointer;
+  font-size: 14px; font-weight: 750; transition: opacity .15s, background .15s;
+}
+.cs-btn:disabled { opacity: .45; cursor: not-allowed; }
+.cs-btn-primary { background: #35d19f; color: #05120e; }
+.cs-btn-primary:hover:not(:disabled) { background: #3de8b0; }
+.cs-btn-danger { background: transparent; border: 1px solid #e55; color: #e55; }
+.cs-btn-danger:hover:not(:disabled) { background: #e5515120; }
+.cs-save-msg { font-size: 13px; color: #35d19f; display: none; }
+.cs-save-msg.err { color: #f87171; }
+
+/* ── Bend params table ── */
+.cs-bend-toolbar { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; }
+.cs-bend-toolbar .cs-hint { font-size: 12px; color: #6b8fa6; }
+
+.cs-bend-table-wrap { overflow-x: auto; }
+.cs-bend-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cs-bend-table th {
+  text-align: left; padding: 8px 10px; font-size: 11px; letter-spacing: .1em;
+  font-weight: 800; color: #6b8fa6; border-bottom: 1px solid #1e3040; white-space: nowrap;
+}
+.cs-bend-table td { padding: 8px 10px; border-bottom: 1px solid #12212c; color: #c8dce8; }
+.cs-bend-table tr:last-child td { border-bottom: none; }
+.cs-bend-table tr:hover td { background: #0d1820; }
+.cs-bend-table .td-actions { display: flex; gap: 6px; }
+.cs-bend-table .td-k { font-weight: 800; color: #35d19f; }
+.cs-bend-table .td-mat { font-size: 11px; letter-spacing: .08em; font-weight: 700; color: #adc0cc; }
+.cs-bend-empty { text-align: center; color: #6b8fa6; padding: 28px 0; font-size: 13px; }
+
+/* ── Inline edit form ── */
+.cs-bend-form {
+  display: none; background: #0d1820; border: 1px solid #2c4351; border-radius: 10px;
+  padding: 18px; margin-top: 14px; gap: 12px; flex-wrap: wrap; align-items: flex-end;
+}
+.cs-bend-form.open { display: flex; }
+.cs-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 110px; }
+.cs-field label { font-size: 11px; letter-spacing: .1em; font-weight: 700; color: #6b8fa6; }
+.cs-field input, .cs-field select {
+  background: #081118; border: 1px solid #2c4351; border-radius: 7px;
+  color: #eef6fa; padding: 7px 10px; font-size: 13px; outline: none;
+  transition: border-color .15s; width: 100%; box-sizing: border-box;
+}
+.cs-field input:focus, .cs-field select:focus { border-color: #35d19f; }
+.cs-field input::placeholder { color: #3a5668; }
+.cs-form-actions { display: flex; gap: 8px; align-items: flex-end; flex-shrink: 0; padding-bottom: 0; }
+
+/* ── Company K badge in viewer (injected by viewer.js) ── */
+.cs-company-k-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 700; color: #35d19f;
+  background: #0b1e1744; border: 1px solid #35d19f44;
+  border-radius: 5px; padding: 2px 7px; letter-spacing: .05em;
+}
+
+/* ── Account nav link (add to licenses page or nav) ── */
+.cs-account-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+.cs-account-nav a {
+  padding: 7px 16px; border-radius: 8px; text-decoration: none;
+  font-size: 13px; font-weight: 700; color: #adc0cc;
+  border: 1px solid #1e3040; transition: color .15s, border-color .15s;
+}
+.cs-account-nav a:hover { color: #eef6fa; border-color: #2c4351; }
+.cs-account-nav a.active { color: #35d19f; border-color: #35d19f44; background: #0b1e1744; }

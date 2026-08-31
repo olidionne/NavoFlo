@@ -194,6 +194,7 @@ let cameraProjectionMode='orthographic';
 let currentModel = null, currentFile = null, currentFormat = '', currentUnit = 'u', displayUnit = 'u';
 let currentStats = null, currentStepHeader = null, currentStepResult = null, currentStepProperties = [];
 let currentMcMasterPN = null;  // { pn, source, field? } or null
+let companySettings = null;   // { capabilities:{}, bend_params:[] } — fetched once after init
 let surfaceMeshes = [], edgeObjects = [], vertexObjects = [], visualEdges = [];
 let flatSurfaceMeshes = [], flatEdgeObjects = [], flatVertexObjects = [];
 let selectionMode = 'auto', measureEnabled = false, multiMeasureEnabled=false, selected = [], currentMeasureResult = null, selectionHighlightMap = new Map();
@@ -864,6 +865,11 @@ init();
 
 async function init() {
   applyNavo3DPreferences(await loadUserPreferences('navo3d',navo3dPreferences));
+  // Fetch company settings (K-factor rules). Non-blocking: fail silently if not logged in.
+  fetch('/api/company/settings',{credentials:'same-origin',headers:{'Accept':'application/json'}})
+    .then(r=>r.ok?r.json():null)
+    .then(data=>{ if(data){ companySettings=data; } })
+    .catch(()=>{});
   try {
     renderer = new THREE.WebGLRenderer({canvas:E.canvas, antialias:true, preserveDrawingBuffer:true});
   } catch (error) {
@@ -1356,19 +1362,44 @@ function setSheetMetalLengthInput(input,value) {
   input.value=String(Number(converted.toPrecision(10)));
 }
 
+// Resolve K-factor from company settings if configured.  Returns { k, fromCompany } or null.
+function resolveCompanyK(materialClass, thickness, radius) {
+  const params = companySettings?.bend_params;
+  if (!Array.isArray(params) || !params.length) return null;
+  if (!Number.isFinite(thickness) || thickness <= 0) return null;
+  if (!Number.isFinite(radius) || radius < 0) return null;
+
+  for (const rule of params) {
+    const matMatch = rule.material_class === 'all' || rule.material_class === materialClass;
+    if (!matMatch) continue;
+    const tMin = rule.thickness_min_mm;
+    const tMax = rule.thickness_max_mm;
+    const rMin = rule.inner_radius_min_mm;
+    const rMax = rule.inner_radius_max_mm;
+    if (tMin != null && thickness < tMin) continue;
+    if (tMax != null && thickness > tMax) continue;
+    if (rMin != null && radius < rMin) continue;
+    if (rMax != null && radius > rMax) continue;
+    const k = Number(rule.k_factor);
+    if (Number.isFinite(k)) return { k, fromCompany: true };
+  }
+  return null;
+}
+
 function getAirBendingRule(materialClass,radius,thickness) {
   if(!Number.isFinite(thickness)||thickness<=0||!Number.isFinite(radius)||radius<0)return null;
 
   const ratio=radius/thickness;
   const table=AIR_BENDING_K_TABLE[materialClass]||AIR_BENDING_K_TABLE.hard;
+  const companyK=resolveCompanyK(materialClass,thickness,radius);
 
   if(ratio<=1){
-    return {ratio,band:'toThickness',bandLabel:SMT.band1,k:table.toThickness};
+    return {ratio,band:'toThickness',bandLabel:SMT.band1,k:companyK?companyK.k:table.toThickness,fromCompany:companyK?true:false};
   }
   if(ratio<=3){
-    return {ratio,band:'to3Thickness',bandLabel:SMT.band2,k:table.to3Thickness};
+    return {ratio,band:'to3Thickness',bandLabel:SMT.band2,k:companyK?companyK.k:table.to3Thickness,fromCompany:companyK?true:false};
   }
-  return {ratio,band:'over3Thickness',bandLabel:SMT.band3,k:table.over3Thickness};
+  return {ratio,band:'over3Thickness',bandLabel:SMT.band3,k:companyK?companyK.k:table.over3Thickness,fromCompany:companyK?true:false};
 }
 
 function calculateAirBendParameters({
@@ -1479,12 +1510,13 @@ function updateSheetMetalCalculation({preserveInputs=false}={}) {
 
   E.smRatio.textContent=formatNumber(result.ratio);
   E.smBand.textContent=result.bandLabel;
-  E.smK.textContent=`${formatSheetMetalScalar(result.k,3)}${result.manualKEnabled?' · MANUAL':' · AUTO'}`;
+  const kSuffix=result.manualKEnabled?' · MANUAL':result.fromCompany?' · COMPAGNIE':' · AUTO';
+  E.smK.textContent=`${formatSheetMetalScalar(result.k,3)}${kSuffix}`;
   E.smNeutralRadius.textContent=formatLength(result.neutralRadius);
   E.smBendAllowance.textContent=formatLength(result.bendAllowance);
   E.smBendDeduction.textContent=formatLength(result.bendDeduction);
 
-  const source=result.manualKEnabled?SMT.manualK:SMT.autoK;
+  const source=result.manualKEnabled?SMT.manualK:(result.fromCompany?(FR?'K compagnie':'Company K'):SMT.autoK);
   setSheetMetalStatus(`${SMT.calculationReady} · ${source}`,'ok');
 }
 

@@ -36,6 +36,11 @@ import {
 } from './handlers/auth.js';
 import { licensingContext } from './lib/licensing.js';
 import { sessionUser } from './lib/auth.js';
+import {
+  getCompanyCapabilities, putCompanyCapabilities,
+  getCompanyBendParams, putCompanyBendParam, deleteCompanyBendParam,
+  getCompanySettingsAll
+} from './handlers/company.js';
 import { getOrganizationAudit } from './handlers/audit.js';
 import { getPreferences, putPreferences } from './handlers/preferences.js';
 import { getMfrStatus, postMfrAnalyze, MAX_MFR_BODY } from './handlers/mfr.js';
@@ -68,7 +73,10 @@ const API = Object.freeze({
   '/api/licensing/portal': { POST:createAccountPortal },
   '/api/licensing/lease/acquire': { POST:acquireLease },
   '/api/licensing/lease/refresh': { POST:refreshLease },
-  '/api/licensing/lease/release': { POST:releaseLease }
+  '/api/licensing/lease/release': { POST:releaseLease },
+  '/api/company/capabilities':    { GET:getCompanyCapabilities, PUT:putCompanyCapabilities },
+  '/api/company/bend-params':     { GET:getCompanyBendParams,   PUT:putCompanyBendParam   },
+  '/api/company/settings':        { GET:getCompanySettingsAll }
 });
 
 function methodNotAllowed(allowed){ return json({error:'Method not allowed.'},405,{Allow:allowed.join(', ')}); }
@@ -141,6 +149,12 @@ async function routeRequest(request,env,ctx){
     if(action==='transfer'){ if(request.method!=='POST')return methodNotAllowed(['POST']); return transferLicensingMember({request,env,ctx,userId}); }
     if(request.method!=='DELETE')return methodNotAllowed(['DELETE']);
     return deleteLicensingMember({request,env,ctx,userId});
+  }
+
+  const bendParamMatch=url.pathname.match(/^\/api\/company\/bend-params\/(\d+)$/);
+  if(bendParamMatch){
+    if(request.method!=='DELETE')return methodNotAllowed(['DELETE']);
+    return deleteCompanyBendParam({request,env,ctx,paramId:bendParamMatch[1]});
   }
 
   if(url.pathname.startsWith('/api/'))return json({error:'API route not found.'},404);
