@@ -420,7 +420,12 @@
     const manager = ['owner', 'admin'].includes(state.user.role);
     const entitlements = state.entitlements || {};
     const members = manager ? state.members || [] : [];
+    const accountNavHtml = `<nav class="cs-account-nav">${fr
+      ? `<a href="/account/licenses/" class="active">Licences</a><a href="/account/company/">${manager ? 'Compagnie' : 'Compagnie'}</a>`
+      : `<a href="/en/account/licenses/" class="active">Licenses</a><a href="/en/account/company/">${manager ? 'Company' : 'Company'}</a>`
+    }</nav>`;
     root.innerHTML = `${new URLSearchParams(location.search).get('denied') ? `<div class="license-alert">${t.denied}</div>` : ''}${banner ? `<div class="license-alert license-success">${esc(banner)}</div>` : ''}
+      ${accountNavHtml}
       <section class="license-hero"><div><span class="eyebrow-text">${fr ? 'COMPTE NAVOFLO' : 'NAVOFLO ACCOUNT'}</span><h1>${esc(state.organization.name)}</h1><p>${esc(state.user.email)} · ${esc(state.user.role)} · ${state.user.license_type === 'admin' ? (fr ? 'Licence Admin' : 'Admin license') : (fr ? 'Licence utilisateur' : 'User license')}</p></div><div class="license-hero-actions">${manager ? `<button class="button" data-billing>${t.billing}</button>` : ''}<button class="button license-logout" data-logout>${t.logout}</button></div></section>
       <section class="license-stats"><article><span>${t.plan}</span><strong>${planLabel(state.subscription?.plan)}</strong></article><article><span>${t.status}</span><strong>${statusLabel(state.subscription?.status)}</strong></article><article><span>${t.renewal}</span><strong>${fmtDate(state.subscription?.current_period_end)}</strong></article><article><span>${t.seats}</span><strong>${state.seats.used} / ${state.seats.purchased}</strong><small>${state.seats.available} ${t.available}</small></article></section>
       <section class="license-panel"><h2>${t.access}</h2><div class="entitlement-grid"><div class="${entitlements.automation ? 'yes' : 'no'}"><strong>Automatisation</strong><span>${entitlements.automation ? '✓' : '—'}</span></div><div class="${entitlements.navo2d ? 'yes' : 'no'}"><strong>Navo2D</strong><span>${entitlements.navo2d ? '✓' : '—'}</span></div><div class="${entitlements.navo3d ? 'yes' : 'no'}"><strong>Navo3D</strong><span>${entitlements.navo3d ? '✓' : '—'}</span></div><div class="${entitlements.navoanalyzer ? 'yes' : 'no'}"><strong>NavoAnalyzer</strong><span>${fr ? 'À venir' : 'Coming soon'}</span></div></div></section>
