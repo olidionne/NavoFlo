@@ -1275,3 +1275,29 @@ body.navo3d-focus-mode .n3-appbar{display:none!important}
 .assembly-tree-row.repeated-group .tree-name{font-weight:700}
 .assembly-tree-row.repeated-group .tree-icon{color:#40dda5}
 .assembly-tree-row.fastener .tree-icon{font-size:11px}
+
+/* ── Company manufacturability report (v8.27) ── */
+.sheetmetal-mfr{
+  margin-top:8px;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:8px;
+  background:#0b1218;
+  padding:8px 9px;
+}
+.sheetmetal-mfr[hidden]{display:none}
+.sheetmetal-mfr .mfr-title{
+  font-size:8px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;
+  color:#8ea6b2;margin-bottom:6px;
+}
+.sheetmetal-mfr .mfr-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
+.sheetmetal-mfr .mfr-list li{
+  display:flex;gap:6px;align-items:flex-start;
+  font-size:9.5px;line-height:1.35;color:#c4d3db;
+}
+.sheetmetal-mfr .mfr-ic{flex:none;width:12px;text-align:center;font-size:9px;line-height:1.35}
+.sheetmetal-mfr .mfr-error{color:#f2a4a4}
+.sheetmetal-mfr .mfr-error .mfr-ic{color:#e5484d}
+.sheetmetal-mfr .mfr-warn{color:#e8ba74}
+.sheetmetal-mfr .mfr-warn .mfr-ic{color:#e8ba74}
+.sheetmetal-mfr .mfr-ok .mfr-ic{color:#35d19f}
+.sheetmetal-mfr .mfr-info .mfr-ic{color:#5aa9e6}

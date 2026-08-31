@@ -340,23 +340,37 @@ export async function deleteTooling(request, env, toolId) {
 export async function getCompanySettings(request, env) {
   const { organizationId } = await requireCompanyMember(request, env);
 
-  const [capRows, bendRows] = await Promise.all([
+  const [capRows, bendRows, toolRows] = await Promise.all([
     env.NAVOFLO_DB.prepare(`
-      SELECT process, enabled FROM organization_capabilities WHERE organization_id=?
+      SELECT process, enabled, params_json FROM organization_capabilities WHERE organization_id=?
     `).bind(organizationId).all(),
     env.NAVOFLO_DB.prepare(`
       SELECT id, material_class, thickness_min_mm, thickness_max_mm,
              inner_radius_min_mm, inner_radius_max_mm, k_factor
       FROM organization_bend_params WHERE organization_id=?
       ORDER BY material_class, thickness_min_mm, inner_radius_min_mm, id
+    `).bind(organizationId).all(),
+    env.NAVOFLO_DB.prepare(`
+      SELECT id, tool_type, name, v_opening_mm, die_angle_deg, punch_radius_mm,
+             punch_angle_deg, length_mm, max_tonnage, quantity
+      FROM organization_tooling WHERE organization_id=?
+      ORDER BY tool_type, v_opening_mm, punch_radius_mm, id
     `).bind(organizationId).all()
   ]);
 
   const capabilities = {};
-  for (const r of (capRows.results || [])) capabilities[r.process] = Boolean(r.enabled);
+  const capability_params = {};
+  for (const r of (capRows.results || [])) {
+    capabilities[r.process] = Boolean(r.enabled);
+    if (r.params_json) {
+      try { capability_params[r.process] = JSON.parse(r.params_json); } catch { /* ignore */ }
+    }
+  }
 
   return json({
     capabilities,
-    bend_params: bendRows.results || []
+    capability_params,
+    bend_params: bendRows.results || [],
+    tooling: toolRows.results || []
   }, 200, { 'cache-control': 'no-store' });
 }

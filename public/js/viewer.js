@@ -81,6 +81,7 @@ const E = {
   smSetFixedFace:$('sm-set-fixed-face'), smFixedFace:$('sm-fixed-face'), smUnfold:$('sm-unfold'), smExportDxf:$('sm-export-dxf'),
   smSectionTitle:$('sm-section-title'), smEngineNote:$('sm-engine-note'), smAdvanced:$('sm-advanced'), smKRow:$('sm-k-row'), smBendsRow:$('sm-bends-row'),
   smDetectedThickness:$('sm-detected-thickness'), smDetectedBends:$('sm-detected-bends'), smFlatSize:$('sm-flat-size'),
+  smManufacturability:$('sm-manufacturability'),
   statusFile:$('status-file'), statusFormat:$('status-format'), statusUnits:$('status-units'),
   docTabs:$('n3-doc-tabs'), docTabList:$('n3-doc-tab-list'), docTabAdd:$('n3-doc-tab-add'),
   assemblyTreePanel:$('assembly-tree-panel'), assemblyTreeList:$('assembly-tree-list'), assemblyTreeStatus:$('assembly-tree-status'),
@@ -868,7 +869,7 @@ async function init() {
   // Fetch company settings (K-factor rules). Non-blocking: fail silently if not logged in.
   fetch('/api/company/settings',{credentials:'same-origin',headers:{'Accept':'application/json'}})
     .then(r=>r.ok?r.json():null)
-    .then(data=>{ if(data){ companySettings=data; } })
+    .then(data=>{ if(data){ companySettings=data; try{ renderManufacturability(); }catch{} } })
     .catch(()=>{});
   try {
     renderer = new THREE.WebGLRenderer({canvas:E.canvas, antialias:true, preserveDrawingBuffer:true});
@@ -4598,6 +4599,10 @@ function updateManufacturingUI(){
 
 
 function updateSheetMetalDimensionsUI(){
+  updateSheetMetalDimensionsRow();
+  renderManufacturability();
+}
+function updateSheetMetalDimensionsRow(){
   const row=E.propSheetDimensionsRow,label=E.propSheetDimensionsLabel,value=E.propSheetDimensions;if(!row||!label||!value)return;
   if(sheetMetalCapability?.rolledPlate&&sheetMetalCapability?.rolledPlateData){
     const r=sheetMetalCapability.rolledPlateData,t=Number(r.thicknessMm),h=Number(r.axialLengthMm),w=Number(r.developedLengthMm);
@@ -4613,6 +4618,160 @@ function updateSheetMetalDimensionsUI(){
   const height=Math.min(h,w),width=Math.max(h,w);
   value.textContent=`${formatLength(t)} × ${formatLength(height)} × ${formatLength(width)}`;
   row.hidden=false;
+}
+
+
+// ── Company manufacturability check (v8.27) ──────────────────────────────────
+// Uses companySettings.capabilities / capability_params / tooling to validate the
+// current sheet-metal part against the shop's real machines & tooling.
+const MFR_CUTTING = ['laser','plasma','waterjet','punching'];
+const MFR_MAT_LABEL = {
+  soft:  FR?'doux (alu/cuivre)':'soft (alu/copper)',
+  medium:FR?'intermédiaire (acier doux)':'medium (mild steel)',
+  hard:  FR?'dur (inox/HR)':'hard (stainless/HS)'
+};
+// Air-bend tonnage material factor vs mild steel (classic shop rule).
+const MFR_TON_FACTOR = { soft:0.5, medium:1.0, hard:1.6 };
+const MFR_PROC_LABEL = FR
+  ? { laser:'laser', plasma:'plasma', waterjet:'jet d\u2019eau', punching:'poinçonneuse' }
+  : { laser:'laser', plasma:'plasma', waterjet:'waterjet', punching:'punch' };
+function mfrEscapeHtml(s){
+  return String(s==null?'':s).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function estimateAirBendTonsPerFoot(thicknessMm, vOpeningMm){
+  // 575 × T² / V  (imperial, mild steel 60 ksi) → tons per foot of bend.
+  const T=thicknessMm/25.4, V=vOpeningMm/25.4;
+  if(!(T>0)||!(V>0)) return null;
+  return (575*T*T)/V;
+}
+
+function computeManufacturability(){
+  if(!companySettings) return null;
+  const result=flatPatternResult;
+  if(!result||!result.ok) return null;
+  const caps=companySettings.capabilities||{};
+  const cp=companySettings.capability_params||{};
+  const tooling=Array.isArray(companySettings.tooling)?companySettings.tooling:[];
+  const t=Number(result.thickness);
+  const b=result.bounds;
+  const w0=Number(b?.width), h0=Number(b?.height);
+  if(!(t>0)||!(w0>0)||!(h0>0)) return null;
+  const flatLong=Math.max(w0,h0), flatShort=Math.min(w0,h0);
+  const bends=Array.isArray(result.bendLines)?result.bendLines:[];
+  const bendCount=Number(sheetMetalCapability?.bendCount)||bends.length||0;
+  let maxBendLen=0;
+  for(const bl of bends){
+    const dx=(bl?.b?.[0]-bl?.a?.[0]), dy=(bl?.b?.[1]-bl?.a?.[1]);
+    const L=Math.hypot(dx||0,dy||0);
+    if(Number.isFinite(L)) maxBendLen=Math.max(maxBendLen,L);
+  }
+  const matClass=sheetMetalState.materialClass||'medium';
+  const checks=[];
+
+  // ── Cutting: table overflow + thickness capacity ──
+  const cutProc=MFR_CUTTING.find(p=>caps[p]&&cp[p]&&cp[p].kind==='cutting');
+  if(cutProc){
+    const c=cp[cutProc], procLbl=MFR_PROC_LABEL[cutProc]||cutProc;
+    const bw=Number(c.bed_width_mm), bl=Number(c.bed_length_mm);
+    if(bw>0&&bl>0){
+      const bedLong=Math.max(bw,bl), bedShort=Math.min(bw,bl);
+      if(flatLong>bedLong+0.5||flatShort>bedShort+0.5){
+        checks.push({level:'error',text:FR
+          ?`Développé ${fmtLenIn(flatLong)}×${fmtLenIn(flatShort)} dépasse la table ${procLbl} (${fmtLenIn(bedLong)}×${fmtLenIn(bedShort)}).`
+          :`Flat ${fmtLenIn(flatLong)}×${fmtLenIn(flatShort)} exceeds ${procLbl} bed (${fmtLenIn(bedLong)}×${fmtLenIn(bedShort)}).`});
+      }else{
+        checks.push({level:'ok',text:FR
+          ?`Tient sur la table ${procLbl} (${fmtLenIn(bedLong)}×${fmtLenIn(bedShort)}).`
+          :`Fits ${procLbl} bed (${fmtLenIn(bedLong)}×${fmtLenIn(bedShort)}).`});
+      }
+    }
+    const mats=Array.isArray(c.materials)?c.materials:[];
+    const mrule=mats.find(m=>m.class===matClass);
+    if(mrule&&Number(mrule.max_thickness_mm)>0){
+      const maxT=Number(mrule.max_thickness_mm);
+      if(t>maxT+0.02){
+        checks.push({level:'error',text:FR
+          ?`Épaisseur ${fmtLenIn(t)} > max ${procLbl} pour ${MFR_MAT_LABEL[matClass]} (${fmtLenIn(maxT)}).`
+          :`Thickness ${fmtLenIn(t)} > ${procLbl} max for ${MFR_MAT_LABEL[matClass]} (${fmtLenIn(maxT)}).`});
+      }else{
+        checks.push({level:'ok',text:FR
+          ?`Épaisseur ${fmtLenIn(t)} dans capacité ${procLbl} (${MFR_MAT_LABEL[matClass]} ≤ ${fmtLenIn(maxT)}).`
+          :`Thickness ${fmtLenIn(t)} within ${procLbl} capacity (${MFR_MAT_LABEL[matClass]} ≤ ${fmtLenIn(maxT)}).`});
+      }
+    }
+  }
+
+  // ── Bending: machine length/tonnage + V-die selection ──
+  if(bendCount>0){
+    const bendCap=(caps.bending&&cp.bending&&cp.bending.kind==='bending')?cp.bending:null;
+    if(bendCap&&Number(bendCap.max_bend_length_mm)>0&&maxBendLen>0){
+      const maxL=Number(bendCap.max_bend_length_mm);
+      if(maxBendLen>maxL+0.5){
+        checks.push({level:'error',text:FR
+          ?`Pli le plus long ${fmtLenIn(maxBendLen)} > plieuse (${fmtLenIn(maxL)}).`
+          :`Longest bend ${fmtLenIn(maxBendLen)} > press brake (${fmtLenIn(maxL)}).`});
+      }else{
+        checks.push({level:'ok',text:FR
+          ?`Plis ≤ longueur plieuse (${fmtLenIn(maxL)}).`
+          :`Bends within brake length (${fmtLenIn(maxL)}).`});
+      }
+    }
+    // V-die selection from inventory (ideal V ≈ 8×T; accept 6–12×T).
+    const dies=tooling.filter(x=>x.tool_type==='die'&&Number(x.v_opening_mm)>0)
+                      .sort((a,b)=>a.v_opening_mm-b.v_opening_mm);
+    let chosenDie=null;
+    if(dies.length){
+      const idealV=8*t, minV=6*t, maxV=12*t;
+      const inRange=dies.filter(d=>d.v_opening_mm>=minV&&d.v_opening_mm<=maxV);
+      const pool=inRange.length?inRange:dies;
+      chosenDie=pool.reduce((best,d)=>Math.abs(d.v_opening_mm-idealV)<Math.abs(best.v_opening_mm-idealV)?d:best,pool[0]);
+      const label=chosenDie.name?`${chosenDie.name} (V${fmtLenIn(chosenDie.v_opening_mm)})`:`V${fmtLenIn(chosenDie.v_opening_mm)}`;
+      checks.push({level:inRange.length?'info':'warn',text:FR
+        ?(inRange.length?`Matrice suggérée : ${label} · V idéal ≈ ${fmtLenIn(idealV)}.`:`Aucune matrice idéale ; plus proche : ${label} (V idéal ≈ ${fmtLenIn(idealV)}).`)
+        :(inRange.length?`Suggested die: ${label} · ideal V ≈ ${fmtLenIn(idealV)}.`:`No ideal die; closest: ${label} (ideal V ≈ ${fmtLenIn(idealV)}).`)});
+    }
+    // Tonnage estimate (air bend) vs machine tonnage.
+    const vForTon=chosenDie?Number(chosenDie.v_opening_mm):8*t;
+    const tpf=estimateAirBendTonsPerFoot(t,vForTon);
+    if(tpf&&maxBendLen>0){
+      const lengthFt=(maxBendLen/25.4)/12;
+      const tons=tpf*lengthFt*(MFR_TON_FACTOR[matClass]||1);
+      const tonsTxt=tons.toFixed(tons<10?1:0);
+      const machineTon=Number(bendCap?.max_tonnage)||0;
+      const dieTon=chosenDie?Number(chosenDie.max_tonnage)||0:0;
+      const limit=Math.min(machineTon||Infinity,dieTon||Infinity);
+      if(Number.isFinite(limit)&&tons>limit){
+        checks.push({level:'error',text:FR
+          ?`Tonnage estimé ${tonsTxt} t > limite ${limit} t.`
+          :`Estimated tonnage ${tonsTxt} t > limit ${limit} t.`});
+      }else{
+        checks.push({level:'info',text:FR
+          ?`Tonnage estimé ≈ ${tonsTxt} t (air, ${MFR_MAT_LABEL[matClass]})${Number.isFinite(limit)?` · limite ${limit} t`:''}.`
+          :`Estimated tonnage ≈ ${tonsTxt} t (air, ${MFR_MAT_LABEL[matClass]})${Number.isFinite(limit)?` · limit ${limit} t`:''}.`});
+      }
+    }
+  }
+
+  return checks.length?checks:null;
+}
+
+function fmtLenIn(mm){
+  const n=Number(mm);
+  if(!Number.isFinite(n)) return '—';
+  return (+(n/25.4).toFixed(2))+'″';
+}
+
+function renderManufacturability(){
+  const el=E.smManufacturability;
+  if(!el) return;
+  const checks=computeManufacturability();
+  if(!checks){ el.hidden=true; el.innerHTML=''; return; }
+  const icon={error:'⛔',warn:'⚠',ok:'✓',info:'ℹ'};
+  const title=FR?'Fabricabilité (compagnie)':'Manufacturability (company)';
+  const rows=checks.map(c=>`<li class="mfr-${c.level}"><span class="mfr-ic">${icon[c.level]||'•'}</span><span>${mfrEscapeHtml(c.text)}</span></li>`).join('');
+  el.innerHTML=`<div class="mfr-title">${title}</div><ul class="mfr-list">${rows}</ul>`;
+  el.hidden=false;
 }
 
 
