@@ -111,3 +111,47 @@
 }
 .cs-account-nav a:hover { color: #eef6fa; border-color: #2c4351; }
 .cs-account-nav a.active { color: #35d19f; border-color: #35d19f44; background: #0b1e1744; }
+
+/* ── Capability param editors (v8.26) ── */
+.cs-param-block {
+  border: 1px solid #1e3040; border-radius: 11px; padding: 16px 18px;
+  margin-bottom: 14px; background: #0d1820;
+}
+.cs-param-block:last-child { margin-bottom: 0; }
+.cs-param-title { font-size: 14px; font-weight: 800; color: #35d19f; margin-bottom: 12px; }
+.cs-param-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.cs-param-row .cs-field { flex: 1 1 130px; }
+.cs-param-sub { font-size: 11px; letter-spacing: .1em; font-weight: 700; color: #6b8fa6; margin: 14px 0 8px; text-transform: uppercase; }
+.cs-matgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; }
+.cs-matrow {
+  display: flex; align-items: center; gap: 8px;
+  background: #081118; border: 1px solid #1e3040; border-radius: 8px; padding: 6px 10px;
+}
+.cs-matrow > span:first-child { flex: 1; font-size: 12px; color: #c8dce8; }
+.cs-matrow input { width: 74px; background: #0d1820; border: 1px solid #2c4351; border-radius: 6px; color: #eef6fa; padding: 5px 8px; font-size: 13px; outline: none; }
+.cs-matrow input:focus { border-color: #35d19f; }
+.cs-matrow .cs-unit { color: #6b8fa6; font-size: 12px; }
+
+/* ── Tooling (v8.26) ── */
+.cs-tool-section { margin-top: 20px; }
+.cs-tool-section:first-of-type { margin-top: 8px; }
+.cs-tool-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.cs-tool-head h3 { font-size: 14px; font-weight: 800; color: #eef6fa; margin: 0; }
+.cs-tool-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: #0d1820; border: 1px solid #1e3040; border-radius: 10px;
+  padding: 11px 15px; margin-bottom: 8px;
+}
+.cs-tool-card:hover { border-color: #2c4351; }
+.cs-tool-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cs-tool-main strong { font-size: 14px; color: #eef6fa; }
+.cs-tool-main span { font-size: 12px; color: #6b8fa6; }
+
+.cs-tool-form {
+  display: none; background: #0d1820; border: 1px solid #2c4351; border-radius: 10px;
+  padding: 18px; margin-top: 16px; gap: 12px; flex-wrap: wrap; align-items: flex-end;
+}
+.cs-tool-form.open { display: flex; }
+.cs-tool-form.is-die .cs-punch-only { display: none; }
+.cs-tool-form.is-punch .cs-die-only { display: none; }
+

@@ -39,6 +39,7 @@ import { sessionUser } from './lib/auth.js';
 import {
   getCompanyCapabilities, putCompanyCapabilities,
   getCompanyBendParams, putCompanyBendParam, deleteCompanyBendParam,
+  getCompanyTooling, putCompanyTooling, deleteCompanyTooling,
   getCompanySettingsAll
 } from './handlers/company.js';
 import { getOrganizationAudit } from './handlers/audit.js';
@@ -76,6 +77,7 @@ const API = Object.freeze({
   '/api/licensing/lease/release': { POST:releaseLease },
   '/api/company/capabilities':    { GET:getCompanyCapabilities, PUT:putCompanyCapabilities },
   '/api/company/bend-params':     { GET:getCompanyBendParams,   PUT:putCompanyBendParam   },
+  '/api/company/tooling':         { GET:getCompanyTooling,      PUT:putCompanyTooling     },
   '/api/company/settings':        { GET:getCompanySettingsAll }
 });
 
@@ -155,6 +157,12 @@ async function routeRequest(request,env,ctx){
   if(bendParamMatch){
     if(request.method!=='DELETE')return methodNotAllowed(['DELETE']);
     return deleteCompanyBendParam({request,env,ctx,paramId:bendParamMatch[1]});
+  }
+
+  const toolingMatch=url.pathname.match(/^\/api\/company\/tooling\/(\d+)$/);
+  if(toolingMatch){
+    if(request.method!=='DELETE')return methodNotAllowed(['DELETE']);
+    return deleteCompanyTooling({request,env,ctx,toolId:toolingMatch[1]});
   }
 
   if(url.pathname.startsWith('/api/'))return json({error:'API route not found.'},404);

@@ -64,7 +64,7 @@ export async function requireCompanyMember(request, env) {
 export async function getCapabilities(request, env) {
   const { organizationId } = await requireCompanyMember(request, env);
   const rows = await env.NAVOFLO_DB.prepare(`
-    SELECT process, enabled, notes, updated_at
+    SELECT process, enabled, notes, params_json, updated_at
     FROM organization_capabilities
     WHERE organization_id = ?
     ORDER BY id
@@ -74,14 +74,40 @@ export async function getCapabilities(request, env) {
   const stored = new Map((rows.results || []).map(r => [r.process, r]));
   const capabilities = KNOWN_PROCESSES.map(process => {
     const row = stored.get(process);
+    let params = null;
+    if (row?.params_json) { try { params = JSON.parse(row.params_json); } catch { params = null; } }
     return {
       process,
       enabled: row ? Boolean(row.enabled) : false,
       notes: row?.notes || null,
+      params,
       updated_at: row?.updated_at || null
     };
   });
   return json({ capabilities }, 200, { 'cache-control': 'no-store' });
+}
+
+// Validate + normalize the per-process params blob. Keeps only known fields
+// per process category so we never persist arbitrary client JSON.
+function sanitizeCapabilityParams(process, raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const pos = v => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : null; };
+  const CUTTING = new Set(['laser', 'plasma', 'waterjet', 'punching']);
+
+  if (CUTTING.has(process)) {
+    const materials = Array.isArray(raw.materials) ? raw.materials.slice(0, 10).map(m => ({
+      class: ['soft', 'medium', 'hard'].includes(m?.class) ? m.class : 'medium',
+      max_thickness_mm: pos(m?.max_thickness_mm)
+    })).filter(m => m.max_thickness_mm != null) : [];
+    return { kind: 'cutting', bed_width_mm: pos(raw.bed_width_mm), bed_length_mm: pos(raw.bed_length_mm), materials };
+  }
+  if (process === 'bending') {
+    return { kind: 'bending', max_bend_length_mm: pos(raw.max_bend_length_mm), max_tonnage: pos(raw.max_tonnage) };
+  }
+  if (process === 'rolling') {
+    return { kind: 'rolling', max_width_mm: pos(raw.max_width_mm), min_diameter_mm: pos(raw.min_diameter_mm), max_thickness_mm: pos(raw.max_thickness_mm) };
+  }
+  return null; // generic processes carry no structured params
 }
 
 export async function putCapabilities(request, env) {
@@ -96,15 +122,18 @@ export async function putCapabilities(request, env) {
     if (!KNOWN_PROCESSES.includes(process)) continue; // silently skip unknown
     const enabled = item.enabled ? 1 : 0;
     const notes = item.notes ? String(item.notes).slice(0, MAX_NOTES_LEN) : null;
+    const params = sanitizeCapabilityParams(process, item.params);
+    const paramsJson = params ? JSON.stringify(params) : null;
     stmts.push(env.NAVOFLO_DB.prepare(`
-      INSERT INTO organization_capabilities (organization_id, process, enabled, notes, updated_at, updated_by_user_id)
-      VALUES (?, ?, ?, ?, datetime('now'), ?)
+      INSERT INTO organization_capabilities (organization_id, process, enabled, notes, params_json, updated_at, updated_by_user_id)
+      VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
       ON CONFLICT(organization_id, process) DO UPDATE SET
         enabled = excluded.enabled,
         notes = excluded.notes,
+        params_json = excluded.params_json,
         updated_at = excluded.updated_at,
         updated_by_user_id = excluded.updated_by_user_id
-    `).bind(organizationId, process, enabled, notes, user.id));
+    `).bind(organizationId, process, enabled, notes, paramsJson, user.id));
   }
   if (stmts.length) await env.NAVOFLO_DB.batch(stmts);
   return json({ ok: true }, 200, { 'cache-control': 'no-store' });
@@ -202,6 +231,106 @@ export async function deleteBendParam(request, env, paramId) {
   `).bind(id, organizationId).first();
   if (!existing) throw companyError('Bend parameter not found.', 404, 'BEND_PARAM_NOT_FOUND');
   await env.NAVOFLO_DB.prepare(`DELETE FROM organization_bend_params WHERE id=? AND organization_id=?`)
+    .bind(id, organizationId).run();
+  return json({ ok: true }, 200, { 'cache-control': 'no-store' });
+}
+
+// ── Tooling (dies & punches) ─────────────────────────────────────────────────
+
+const MAX_TOOLING_ROWS = 200;
+
+function validateTooling(item) {
+  const toolType = String(item?.tool_type || '').trim().toLowerCase();
+  if (!['die', 'punch'].includes(toolType)) {
+    throw companyError('tool_type must be die or punch.', 400, 'INVALID_TOOL_TYPE');
+  }
+  const pos = v => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const intPos = v => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  return {
+    tool_type: toolType,
+    name: item?.name ? String(item.name).slice(0, 120) : null,
+    v_opening_mm: toolType === 'die' ? pos(item?.v_opening_mm) : null,
+    die_angle_deg: toolType === 'die' ? pos(item?.die_angle_deg) : null,
+    punch_radius_mm: toolType === 'punch' ? pos(item?.punch_radius_mm) : null,
+    punch_angle_deg: toolType === 'punch' ? pos(item?.punch_angle_deg) : null,
+    length_mm: pos(item?.length_mm),
+    max_tonnage: pos(item?.max_tonnage),
+    quantity: intPos(item?.quantity),
+    notes: item?.notes ? String(item.notes).slice(0, MAX_NOTES_LEN) : null
+  };
+}
+
+export async function getTooling(request, env) {
+  const { organizationId } = await requireCompanyMember(request, env);
+  const rows = await env.NAVOFLO_DB.prepare(`
+    SELECT id, tool_type, name, v_opening_mm, die_angle_deg, punch_radius_mm,
+           punch_angle_deg, length_mm, max_tonnage, quantity, notes, updated_at
+    FROM organization_tooling
+    WHERE organization_id = ?
+    ORDER BY tool_type, v_opening_mm, punch_radius_mm, id
+  `).bind(organizationId).all();
+  return json({ tooling: rows.results || [] }, 200, { 'cache-control': 'no-store' });
+}
+
+export async function putTooling(request, env) {
+  const { organizationId, user } = await requireCompanyAdmin(request, env);
+  const body = await request.json().catch(() => ({}));
+
+  const count = await env.NAVOFLO_DB.prepare(`
+    SELECT COUNT(*) AS n FROM organization_tooling WHERE organization_id = ?
+  `).bind(organizationId).first();
+  const id = body.id ? Number(body.id) : null;
+  if (!id && Number(count?.n || 0) >= MAX_TOOLING_ROWS) {
+    throw companyError(`Maximum ${MAX_TOOLING_ROWS} tooling rows allowed.`, 400, 'TOO_MANY_TOOLING');
+  }
+
+  const p = validateTooling(body);
+
+  if (id) {
+    const existing = await env.NAVOFLO_DB.prepare(`
+      SELECT id FROM organization_tooling WHERE id = ? AND organization_id = ? LIMIT 1
+    `).bind(id, organizationId).first();
+    if (!existing) throw companyError('Tooling not found.', 404, 'TOOLING_NOT_FOUND');
+    await env.NAVOFLO_DB.prepare(`
+      UPDATE organization_tooling SET
+        tool_type=?, name=?, v_opening_mm=?, die_angle_deg=?, punch_radius_mm=?,
+        punch_angle_deg=?, length_mm=?, max_tonnage=?, quantity=?, notes=?,
+        updated_at=datetime('now'), updated_by_user_id=?
+      WHERE id=? AND organization_id=?
+    `).bind(p.tool_type, p.name, p.v_opening_mm, p.die_angle_deg, p.punch_radius_mm,
+            p.punch_angle_deg, p.length_mm, p.max_tonnage, p.quantity, p.notes,
+            user.id, id, organizationId).run();
+    return json({ ok: true, id }, 200, { 'cache-control': 'no-store' });
+  } else {
+    const result = await env.NAVOFLO_DB.prepare(`
+      INSERT INTO organization_tooling (
+        organization_id, tool_type, name, v_opening_mm, die_angle_deg, punch_radius_mm,
+        punch_angle_deg, length_mm, max_tonnage, quantity, notes,
+        updated_at, updated_by_user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+    `).bind(organizationId, p.tool_type, p.name, p.v_opening_mm, p.die_angle_deg, p.punch_radius_mm,
+            p.punch_angle_deg, p.length_mm, p.max_tonnage, p.quantity, p.notes, user.id).run();
+    return json({ ok: true, id: result.meta?.last_row_id }, 201, { 'cache-control': 'no-store' });
+  }
+}
+
+export async function deleteTooling(request, env, toolId) {
+  const { organizationId } = await requireCompanyAdmin(request, env);
+  const id = Number(toolId);
+  if (!id) throw companyError('Invalid tooling ID.', 400, 'INVALID_ID');
+  const existing = await env.NAVOFLO_DB.prepare(`
+    SELECT id FROM organization_tooling WHERE id = ? AND organization_id = ? LIMIT 1
+  `).bind(id, organizationId).first();
+  if (!existing) throw companyError('Tooling not found.', 404, 'TOOLING_NOT_FOUND');
+  await env.NAVOFLO_DB.prepare(`DELETE FROM organization_tooling WHERE id=? AND organization_id=?`)
     .bind(id, organizationId).run();
   return json({ ok: true }, 200, { 'cache-control': 'no-store' });
 }
